@@ -30,6 +30,21 @@ pub struct CheckoutContext {
     /// admin from /admin/settings.
     #[serde(default)]
     pub free_delivery_threshold_cents: i64,
+    /// Snapshot of the shop's address line ("Wolfsberger Str. 18, 59348
+    /// Lüdinghausen") for the pickup-instructions hint at the bottom of
+    /// the form. Empty when the admin hasn't filled in /admin/branding.
+    /// Read inside the SAME server-fn that builds the rest of the
+    /// checkout context — that way SSR and hydrate render identical
+    /// DOM (the value travels through the resource, not via
+    /// per-context BrandingHandle reads which would diverge between
+    /// SSR and hydrate).
+    #[serde(default)]
+    pub shop_address_line: String,
+    /// Same rationale: the customer's city field pre-fills with the
+    /// shop's city. Travels through the resource so SSR and hydrate
+    /// produce the same `<input value="...">` attribute.
+    #[serde(default)]
+    pub shop_city: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1399,6 +1414,16 @@ pub async fn load_checkout_context() -> Result<CheckoutContext, ServerFnError> {
     let free_delivery_threshold_cents =
         crate::pages::settings::ssr::free_delivery_threshold_cents(&db).await;
 
+    // Snapshot the bits of branding we need into the resource payload so
+    // the form's SSR + hydrate render identical DOM. Reading
+    // `BrandingHandle` directly inside the component would diverge —
+    // SSR sees the cached values, hydrate sees `Branding::default()`,
+    // and the resulting `<input value=…>` / conditional `<p>` blocks
+    // mismatch → tachys hydration panics.
+    let branding = use_context::<crate::branding::BrandingHandle>()
+        .map(|h| h.get())
+        .unwrap_or_default();
+
     Ok(CheckoutContext {
         slots,
         asap_minutes: ssr::ASAP_DEFAULT_MIN,
@@ -1407,6 +1432,8 @@ pub async fn load_checkout_context() -> Result<CheckoutContext, ServerFnError> {
         line_count: cart.lines.iter().map(|l| l.quantity).sum(),
         delivery_zones: zones,
         free_delivery_threshold_cents,
+        shop_address_line: branding.full_address(),
+        shop_city: branding.shop_city,
     })
 }
 
@@ -2925,14 +2952,10 @@ fn Form(
     let pending = placer.pending();
     let value = placer.value();
 
-    // Pickup-address hint text from BrandingHandle. Empty when the
-    // shop hasn't set a street + city yet.
-    #[cfg(feature = "ssr")]
-    let checkout_address_line = use_context::<crate::branding::BrandingHandle>()
-        .map(|h| h.get().full_address())
-        .unwrap_or_default();
-    #[cfg(not(feature = "ssr"))]
-    let checkout_address_line = String::new();
+    // Pickup-address hint text comes from the resource payload (see
+    // CheckoutContext), NOT from BrandingHandle directly — that way
+    // SSR and hydrate render identical DOM. Pulling it via cfg-gated
+    // context reads diverged once branding had non-empty values.
 
     let CheckoutContext {
         slots,
@@ -2942,6 +2965,8 @@ fn Form(
         line_count,
         delivery_zones,
         free_delivery_threshold_cents,
+        shop_address_line: checkout_address_line,
+        shop_city: default_city_from_ctx,
     } = ctx;
 
     let slots_for_dropdown = slots.clone();
@@ -3040,15 +3065,12 @@ fn Form(
     let street_sig = RwSignal::new(String::new());
     let house_sig = RwSignal::new(String::new());
     let postcode_sig = RwSignal::new(String::new());
-    // Pre-fill the city field with the shop's configured city so customers
-    // don't retype it (most orders come from the shop's own city anyway).
-    #[cfg(feature = "ssr")]
-    let default_city = use_context::<crate::branding::BrandingHandle>()
-        .map(|h| h.get().shop_city)
-        .unwrap_or_default();
-    #[cfg(not(feature = "ssr"))]
-    let default_city = String::new();
-    let city_sig = RwSignal::new(default_city);
+    // Pre-fill the city field with the shop's configured city. Comes
+    // through CheckoutContext (the resource), not a per-context
+    // BrandingHandle read — that way SSR and hydrate render the same
+    // `<input value="…">`. Mismatched defaults panicked tachys at
+    // hydration once branding had non-empty values.
+    let city_sig = RwSignal::new(default_city_from_ctx);
     let address_notes_sig = RwSignal::new(String::new());
 
     // Saved-address chips for known customers (most-recent first; the most
