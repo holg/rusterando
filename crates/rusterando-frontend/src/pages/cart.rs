@@ -191,8 +191,25 @@ pub async fn add_to_cart(
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
     // Look up the item and decide which price applies.
-    let row: (i64, Option<i64>, Option<String>, Option<String>, i64, String) = sqlx::query_as(
-        "SELECT price_small_cents, price_large_cents, size_small_label, size_large_label, is_available, name
+    // Tail two columns drive the per-item flat-extras model:
+    //   * `included_extras_count` — first N extras free.
+    //   * `flat_extra_price_cents` — flat per-extra charge when set.
+    //                                NULL = use pizza_extras catalog.
+    type MenuItemRow = (
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        i64,
+        Option<i64>,
+    );
+    let row: MenuItemRow = sqlx::query_as(
+        "SELECT price_small_cents, price_large_cents,
+                size_small_label, size_large_label,
+                is_available, name,
+                included_extras_count, flat_extra_price_cents
          FROM menu_items WHERE id = ?1",
     )
     .bind(&menu_item_id)
@@ -200,7 +217,16 @@ pub async fn add_to_cart(
     .await
     .map_err(|e| ServerFnError::new(format!("Artikel nicht gefunden: {e}")))?;
 
-    let (small, large, small_label, large_label, available, _name) = row;
+    let (
+        small,
+        large,
+        small_label,
+        large_label,
+        available,
+        _name,
+        included_extras_count,
+        flat_extra_price_cents,
+    ) = row;
     if available == 0 {
         return Err(ServerFnError::new("Artikel derzeit nicht verfügbar"));
     }
@@ -221,6 +247,11 @@ pub async fn add_to_cart(
     // and price into the cart line so subsequent admin price edits don't
     // rewrite the customer's order. Unknown / unavailable ids are silently
     // dropped — better than a 500 if the catalog has changed mid-session.
+    //
+    // The DB returns rows in catalog sort_order, but we want to preserve
+    // the customer's TICK order so the per-item "first N free" rule
+    // applies to what they actually picked first. Re-sort by index in
+    // `extras_ids` after the fetch.
     let extras_snapshot: Vec<CartExtra> = if extras_ids.is_empty() {
         Vec::new()
     } else {
@@ -228,14 +259,13 @@ pub async fn add_to_cart(
         let q = format!(
             "SELECT id, label, price_cents
              FROM pizza_extras
-             WHERE is_available = 1 AND id IN ({placeholders})
-             ORDER BY sort_order, label"
+             WHERE is_available = 1 AND id IN ({placeholders})"
         );
         let mut query = sqlx::query_as::<_, (String, String, i64)>(&q);
         for id in &extras_ids {
             query = query.bind(id);
         }
-        query
+        let mut catalog: Vec<CartExtra> = query
             .fetch_all(&db)
             .await
             .map_err(|e| ServerFnError::new(format!("resolve extras: {e}")))?
@@ -245,7 +275,33 @@ pub async fn add_to_cart(
                 label,
                 price_cents,
             })
-            .collect()
+            .collect();
+
+        // Re-sort to match the customer's selection order.
+        let order_index: std::collections::HashMap<&str, usize> = extras_ids
+            .iter()
+            .enumerate()
+            .map(|(i, id)| (id.as_str(), i))
+            .collect();
+        catalog.sort_by_key(|e| {
+            order_index
+                .get(e.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+
+        // Apply the per-item flat-pricing rule when set:
+        //   * first `included_extras_count` get price_cents = 0 (free).
+        //   * the rest get price_cents = flat_extra_price_cents.
+        // When `flat_extra_price_cents` is NULL we keep the catalog
+        // prices (existing behaviour for normal pizzas).
+        if let Some(flat) = flat_extra_price_cents {
+            let included = included_extras_count.max(0) as usize;
+            for (idx, e) in catalog.iter_mut().enumerate() {
+                e.price_cents = if idx < included { 0 } else { flat };
+            }
+        }
+        catalog
     };
     let extras_json = if extras_snapshot.is_empty() {
         None

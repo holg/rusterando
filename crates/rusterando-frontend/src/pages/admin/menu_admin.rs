@@ -30,6 +30,8 @@ pub async fn update_menu_item(
     is_available: bool,
     is_listed: bool,
     is_spicy: bool,
+    included_extras_count: i64,
+    flat_extra_price_cents: Option<i64>,
 ) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
 
@@ -41,6 +43,14 @@ pub async fn update_menu_item(
     }
     if price_small_cents < 0 || price_large_cents.unwrap_or(0) < 0 {
         return Err(ServerFnError::new("Preis darf nicht negativ sein"));
+    }
+    if included_extras_count < 0 {
+        return Err(ServerFnError::new("Inkl. Extras darf nicht negativ sein"));
+    }
+    if flat_extra_price_cents.unwrap_or(0) < 0 {
+        return Err(ServerFnError::new(
+            "Pauschalpreis pro Extra darf nicht negativ sein",
+        ));
     }
     let menu_number = menu_number
         .map(|s| s.trim().to_string())
@@ -67,8 +77,10 @@ pub async fn update_menu_item(
              is_available = ?9,
              is_listed = ?10,
              is_spicy = ?11,
+             included_extras_count = ?12,
+             flat_extra_price_cents = ?13,
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?12",
+         WHERE id = ?14",
     )
     .bind(&category_id)
     .bind(&menu_number)
@@ -81,6 +93,8 @@ pub async fn update_menu_item(
     .bind(if is_available { 1_i64 } else { 0_i64 })
     .bind(if is_listed { 1_i64 } else { 0_i64 })
     .bind(if is_spicy { 1_i64 } else { 0_i64 })
+    .bind(included_extras_count)
+    .bind(flat_extra_price_cents)
     .bind(&id)
     .execute(&db)
     .await
@@ -336,6 +350,12 @@ fn ItemCard(
     let is_available = RwSignal::new(it.is_available);
     let is_listed = RwSignal::new(it.is_listed);
     let is_spicy = RwSignal::new(it.is_spicy);
+    // Per-item flat extra pricing — see migration 20260510000006.
+    // `included_extras_count`: how many extras are free.
+    // `flat_extra_price`: per-extra flat charge (cents); 0 means
+    // "fall back to pizza_extras catalog" (encoded as None on the wire).
+    let included_extras = RwSignal::new(it.included_extras_count);
+    let flat_extra_price = RwSignal::new(it.flat_extra_price_cents.unwrap_or(0));
 
     let on_save = {
         let id = id.clone();
@@ -357,6 +377,16 @@ fn ItemCard(
                 is_available: is_available.get(),
                 is_listed: is_listed.get(),
                 is_spicy: is_spicy.get(),
+                included_extras_count: included_extras.get(),
+                // 0 cents → no flat rule (fall back to catalog).
+                flat_extra_price_cents: {
+                    let p = flat_extra_price.get();
+                    if p > 0 {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                },
             });
         }
     };
@@ -429,6 +459,47 @@ fn ItemCard(
             </div>
             <CodePicker label="Allergene".to_string() entries=allergens selected=allergen_set/>
             <CodePicker label="Zusatzstoffe".to_string() entries=additives selected=additive_set/>
+
+            // Per-item flat extra pricing. When `Pauschalpreis` is 0,
+            // the item falls back to the global pizza_extras catalog
+            // prices (Krabben €1, Lachs €2, sonstige €0.70). When > 0,
+            // every selected extra costs that flat amount, except for
+            // the first `Inkl. Extras` selections which are free.
+            // Pizzablech: 3 inkl., €3 pauschal. Pizza 36 cm: 0 inkl., €1 pauschal.
+            <div class="row1">
+                <label>
+                    <span>"Inkl. Extras"</span>
+                    <input type="number" min="0" step="1"
+                        prop:value=move || included_extras.get()
+                        on:input=move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<i64>() {
+                                included_extras.set(v.max(0));
+                            }
+                        }/>
+                    <small class="hint">"Wieviele Extras sind inklusive (gratis)?"</small>
+                </label>
+                <label>
+                    <span>"Pauschalpreis pro Extra (Cent)"</span>
+                    <input type="number" min="0" step="10"
+                        prop:value=move || flat_extra_price.get()
+                        on:input=move |ev| {
+                            if let Ok(v) = event_target_value(&ev).parse::<i64>() {
+                                flat_extra_price.set(v.max(0));
+                            }
+                        }/>
+                    <small class="hint">
+                        {move || {
+                            let p = flat_extra_price.get();
+                            if p == 0 {
+                                "0 = Katalogpreise verwenden".to_string()
+                            } else {
+                                format!("{} pro Extra", format_eur(p))
+                            }
+                        }}
+                    </small>
+                </label>
+            </div>
+
             <div class="flags">
                 <label class="flag">
                     <input type="checkbox"

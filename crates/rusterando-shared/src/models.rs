@@ -26,6 +26,18 @@ pub struct MenuItem {
     #[serde(default = "default_listed")]
     pub is_listed: bool,
     pub sort_order: i64,
+    /// Number of pizza_extras the customer can pick at no charge before
+    /// the per-extra fee starts. 0 means "no freebies, charge everything".
+    /// See `flat_extra_price_cents`.
+    #[serde(default)]
+    pub included_extras_count: i64,
+    /// Per-extra flat charge in cents. `None` means "fall back to the
+    /// pizza_extras catalog price" (existing behaviour for normal pizzas).
+    /// `Some(n)` means every extra costs `n` cents past the included
+    /// count, regardless of catalog price (used by Pizzablech: 3 free,
+    /// then €3 each; by 36 cm pizza: 0 free, €1 each).
+    #[serde(default)]
+    pub flat_extra_price_cents: Option<i64>,
 }
 
 fn default_listed() -> bool {

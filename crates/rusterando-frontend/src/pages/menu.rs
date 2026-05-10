@@ -128,81 +128,69 @@ pub async fn list_admin_menu() -> Result<MenuPayload, ServerFnError> {
 /// to listed items only (`is_listed = 1`).
 #[cfg(feature = "ssr")]
 async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>, ServerFnError> {
+    // sqlx's tuple FromRow tops out at 16 elements; we have 18, so use
+    // a private struct with #[derive(sqlx::FromRow)].
+    #[derive(sqlx::FromRow)]
+    struct ItemRow {
+        id: String,
+        category_id: String,
+        menu_number: Option<String>,
+        name: String,
+        description: Option<String>,
+        item_type: String,
+        price_small_cents: i64,
+        price_large_cents: Option<i64>,
+        size_small_label: Option<String>,
+        size_large_label: Option<String>,
+        allergen_codes: Option<String>,
+        additive_codes: Option<String>,
+        is_spicy: i64,
+        is_available: i64,
+        is_listed: i64,
+        sort_order: i64,
+        included_extras_count: i64,
+        flat_extra_price_cents: Option<i64>,
+    }
+
     let where_clause = if admin { "" } else { "WHERE is_listed = 1" };
     let sql = format!(
         "SELECT id, category_id, menu_number, name, description, item_type,
                 price_small_cents, price_large_cents, size_small_label, size_large_label,
-                allergen_codes, additive_codes, is_spicy, is_available, is_listed, sort_order
+                allergen_codes, additive_codes, is_spicy, is_available, is_listed, sort_order,
+                included_extras_count, flat_extra_price_cents
          FROM menu_items
          {where_clause}
          ORDER BY sort_order,
                   CAST(COALESCE(menu_number, '') AS INTEGER),
                   menu_number"
     );
-    let item_rows = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<String>,
-            String,
-            Option<String>,
-            String,
-            i64,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-            i64,
-            i64,
-            i64,
-        ),
-    >(&sql)
-    .fetch_all(db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("load items: {e}")))?;
+    let item_rows = sqlx::query_as::<_, ItemRow>(&sql)
+        .fetch_all(db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("load items: {e}")))?;
 
     Ok(item_rows
         .into_iter()
-        .map(
-            |(
-                id,
-                category_id,
-                menu_number,
-                name,
-                description,
-                item_type,
-                price_small_cents,
-                price_large_cents,
-                size_small_label,
-                size_large_label,
-                allergen_codes,
-                additive_codes,
-                is_spicy,
-                is_available,
-                is_listed,
-                sort_order,
-            )| MenuItem {
-                id,
-                category_id,
-                menu_number,
-                name,
-                description,
-                item_type,
-                price_small_cents,
-                price_large_cents,
-                size_small_label,
-                size_large_label,
-                allergen_codes,
-                additive_codes,
-                is_spicy: is_spicy != 0,
-                is_available: is_available != 0,
-                is_listed: is_listed != 0,
-                sort_order,
-            },
-        )
+        .map(|r| MenuItem {
+            id: r.id,
+            category_id: r.category_id,
+            menu_number: r.menu_number,
+            name: r.name,
+            description: r.description,
+            item_type: r.item_type,
+            price_small_cents: r.price_small_cents,
+            price_large_cents: r.price_large_cents,
+            size_small_label: r.size_small_label,
+            size_large_label: r.size_large_label,
+            allergen_codes: r.allergen_codes,
+            additive_codes: r.additive_codes,
+            is_spicy: r.is_spicy != 0,
+            is_available: r.is_available != 0,
+            is_listed: r.is_listed != 0,
+            sort_order: r.sort_order,
+            included_extras_count: r.included_extras_count,
+            flat_extra_price_cents: r.flat_extra_price_cents,
+        })
         .collect())
 }
 
