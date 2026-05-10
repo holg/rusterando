@@ -1,0 +1,129 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rusterando-app",
+    "crates/rusterando-frontend",
+    "crates/rusterando-server",
+    "crates/rusterando-shared",
+]
+# src-tauri/ is the legacy Tauri WebView shell, archived in favour of the
+# native iOS / Android apps. Keep the source on disk but exclude it from
+# the workspace so it doesn't drag dev-deps into a fresh checkout.
+exclude = ["src-tauri"]
+
+# Default release profile — fast iteration. Thin LTO + multi-unit codegen
+# combined with bin-side `CARGO_INCREMENTAL=1` (set in
+# `scripts/cross_build_on_mac.sh`) turns "edit one server file" cross-build
+# rebuilds into tens of seconds. Use `release-prod` for milestone cuts.
+[profile.release]
+codegen-units = 16
+lto = "thin"
+opt-level = 'z'
+
+# Milestone profile for tagged production cuts: fat LTO + single codegen
+# unit across the whole graph for the smallest binary and tightest runtime.
+[profile.release-prod]
+inherits = "release"
+codegen-units = 1
+lto = "fat"
+opt-level = 'z'
+strip = "symbols"
+
+[workspace.dependencies]
+# Leptos 0.8
+leptos = { version = "0.8" }
+leptos_meta = { version = "0.8" }
+leptos_router = { version = "0.8" }
+leptos_axum = { version = "0.8" }
+
+# Axum 0.8 — `multipart` enables `axum::extract::Multipart` used by the
+# image-upload route in /api/admin/upload_image.
+axum = { version = "0.8", features = ["multipart"] }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["full"] }
+tower-http = { version = "0.6", features = ["full"] }
+tower-sessions = { version = "0.14", features = ["memory-store"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "migrate"] }
+
+# Payments
+async-stripe = { version = "0.39", features = ["runtime-tokio-hyper-rustls", "checkout", "webhook-events"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# Auth & Security
+argon2 = "0.5"
+rand = "0.8"
+uuid = { version = "1", features = ["v4", "serde", "js"] }
+
+# Email
+lettre = { version = "0.11", features = ["tokio1-native-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config
+dotenvy = "0.15"
+
+# Errors
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = "0.4"
+
+# WASM
+wasm-bindgen = "=0.2.114"
+console_error_panic_hook = "0.1"
+console_log = "1"
+
+# Misc
+cfg-if = "1"
+http = "1"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Internal crates
+rusterando-app = { path = "crates/rusterando-app" }
+rusterando-frontend = { path = "crates/rusterando-frontend" }
+rusterando-server = { path = "crates/rusterando-server" }
+rusterando-shared = { path = "crates/rusterando-shared" }
+
+# See https://github.com/leptos-rs/cargo-leptos for documentation of all the parameters.
+[[workspace.metadata.leptos]]
+name = "rusterando"
+bin-package = "rusterando-server"
+bin-target = "rusterando-server"
+lib-package = "rusterando-frontend"
+site-root = "target/site"
+site-pkg-dir = "pkg"
+style-file = "style/main.scss"
+tailwind-input-file = "tailwind.css"
+tailwind-config-file = "tailwind.config.js"
+assets-dir = "public"
+site-addr = "127.0.0.1:3001"
+reload-port = 3002
+end2end-cmd = "npx playwright test"
+end2end-dir = "end2end"
+browserquery = "defaults"
+hash-files = true
+watch = false
+env = "DEV"
+bin-features = []
+bin-default-features = false
+lib-features = ["hydrate"]
+lib-default-features = false
+
+# Both bin and lib compile under our `release-prod` profile (fat LTO,
+# codegen-units=1) when `cargo leptos build --release` runs. cargo-leptos
+# 0.3.6 derives the wasm-bindgen artifact path from these metadata
+# values, so they must match the actual cargo profile or wasm-bindgen
+# fails with "No such file or directory" on the wasm.
+lib-profile-release = "release-prod"
+bin-profile-release = "release-prod"

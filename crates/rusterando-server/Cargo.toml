@@ -1,0 +1,55 @@
+[package]
+name = "rusterando-server"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+# Upstream default — Davids' deployment overlay rewrites this back to
+# `davidspizzeria-server` before building so the on-server systemd unit
+# and existing prod paths don't have to change.
+name = "rusterando-server"
+path = "src/main.rs"
+
+[build-dependencies]
+ureq = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dependencies]
+rusterando-shared = { workspace = true }
+rusterando-frontend = { workspace = true, features = ["ssr"] }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+leptos = { workspace = true, features = ["ssr"] }
+leptos_axum = { workspace = true }
+leptos_meta = { workspace = true, features = ["ssr"] }
+leptos_router = { workspace = true, features = ["ssr"] }
+
+sqlx = { workspace = true }
+tower-cookies = "0.11"
+qrcode = { workspace = true }
+chrono = { workspace = true }
+async-stripe = { workspace = true }
+reqwest = { workspace = true }
+# APNs HTTP/2 client. Token-based auth (.p8 key) — see APNS_KEY_PATH env.
+apns-h2 = { version = "0.11", default-features = false, features = ["aws-lc-rs", "pem"] }
+async-trait = "0.1"
+# Content-hash filename for /api/admin/upload_image so duplicates dedupe.
+sha2 = "0.10"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+dotenvy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+http = { workspace = true }
+anyhow = { workspace = true }
+typst = "0.14"
+typst-pdf = "0.14"
+typst-kit = { version = "0.14", features = ["embed-fonts"] }
+ecow = "0.2"
+comemo = "0.4"

@@ -1,0 +1,19 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["TEAMID0001.com.example.shop"],
+        "comment": "Replace TEAMID0001 with your 10-char Apple team id and com.example.shop with your iOS app's bundle id. The server bakes this file into the binary at compile time via include_bytes! (see crates/rusterando-server/src/main.rs), so a rebuild is required after editing.",
+        "components": [
+          { "/": "/orders/*",  "comment": "deep-link to a specific order confirmation" },
+          { "/": "/admin/*",   "comment": "admin pages open in-app for staff" },
+          { "/": "/kitchen/*", "comment": "kitchen view for cooks" },
+          { "/": "/driver/*",  "comment": "driver tour board" }
+        ]
+      }
+    ]
+  },
+  "webcredentials": {
+    "apps": ["TEAMID0001.com.example.shop"]
+  }
+}

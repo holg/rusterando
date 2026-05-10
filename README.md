@@ -1,0 +1,446 @@
+# Rusterando
+
+> **A self-hostable, open-source restaurant + delivery platform written in Rust.**
+> Online menu, cart, checkout (cash + Stripe), kitchen board, driver tour
+> optimisation, push notifications, printable PDF menu, multi-role staff
+> tooling, and an admin UI to edit it all without redeploying.
+
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Rust](https://img.shields.io/badge/Rust-edition_2021-orange.svg)](https://www.rust-lang.org/)
+[![Leptos](https://img.shields.io/badge/Leptos-0.8_SSR-green.svg)](https://leptos.dev/)
+
+---
+
+## What is it for?
+
+A neighbourhood pizzeria, a takeaway shop, or a small chain that:
+
+- wants its own website and online ordering instead of paying 14% per order to
+  a marketplace,
+- needs a kitchen view, a delivery dispatcher, and a way to push notifications
+  to staff phones,
+- runs on one box (a €5/month VPS is plenty for hundreds of orders a day),
+- prefers AGPL self-hosting to a SaaS vendor.
+
+Rusterando is the platform Davids Pizzeria has been running on since early 2026.
+The codebase was generalised and re-licenced once it became clear other shops
+could use the same shape.
+
+## Highlights
+
+- **Pure Rust full stack.** Leptos 0.8 SSR + hydration on the client side,
+  Axum on the server, sqlx + SQLite for storage, Stripe for payments,
+  apns-h2 for iOS push, Typst for the printed menu PDF.
+- **Single binary, single SQLite file.** Deploy is `rsync + systemd restart`.
+  No Postgres, no Redis, no JS toolchain, no container runtime. ~72 MB
+  release binary that boots in milliseconds.
+- **One deployment, one `.env`.** Everything tenant-specific (shop name,
+  domain, payment keys, push keys, DB path) lives in one file. The same
+  source tree runs Davids Pizzeria, the next shop, your dev box.
+- **Editable in production.** Hero copy, photos, offer cards, the gallery,
+  the delivery zones, the free-delivery threshold, the colour theme —
+  all live in `app_settings` and `home_*` tables. The admin edits them
+  via `/admin/home`, `/admin/branding`, `/admin/settings`. No redeploy.
+- **Real iOS app.** A native Swift WebView shell (`ios-app/`) wraps the
+  site and adds APNs push, persistent staff cookies, a role keychain,
+  and a settings sheet. Distributed via TestFlight today; Android +
+  FCM is on the roadmap.
+- **Multi-role staff sign-in.** Customer (no auth), Admin, Kitchen, Driver.
+  One device can hold all three staff passwords in iOS Keychain and
+  switch in one tap from the gear FAB.
+- **Order lifecycle covered.** Cart → checkout (cash or Stripe Payment
+  Element) → kitchen board → driver tour (with OpenRouteService route
+  optimisation) → SMTP confirmation email → audit trail in the
+  bookkeeping page (`/admin/history`) with CSV export.
+
+## Screenshots
+
+(*Not yet — the davidspizzeria.de live site is the reference.*)
+
+## Architecture
+
+```
+                         ┌─────────────────────┐
+        Browser ─────────│  Axum + Leptos SSR  │─────── Stripe webhook
+                         │  (rusterando-server)│        SMTP (lettre)
+                         │                     │        APNs (apns-h2)
+                         │  ┌───────────────┐  │        ORS routing API
+                         │  │ rusterando-   │  │
+                         │  │ frontend lib  │  │
+                         │  │ (Leptos       │  │
+                         │  │  components,  │  │
+                         │  │  server fns)  │  │
+                         │  └───────────────┘  │
+                         └──────────┬──────────┘
+                                    │ sqlx
+                         ┌──────────▼──────────┐
+                         │  SQLite             │
+                         │  data/<name>.db     │
+                         └─────────────────────┘
+```
+
+Crates in the workspace:
+
+| Crate | Role |
+|---|---|
+| `rusterando-shared` | Pure-Rust types shared between server and frontend (cart, menu, orders). No I/O. |
+| `rusterando-frontend` | Leptos components + `#[server]` functions. Compiles to **WASM** (hydrate) and **native** (SSR). |
+| `rusterando-server` | Axum HTTP server. Wires Leptos SSR, sqlx, Stripe, APNs, SMTP, the static asset handler, the upload endpoint. |
+| `rusterando-app` | Tiny placeholder for legacy desktop targets — currently not used. |
+
+The site is **fully server-rendered first, then hydrated**. Search engines and
+slow phones see a complete page in the first byte. The cart and any
+client-only interactivity (Stripe Payment Element, image upload, sticky cart
+drawer) come alive after hydration.
+
+### Why these choices
+
+- **Leptos 0.8 over Yew/Sycamore/Dioxus.** Leptos has the most mature SSR
+  story in Rust today: real streaming SSR, server functions that look like
+  ordinary `async fn`s, and a hydration model that survives full-fat
+  server-rendered HTML without needing a separate API surface.
+- **SQLite over Postgres.** Single-file backups (`zip data/`), zero
+  operational overhead, fast enough for a single-shop workload by
+  several orders of magnitude. We lose nothing here.
+- **No Docker.** A static binary + a systemd unit + a `.env` is simpler to
+  reason about, faster to deploy, and easier to debug than any container
+  runtime. Migrations run automatically at server start via
+  `sqlx::migrate!()`.
+- **Typst over LaTeX/wkhtmltopdf.** The printed menu is a single
+  `templates/menu.typ` file, the binary embeds the Typst engine, fonts are
+  baked into the binary at build time (see `crates/rusterando-server/build.rs`),
+  and the PDF renders byte-identically across machines.
+
+## Repository layout
+
+```
+.
+├── Cargo.toml                   workspace + cargo-leptos metadata
+├── .env.example                 every supported env var, with explanations
+├── .env                         your local secrets (gitignored)
+├── crates/
+│   ├── rusterando-shared/       cart / order / menu types
+│   ├── rusterando-frontend/     Leptos pages + components + server fns
+│   ├── rusterando-server/       Axum + Leptos host, Stripe / APNs / SMTP
+│   └── rusterando-app/          (unused)
+├── migrations/                  sqlx migrations applied at boot
+├── style/main.scss              SCSS source for site CSS
+├── public/                      static assets shipped under /
+│   ├── img/                     pizza-1.jpg, ladenfront.jpg, …
+│   └── .well-known/             apple-app-site-association (Universal Links)
+├── templates/menu.typ           printable menu (Typst)
+├── ios-app/                     native Swift WebView shell
+├── scripts/
+│   ├── deploy_to_server.sh      .env-driven deploy (rsync + systemd)
+│   ├── cross_build_on_mac.sh    Mac → Linux release-prod cross-build
+│   └── test-ci-locally.sh       fmt + clippy + check (SSR + WASM)
+└── docs/                        deeper deployment + architecture notes
+```
+
+## Quickstart (local dev)
+
+You need: Rust stable, `cargo-leptos`, and `sass` on your `$PATH`.
+
+```bash
+# 1. clone
+git clone https://github.com/holg/rusterando
+cd rusterando
+
+# 2. install build helpers
+cargo install cargo-leptos sass
+
+# 3. minimal .env so the dev server can boot
+cat > .env <<'EOF'
+APP_NAME=rusterando-server
+DATABASE_URL=sqlite:./data/rusterando.db
+ADMIN_PASSWORD=devadmin
+KITCHEN_PASSWORD=devkitchen
+DRIVER_PASSWORD=devdriver
+PUBLIC_URL=http://127.0.0.1:3001
+EOF
+
+# 4. run — migrations + asset build all happen automatically
+cargo leptos serve
+# → open http://127.0.0.1:3001
+```
+
+First visit creates `./data/rusterando.db` and seeds default rows
+(empty branding, the warm theme, no offers, no menu, no delivery zones).
+Sign in at `/admin/login` with `ADMIN_PASSWORD` and start filling in:
+
+1. **`/admin/branding`** — shop name, address, phone, email.
+2. **`/admin/menu`** — categories, items, sizes.
+3. **`/admin/extras`** — pizza toppings.
+4. **`/admin/settings`** — free-delivery threshold, theme.
+5. **`/admin/home`** — hero photo, two offer cards, gallery photos.
+
+Add delivery zones via the SQLite shell or a future `/admin/zones` page
+(currently seeded by hand — see `docs/delivery_zones_and_routing.md`).
+
+## Configuration: every `.env` key
+
+Rusterando is configured **entirely through `.env`**. No build-time flags,
+no per-shop overlay scripts. The same source tree powers every deployment;
+only `.env` changes.
+
+### Naming + paths
+
+| Key | Default | Example (Davids) | Meaning |
+|---|---|---|---|
+| `APP_NAME` | `rusterando-server` | `davidspizzeria-server` | Binary filename on disk and systemd unit name. The deploy script renames `target/.../rusterando-server` → `$APP_NAME` during rsync, so the on-server filename stays stable for the life of the deployment. |
+| `BIN_NAME` | (unset) | `davidspizzeria-server` | Optional alias for `APP_NAME`. |
+| `LEPTOS_OUTPUT_NAME` | `rusterando` | `davidspizzeria` | JS/WASM bundle name in `target/site/pkg/<name>.<hash>.js`. Setting this stable across renames means existing browser caches don't miss after a deploy. |
+| `DEPLOY_REMOTE_BASE` | (unset) | `/var/www/example.com` | Server-side install root. Holds the binary, `html/`, `data/`, `backups/`, `.env`. |
+| `SSH_HOST` | (unset) | `myhost.example` | Where `scripts/deploy_to_server.sh` SSHs to. |
+| `DATABASE_URL` | `sqlite:./data/rusterando.db` | `sqlite:./data/<name>.db` | sqlx connection string. SQLite only today. |
+| `PUBLIC_URL` | `http://127.0.0.1:3001` | `https://www.example.com` | Base URL used in QR codes, emails, Stripe return URLs. |
+
+### Auth + secrets
+
+| Key | Required | Meaning |
+|---|---|---|
+| `ADMIN_PASSWORD` | yes | Plaintext password for `/admin/login`. Cookie `admin_session=ok` on success. |
+| `KITCHEN_PASSWORD` | yes | Same shape, for `/kitchen/login`. |
+| `DRIVER_PASSWORD` | yes | Same shape, for `/driver/login`. |
+
+### Stripe (optional — cash-only mode works without)
+
+| Key | Meaning |
+|---|---|
+| `STRIPE_PUBLISH_KEY` | Public key shipped to the browser. |
+| `STRIPE_SECRET_KEY` | Server-side key. |
+| `STRIPE_WEBHOOK_SECRET` | For `/api/webhook/stripe` signature verification. |
+
+### SMTP (optional — falls back to log-only)
+
+| Key | Meaning |
+|---|---|
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` | Lettre over native-tls. |
+| `EMAIL_FROM` | Friendly From: address used for order confirmations. |
+
+### Apple Push Notifications (optional)
+
+| Key | Meaning |
+|---|---|
+| `APNS_TEAM_ID` | Apple Developer team id. |
+| `APNS_KEY_ID` | APNs auth key id. |
+| `APNS_BUNDLE_ID` | Your iOS app bundle id. |
+| `APNS_KEY_PATH` | Filesystem path to the `.p8` auth key. |
+| `APNS_PRODUCTION` | `true` for App Store builds, `false` for sandbox. |
+
+### Routing (optional — order-batching uses it)
+
+| Key | Meaning |
+|---|---|
+| `ORS_API_KEY` | OpenRouteService API key. Free tier is fine. |
+| `ORS_BASE_URL` | Override if you self-host ORS. |
+| `PIZZERIA_LAT`, `PIZZERIA_LON` | Where the driver's tour starts and ends. |
+
+If `APNS_KEY_PATH` is unset, push is silently disabled and orders still
+work end-to-end. Same pattern for SMTP and Stripe — the platform fails
+soft so you can run it bare.
+
+## Building + deploying
+
+### CI locally
+
+```bash
+./scripts/test-ci-locally.sh
+```
+
+Runs `cargo fmt`, clippy (SSR), check (SSR), check (WASM hydrate target),
+and check (server). Mirrors what GitHub Actions runs, so green-locally
+== green-on-PR.
+
+### Cross-build (Mac → Linux)
+
+```bash
+./scripts/cross_build_on_mac.sh x86_64-unknown-linux-gnu
+```
+
+Produces `target/x86_64-unknown-linux-gnu/release-prod/rusterando-server`
+plus the hashed JS/WASM/CSS bundle in `target/site/pkg/`. Build profile
+is **release-prod**: fat LTO, `codegen-units = 1`, `strip = symbols`.
+Roughly 72 MB binary, 6 minutes on M-series Mac.
+
+Cross-toolchain prerequisites are documented at the top of
+`scripts/cross_build_on_mac.sh`. Short version: install
+`x86_64-unknown-linux-gnu` via the messense Homebrew tap, drop OpenSSL +
+SQLite headers in `~/opt/{openssl,sqlite}_for_cross/`.
+
+### First-time server setup
+
+```bash
+./scripts/deploy_to_server.sh setup
+```
+
+Creates `/var/www/<your domain>/{html,data,backups}/`, uploads `.env`
+(or `.env.example`), writes a systemd unit named after `APP_NAME`,
+enables and starts the service.
+
+### Subsequent deploys
+
+```bash
+./scripts/deploy_to_server.sh full
+```
+
+Builds, backs up the live install (zipped to `backups/`), rsyncs the new
+binary + site assets, restarts. Backup retention is the last 10 zips.
+Roll back interactively with `./scripts/deploy_to_server.sh restore`.
+
+The deploy script reads `.env` at the very top — same one the server runs
+under — so build-time and run-time configuration never drift.
+
+## How Davids Pizzeria runs on Rusterando
+
+This section is the worked example. Davids Pizzeria
+(<https://davidspizzeria.de>) was the codebase's first user; the platform
+was generalised to AGPL once it stopped being shop-specific. All the
+contact details below are anonymised — substitute your own.
+
+### What's in their `.env` (shape, not values)
+
+```
+APP_NAME=davidspizzeria-server
+LEPTOS_OUTPUT_NAME=davidspizzeria
+DEPLOY_REMOTE_BASE=/var/www/davidspizzeria.de
+SSH_HOST=<their VPS hostname>
+DATABASE_URL=sqlite:./data/davidspizzeria.db
+PUBLIC_URL=https://davidspizzeria.de
+ADMIN_PASSWORD=<long random string>
+KITCHEN_PASSWORD=<long random string>
+DRIVER_PASSWORD=<long random string>
+STRIPE_PUBLISH_KEY=pk_live_<…>
+STRIPE_SECRET_KEY=sk_live_<…>
+STRIPE_WEBHOOK_SECRET=whsec_<…>
+SMTP_HOST=<their email host>
+SMTP_USER=<their bestellung@ inbox>
+SMTP_PASS=<…>
+EMAIL_FROM=<bestellung@…>
+APNS_TEAM_ID=<10-char Apple team id>
+APNS_KEY_ID=<10-char APNs key id>
+APNS_BUNDLE_ID=<reverse-DNS bundle id>
+APNS_KEY_PATH=/var/www/davidspizzeria.de/.hidden/AuthKey_<…>.p8
+APNS_PRODUCTION=true
+ORS_API_KEY=<…>
+PIZZERIA_LAT=<lat>
+PIZZERIA_LON=<lon>
+```
+
+The `.env` is owned by `www-data`, mode 600, lives at
+`/var/www/davidspizzeria.de/.env` and is loaded by systemd
+(`EnvironmentFile=-...`) as well as by the deploy script.
+
+### Branding (data, not code)
+
+After first install, Davids ran through `/admin/branding` and
+`/admin/home` to fill in their specifics: shop name, German-language
+addresses, phone, email, hero photo, two offer cards (Pizzablech + Pizza
+36 cm), three gallery photos (storefront, counter, baking sheet), the
+warm colour theme.
+
+These all live in `app_settings`, `home_hero`, `home_offers`, and
+`home_gallery`. They survive every deploy because the deploy script
+preserves `data/`. They render server-side from a one-shot DB read
+cached in `BrandingHandle` so SSR doesn't hit SQLite per request.
+
+### Delivery zones
+
+Lüdinghausen + four neighbouring villages, each with a `min_order_cents`
+threshold and a `fee_cents` surcharge. The zones drive the city
+auto-complete in checkout, the route optimisation when grouping orders
+for one driver tour, and the "Wir liefern" section on the home page.
+Free delivery kicks in above `app_settings.free_delivery_threshold_cents`
+(currently set to 3500 = €35).
+
+### iOS app
+
+A native Swift WebView shell loads `https://davidspizzeria.de` on launch
+and registers an APNs token tied to the staff role currently signed in.
+Three Keychain entries hold the staff passwords; tapping the gear FAB
+opens a native Settings sheet to switch role with one tap. Universal
+Links route deep links from push notifications (`deep_link` payload key)
+into the WebView so a "neue Bestellung" ping opens straight to
+`/admin/orders/<id>`.
+
+The bundle id (`<reverse-DNS>`), team id, and AASA file are tied to
+Davids' Apple Developer account — anyone forking would replace them with
+their own. The `ios-app/` source is otherwise generic.
+
+### Push trigger flow
+
+```
+Customer places order
+  → Stripe webhook (or place_order for cash) hits the server
+  → AppState.apns is Some(ApnsHandle) (because APNS_KEY_PATH is set)
+  → notify_roles(["kitchen", "admin", "driver"], …) fans out via HTTP/2
+  → Each registered staff device buzzes within ~200 ms
+```
+
+Driver only gets pinged for delivery orders, not pickups. `/admin/broadcast`
+exposes a manual one-shot push to staff or "all" devices, with the
+audience choice persisted in `push_broadcasts` for audit.
+
+### Backup discipline
+
+`./scripts/deploy_to_server.sh backup` zips the binary, html bundle,
+`.env`, and the SQLite DB into `/var/www/davidspizzeria.de/backups/`
+named `davidspizzeria_YYYYMMDD_HHMMSS.zip`. Pre-deploy this happens
+automatically; manual backups are 30 seconds.
+
+`./scripts/deploy_to_server.sh restore` shows a numbered list of
+backups and rolls back interactively — service stop, unzip,
+restore, restart. The pre-restore state is itself backed up first, so
+you can always undo the undo.
+
+### What we'd do differently
+
+- Postgres-or-SQLite as a config switch from the start. SQLite has been
+  more than enough for one shop, but a chain probably wants it.
+- Stricter separation of "tenant content" (which today lives in
+  `app_settings` and `home_*`) from "platform data" (orders, menu).
+  A future "instance dump" feature would `pg_dump`-equivalent only the
+  tenant rows.
+- Generated CSS (Tailwind or Lightning CSS) instead of hand-rolled SCSS.
+  Wasn't worth it for two themes; will be for ten.
+
+## Roadmap
+
+- [ ] **FCM / Android app**: parallel to APNs/iOS. Server-side
+  `MultiPushSink` will dispatch by `platform` column.
+- [ ] **/admin/zones**: today the delivery zones are seeded by hand.
+- [ ] **Multi-locale** (currently German-only). The grammar is in
+  `pages/legal.rs` and the email templates — about 600 strings.
+- [ ] **Cargo workspace split**: peel the kitchen and driver views out
+  into optional features so a takeaway-only shop has a smaller binary.
+- [ ] **Postgres support** behind a feature flag.
+- [ ] **OpenAPI / proper API docs** for shops that want to integrate
+  their own POS.
+
+## Contributing
+
+Issues and PRs welcome at <https://github.com/holg/rusterando>. See
+`CONTRIBUTING.md` for the build + test loop and the code style.
+The license is **AGPL-3.0-or-later**: any modified version that you
+let users interact with over the network must publish its source.
+
+If you fork Rusterando to run a real shop, drop a PR or an issue with
+your shop's URL — it'd be nice to keep an example list in this README.
+
+## License
+
+```
+Copyright (C) 2026  Rusterando contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+```
+
+Full text: <https://www.gnu.org/licenses/agpl-3.0.html>

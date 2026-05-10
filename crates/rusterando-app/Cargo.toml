@@ -1,0 +1,8 @@
+[package]
+name = "rusterando-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rusterando-shared = { workspace = true }
+cfg-if = { workspace = true }

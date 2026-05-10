@@ -1,0 +1,47 @@
+/target
+hash.txt
+*.db
+*.db-shm
+*.db-wal
+.env
+data/
+node_modules/
+tmp/
+package-lock.json
+.DS_Store
+
+# Local-only secrets / scratch space (Apple Developer credentials,
+# APNs auth key, scratch notes — see docs/apple_setup.md). Never commit.
+.hidden/
+*.p8
+AuthKey_*.p8
+
+# iOS app contains tenant-specific Apple Team ID + bundle id
+# (lives in a separate private repo per shop). Public Rusterando
+# will ship a generic examples/ios-shell/ template later.
+ios-app/
+
+# Tauri legacy shell (archived, replaced by native Swift app).
+src-tauri/
+
+# Top-level img/ is the local scratch dir (raw photos, WhatsApp drops,
+# work-in-progress). The published assets live under public/img/.
+/img/
+
+# Local plans + private notes — all docs/ stays out of the public repo.
+# README.md (top-level) is the canonical public documentation; the
+# docs/ tree holds Davids-specific deployment + design notes that
+# would mostly need scrubbing for OSS use.
+docs/
+.claude/
+
+# .env.example with real secrets — replaced for the public repo by
+# the placeholder version. Real one stays out.
+.env.production
+
+# Local AASA overrides (per-shop real Apple TEAM_ID + bundle id).
+# Davids' deploy step copies the .davids variant over the placeholder
+# before `cargo leptos build`. The placeholder version of the real
+# path is committed; per-shop overrides are not.
+public/.well-known/apple-app-site-association.*
+

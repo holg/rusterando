@@ -1,0 +1,626 @@
+//! Kitchen view: list of pending+active orders, with one-click status transitions.
+
+use leptos::prelude::*;
+use rusterando_shared::models::format_eur;
+use serde::{Deserialize, Serialize};
+
+use crate::pages::admin::shell::AdminShell;
+use crate::pages::order::status_label_de;
+
+/// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json)
+#[cfg(feature = "ssr")]
+type ItemSummaryRow = (Option<String>, String, i64, String, Option<String>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminOrderRow {
+    pub id: String,
+    pub order_number: String,
+    pub status: String,
+    pub payment_status: String,
+    pub order_type: String,
+    pub address_line: Option<String>,
+    pub contact_name: String,
+    pub contact_phone: String,
+    pub pickup_label: String,
+    pub created_at: String,
+    pub total_cents: i64,
+    pub items_summary: String, // "2× Pizza Margherita (22 cm), 1× Coca Cola"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AdminOrders {
+    pub received: Vec<AdminOrderRow>,
+    pub preparing: Vec<AdminOrderRow>,
+    pub ready: Vec<AdminOrderRow>,
+}
+
+#[server(
+    name = ListAdminOrders,
+    prefix = "/api",
+    endpoint = "list_admin_orders"
+)]
+pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
+    use sqlx::SqlitePool;
+
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            i64,
+            String,
+            String,
+            Option<String>,
+        ),
+    >(
+        "SELECT id, order_number, status, contact_name, contact_phone, scheduled_for, created_at,
+                total_cents, payment_status, order_type, delivery_address_json
+         FROM orders
+         WHERE status IN ('received', 'preparing', 'ready_for_pickup', 'pending_payment')
+         ORDER BY created_at ASC",
+    )
+    .fetch_all(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load orders: {e}")))?;
+
+    let mut received = Vec::new();
+    let mut preparing = Vec::new();
+    let mut ready = Vec::new();
+
+    for (
+        id,
+        num,
+        status,
+        name,
+        phone,
+        scheduled,
+        created,
+        total,
+        payment_status,
+        order_type,
+        addr_json,
+    ) in rows
+    {
+        // Items summary in one query per order — fine for a kitchen with <100 active orders.
+        let items: Vec<ItemSummaryRow> = sqlx::query_as(
+            "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json
+             FROM order_items WHERE order_id = ?1 ORDER BY id",
+        )
+        .bind(&id)
+        .fetch_all(&db)
+        .await
+        .unwrap_or_default();
+
+        let items_summary = items
+            .into_iter()
+            .map(|(num, n, q, opts, extras_json)| {
+                let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
+                let variant = v.get("size_label").and_then(|x| x.as_str()).unwrap_or("");
+                let prefix = num
+                    .as_deref()
+                    .map(|x| x.trim())
+                    .filter(|x| !x.is_empty())
+                    .map(|x| format!("{x}. "))
+                    .unwrap_or_default();
+                let extras_label = extras_json
+                    .as_deref()
+                    .and_then(|j| {
+                        serde_json::from_str::<Vec<rusterando_shared::models::CartExtra>>(j).ok()
+                    })
+                    .filter(|v| !v.is_empty())
+                    .map(|v| {
+                        let labels = v
+                            .into_iter()
+                            .map(|e| e.label)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(" + {labels}")
+                    })
+                    .unwrap_or_default();
+                if variant.is_empty() {
+                    format!("{q}× {prefix}{n}{extras_label}")
+                } else {
+                    format!("{q}× {prefix}{n} ({variant}){extras_label}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let pickup_label = match scheduled {
+            Some(s) => format!("Heute {}", s.split_whitespace().nth(1).unwrap_or(&s)),
+            None => {
+                if order_type == "delivery" {
+                    "Schnellstmöglich".to_string()
+                } else {
+                    "ASAP".to_string()
+                }
+            }
+        };
+
+        let address_line = if order_type == "delivery" {
+            addr_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+                .map(|v| {
+                    let street = v.get("street").and_then(|x| x.as_str()).unwrap_or("");
+                    let house = v.get("house_number").and_then(|x| x.as_str()).unwrap_or("");
+                    let plz = v.get("postcode").and_then(|x| x.as_str()).unwrap_or("");
+                    let city = v.get("city").and_then(|x| x.as_str()).unwrap_or("");
+                    format!("{street} {house}, {plz} {city}")
+                })
+        } else {
+            None
+        };
+
+        let row = AdminOrderRow {
+            id,
+            order_number: num,
+            status: status.clone(),
+            payment_status,
+            order_type,
+            address_line,
+            contact_name: name,
+            contact_phone: phone,
+            pickup_label,
+            created_at: created,
+            total_cents: total,
+            items_summary,
+        };
+
+        match status.as_str() {
+            "received" | "pending_payment" => received.push(row),
+            "preparing" => preparing.push(row),
+            "ready_for_pickup" => ready.push(row),
+            _ => {}
+        }
+    }
+
+    Ok(AdminOrders {
+        received,
+        preparing,
+        ready,
+    })
+}
+
+#[server(
+    name = GetAdminOrder,
+    prefix = "/api",
+    endpoint = "get_admin_order"
+)]
+pub async fn get_admin_order(
+    id: String,
+) -> Result<crate::pages::order::OrderDetail, ServerFnError> {
+    crate::pages::admin::require_admin().await?;
+    crate::pages::order::get_order(id).await
+}
+
+#[server(
+    name = UpdateOrderStatus,
+    prefix = "/api",
+    endpoint = "update_order_status"
+)]
+pub async fn update_order_status(id: String, status: String) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    crate::pages::admin::require_admin().await?;
+
+    if !matches!(
+        status.as_str(),
+        "received" | "preparing" | "ready_for_pickup" | "picked_up" | "cancelled"
+    ) {
+        return Err(ServerFnError::new("Ungültiger Status"));
+    }
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    sqlx::query("UPDATE orders SET status = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2")
+        .bind(&status)
+        .bind(&id)
+        .execute(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("update status: {e}")))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
+#[component]
+pub fn AdminOrdersPage() -> impl IntoView {
+    let updater = ServerAction::<UpdateOrderStatus>::new();
+    let orders = Resource::new(
+        move || updater.version().get(),
+        |_| async move { list_admin_orders().await },
+    );
+
+    view! {
+        <AdminShell>
+            <section class="admin-orders">
+                <div class="page-bar">
+                    <h1>"Bestellungen"</h1>
+                    <button class="btn ghost" on:click=move |_| orders.refetch()>
+                        "Aktualisieren"
+                    </button>
+                </div>
+
+                <Suspense fallback=|| view! { <p>"Lädt…"</p> }>
+                    {move || orders.get().map(|res| match res {
+                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                        Ok(data) => view! { <Board data updater/> }.into_any(),
+                    })}
+                </Suspense>
+            </section>
+        </AdminShell>
+    }
+}
+
+#[component]
+fn Board(data: AdminOrders, updater: ServerAction<UpdateOrderStatus>) -> impl IntoView {
+    view! {
+        <div class="orders-board">
+            <Column title="Eingegangen" rows=data.received.clone() updater
+                next_status="preparing" next_label="Zubereitung starten"/>
+            <Column title="In Zubereitung" rows=data.preparing.clone() updater
+                next_status="ready_for_pickup" next_label="Abholbereit melden"/>
+            <Column title="Abholbereit" rows=data.ready.clone() updater
+                next_status="picked_up" next_label="Als abgeholt markieren"/>
+        </div>
+    }
+}
+
+#[component]
+fn Column(
+    title: &'static str,
+    rows: Vec<AdminOrderRow>,
+    updater: ServerAction<UpdateOrderStatus>,
+    next_status: &'static str,
+    next_label: &'static str,
+) -> impl IntoView {
+    let count = rows.len();
+
+    view! {
+        <div class="orders-column">
+            <h2>{title} " " <span class="count">"(" {count} ")"</span></h2>
+            {if rows.is_empty() {
+                view! { <p class="empty">"Keine Bestellungen"</p> }.into_any()
+            } else {
+                view! {
+                    <ul>
+                        {rows.into_iter().map(|r| view! {
+                            <OrderCard r updater next_status next_label/>
+                        }).collect_view()}
+                    </ul>
+                }.into_any()
+            }}
+        </div>
+    }
+}
+
+#[component]
+fn OrderCard(
+    r: AdminOrderRow,
+    updater: ServerAction<UpdateOrderStatus>,
+    next_status: &'static str,
+    next_label: &'static str,
+) -> impl IntoView {
+    let id_for_advance = r.id.clone();
+    let id_for_cancel = r.id.clone();
+    let detail_href = format!("/admin/orders/{}", r.id);
+    let next = next_status.to_string();
+    let on_advance = move |_| {
+        updater.dispatch(UpdateOrderStatus {
+            id: id_for_advance.clone(),
+            status: next.clone(),
+        });
+    };
+    let on_cancel = move |_| {
+        updater.dispatch(UpdateOrderStatus {
+            id: id_for_cancel.clone(),
+            status: "cancelled".into(),
+        });
+    };
+
+    let payment_label = crate::pages::order::payment_status_label_de(&r.payment_status);
+    let payment_attr = r.payment_status.clone();
+    let is_delivery = r.order_type == "delivery";
+    let order_type_chip = if is_delivery {
+        "🛵 LIEFERUNG"
+    } else {
+        "🏪 ABHOLUNG"
+    };
+    view! {
+        <li class="order-card">
+            <div class="order-head">
+                <a class="order-num" href=detail_href>{r.order_number}</a>
+                <span class="status-pill" data-order-type=r.order_type.clone()>{order_type_chip}</span>
+                <span class="status-pill" data-status=r.status.clone()>
+                    {status_label_de(&r.status)}
+                </span>
+                <span class="status-pill" data-payment=payment_attr>{payment_label}</span>
+            </div>
+            <p class="contact">{r.contact_name} " · " {r.contact_phone}</p>
+            <p class="pickup">{if is_delivery { "Lieferung: " } else { "Abholung: " }}<strong>{r.pickup_label}</strong></p>
+            {r.address_line.map(|a| view! { <p class="address">"📍 " {a}</p> })}
+            <p class="items">{r.items_summary}</p>
+            <p class="total">{format_eur(r.total_cents)}</p>
+            <div class="row">
+                <button class="btn primary" on:click=on_advance>{next_label}</button>
+                <button class="btn ghost" on:click=on_cancel>"Stornieren"</button>
+            </div>
+        </li>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /admin/orders/:id  — full detail + printable kitchen ticket
+// ---------------------------------------------------------------------------
+
+#[component]
+pub fn AdminOrderDetailPage() -> impl IntoView {
+    let params = leptos_router::hooks::use_params_map();
+    let id = move || params.read().get("id").unwrap_or_default();
+
+    let updater = ServerAction::<UpdateOrderStatus>::new();
+    let order = Resource::new(
+        move || (id(), updater.version().get()),
+        |(id, _)| async move { get_admin_order(id).await },
+    );
+
+    view! {
+        <AdminShell>
+            <section class="admin-order-detail">
+                <Suspense fallback=|| view! { <p>"Lädt…"</p> }>
+                    {move || order.get().map(|res| match res {
+                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                        Ok(o) => view! { <DetailCard o updater/> }.into_any(),
+                    })}
+                </Suspense>
+            </section>
+        </AdminShell>
+    }
+}
+
+#[component]
+fn DetailCard(
+    o: crate::pages::order::OrderDetail,
+    updater: ServerAction<UpdateOrderStatus>,
+) -> impl IntoView {
+    use crate::pages::order::OrderDetail;
+
+    let OrderDetail {
+        id,
+        order_number,
+        status,
+        pickup_time_label,
+        contact_name,
+        contact_phone,
+        contact_email,
+        items,
+        subtotal_cents,
+        total_cents,
+        created_at,
+        payment_status,
+        payment_method_detail,
+        order_type,
+        delivery_fee_cents,
+        delivery_address,
+    } = o;
+
+    let status_label = status_label_de(&status).to_string();
+    let status_attr = status.clone();
+    let payment_label = crate::pages::order::payment_status_label_de(&payment_status);
+    let payment_attr = payment_status.clone();
+    let is_delivery = order_type == "delivery";
+
+    // Shop name for the printed ticket header.
+    #[cfg(feature = "ssr")]
+    let shop_name = use_context::<crate::branding::BrandingHandle>()
+        .map(|h| h.get().display_name())
+        .unwrap_or_else(|| "Mein Restaurant".to_string());
+    #[cfg(not(feature = "ssr"))]
+    let shop_name = "Mein Restaurant".to_string();
+    let order_type_label = if is_delivery {
+        "🛵 LIEFERUNG"
+    } else {
+        "🏪 ABHOLUNG"
+    };
+    let next = next_status_for(&status);
+    let id_advance = id.clone();
+    let id_cancel = id.clone();
+    let id_received = id.clone();
+
+    let on_advance = move |_| {
+        if let Some((next_status, _)) = next {
+            updater.dispatch(UpdateOrderStatus {
+                id: id_advance.clone(),
+                status: next_status.into(),
+            });
+        }
+    };
+    let on_cancel = move |_| {
+        updater.dispatch(UpdateOrderStatus {
+            id: id_cancel.clone(),
+            status: "cancelled".into(),
+        });
+    };
+    let on_back_to_received = move |_| {
+        updater.dispatch(UpdateOrderStatus {
+            id: id_received.clone(),
+            status: "received".into(),
+        });
+    };
+
+    let print = move |_| {
+        #[cfg(feature = "hydrate")]
+        {
+            if let Some(win) = web_sys::window() {
+                let _ = win.print();
+            }
+        }
+    };
+
+    view! {
+        <header class="detail-bar no-print">
+            <a href="/admin/orders" class="link">"← zurück zur Übersicht"</a>
+            <h1>"Bestellung " {order_number.clone()}</h1>
+            <span class="status-pill" data-status=status_attr.clone()>{status_label.clone()}</span>
+            <button class="btn primary" on:click=print>"🖨 Drucken"</button>
+        </header>
+
+        <article class="ticket">
+            <div class="ticket-head">
+                <h2>{shop_name}</h2>
+                <p class="ticket-num">{order_number.clone()}</p>
+                <p class="ticket-meta">{created_at.clone()}</p>
+                <p class="ticket-ribbon" data-order-type=order_type.clone()>{order_type_label}</p>
+            </div>
+
+            <div class="ticket-row">
+                <span>{if is_delivery { "Lieferung bis" } else { "Abholung" }}</span>
+                <strong>{pickup_time_label.clone()}</strong>
+            </div>
+            <div class="ticket-row">
+                <span>"Kunde"</span>
+                <strong>{contact_name.clone()}</strong>
+            </div>
+            <div class="ticket-row">
+                <span>"Telefon"</span>
+                <strong>{contact_phone.clone()}</strong>
+            </div>
+            <div class="ticket-row">
+                <span>"E-Mail"</span>
+                <span class="muted">{contact_email.clone()}</span>
+            </div>
+            {delivery_address.as_ref().map(|a| {
+                let line = format!("{}, {} {}", a.street_with_number(), a.postcode, a.city);
+                let zone = a.zone_name.clone();
+                let notes = a.notes.clone();
+                view! {
+                    <div class="ticket-row">
+                        <span>"Liefergebiet"</span>
+                        <strong>{zone}</strong>
+                    </div>
+                    <div class="ticket-row">
+                        <span>"Adresse"</span>
+                        <strong>{line}</strong>
+                    </div>
+                    {notes.map(|n| view! {
+                        <div class="ticket-row">
+                            <span>"Hinweis"</span>
+                            <span class="muted">{n}</span>
+                        </div>
+                    })}
+                }
+            })}
+            <div class="ticket-row">
+                <span>"Zahlung"</span>
+                <span>
+                    <span class="status-pill" data-payment=payment_attr.clone()>{payment_label.to_string()}</span>
+                    {payment_method_detail.clone().filter(|s| !s.is_empty()).map(|m| view! {
+                        <span class="muted">" · " {m}</span>
+                    })}
+                </span>
+            </div>
+
+            <h3 class="ticket-h">"Bestellung"</h3>
+            <table class="ticket-items">
+                <tbody>
+                    {items.into_iter().map(|it| {
+                        let extras = it.extras.clone();
+                        view! {
+                            <tr>
+                                <td class="qty">{it.quantity} "×"</td>
+                                <td class="num">
+                                    {it.menu_number.clone().unwrap_or_default()}
+                                </td>
+                                <td class="name">
+                                    <strong>{it.name}</strong>
+                                    {it.variant.map(|v| view! { <span class="variant">" — " {v}</span> })}
+                                    {(!extras.is_empty()).then(|| view! {
+                                        <ul class="extras">
+                                            {extras.into_iter().map(|e| {
+                                                let p = if e.price_cents == 0 {
+                                                    "gratis".to_string()
+                                                } else {
+                                                    format!("+{}", format_eur(e.price_cents))
+                                                };
+                                                view! { <li>"+ " {e.label} " " <span class="muted">{p}</span></li> }
+                                            }).collect_view()}
+                                        </ul>
+                                    })}
+                                </td>
+                                <td class="amt">{format_eur(it.line_total_cents)}</td>
+                            </tr>
+                        }
+                    }).collect_view()}
+                </tbody>
+                <tfoot>
+                    {(delivery_fee_cents > 0).then(|| view! {
+                        <tr>
+                            <td></td>
+                            <td class="muted">"Zwischensumme"</td>
+                            <td class="amt">{format_eur(subtotal_cents)}</td>
+                        </tr>
+                        <tr>
+                            <td></td>
+                            <td class="muted">"Lieferzuschlag"</td>
+                            <td class="amt">{format_eur(delivery_fee_cents)}</td>
+                        </tr>
+                    })}
+                    <tr>
+                        <td></td>
+                        <td class="grand">"Gesamt"</td>
+                        <td class="grand amt">{format_eur(total_cents)}</td>
+                    </tr>
+                </tfoot>
+            </table>
+
+            <p class="ticket-foot">{
+                match (payment_status.as_str(), is_delivery) {
+                    ("paid", _)              => "Online bezahlt — keine Kasse nötig.",
+                    ("pending", _)           => "Zahlung ausstehend — bitte erst nach Bestätigung ausgeben.",
+                    ("failed", _)            => "Zahlung fehlgeschlagen.",
+                    ("refunded", _)          => "Erstattet.",
+                    ("cash_on_pickup", true) => "Zahlung: Bar bei Lieferung an den Fahrer.",
+                    ("cash_on_pickup", false) => "Zahlung: Bar bei Abholung",
+                    _                        => "Zahlung: ?",
+                }
+            }</p>
+        </article>
+
+        <footer class="detail-actions no-print">
+            {match next {
+                Some((next_status, label)) => view! {
+                    <button class="btn primary" on:click=on_advance
+                            data-next=next_status>{label}</button>
+                }.into_any(),
+                None => view! { <p class="muted">"Keine weitere Aktion möglich."</p> }.into_any(),
+            }}
+            <button class="btn ghost" on:click=on_back_to_received>"Status zurücksetzen"</button>
+            <button class="btn ghost danger" on:click=on_cancel>"Stornieren"</button>
+        </footer>
+    }
+}
+
+/// What the next status transition is, given the current one. Mirrors the
+/// kitchen board's column flow.
+fn next_status_for(current: &str) -> Option<(&'static str, &'static str)> {
+    match current {
+        "received" => Some(("preparing", "Zubereitung starten")),
+        "preparing" => Some(("ready_for_pickup", "Abholbereit melden")),
+        "ready_for_pickup" => Some(("picked_up", "Als abgeholt markieren")),
+        _ => None,
+    }
+}

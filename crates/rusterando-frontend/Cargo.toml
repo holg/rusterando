@@ -1,0 +1,85 @@
+[package]
+name = "rusterando-frontend"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rusterando-shared = { workspace = true }
+
+leptos = { workspace = true }
+leptos_meta = { workspace = true }
+leptos_router = { workspace = true }
+leptos_axum = { workspace = true, optional = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true, features = ["wasmbind"] }
+http = { workspace = true }
+cfg-if = { workspace = true }
+log = { workspace = true }
+urlencoding = "2"
+
+# SSR-only
+sqlx = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+tower-cookies = { version = "0.11", optional = true }
+qrcode = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+chrono-tz = { workspace = true, optional = true }
+lettre = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+async-stripe = { workspace = true, optional = true }
+reqwest = { workspace = true, optional = true }
+async-trait = { version = "0.1", optional = true }
+
+# WASM-only
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+console_error_panic_hook = { workspace = true, optional = true }
+console_log = { workspace = true, optional = true }
+web-sys = { version = "0.3", features = [
+    "Window",
+    "HtmlInputElement",
+    "File",
+    "FileList",
+    "FormData",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Blob",
+], optional = true }
+
+[features]
+default = []
+hydrate = [
+    "leptos/hydrate",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "dep:js-sys",
+    "dep:console_error_panic_hook",
+    "dep:console_log",
+    "dep:web-sys",
+]
+ssr = [
+    "leptos/ssr",
+    "leptos_meta/ssr",
+    "leptos_router/ssr",
+    "dep:leptos_axum",
+    "dep:sqlx",
+    "dep:axum",
+    "dep:tower-cookies",
+    "dep:qrcode",
+    "dep:uuid",
+    "dep:anyhow",
+    "dep:chrono-tz",
+    "dep:lettre",
+    "dep:tokio",
+    "dep:async-stripe",
+    "dep:reqwest",
+    "dep:async-trait",
+]
