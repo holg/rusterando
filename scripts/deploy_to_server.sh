@@ -65,11 +65,13 @@ Usage: $0 <command>
 
 Commands:
     build         Build the release binary for Linux (x86)
-    deploy        Backup + Upload + Restart (uses already-built binary)
-    full          Build + Backup + Upload + Restart (full deploy)
+    deploy        Backup + Upload + Restart + Apply seeds
+    full          Build + Backup + Upload + Restart + Apply seeds
     upload        Upload built files to server
     setup         First-time setup: create dirs, install systemd service
     restart       Restart the service on server
+    apply-seeds   Apply per-deployment seed SQL (data/*.deploy.sql,
+                  data/*.<deployment>.sql) — idempotent, safe to re-run
     logs          Show service logs (follow)
     status        Show service status
     backup        Create a backup of the current version on the server
@@ -457,9 +459,57 @@ cmd_deploy() {
     cmd_backup
     cmd_upload
     cmd_restart
+    cmd_apply_seeds
     echo ""
     echo "=== Deploy complete ==="
     echo "Site: https://davidspizzeria.de"
+}
+
+# Apply per-deployment seed SQL files (e.g. branding.davids.sql) against
+# the prod SQLite DB after migrations have run. Each *.sql file under
+# data/ that ends in `.davids.sql` (or generally `.deploy.sql`) is
+# uploaded, executed via sqlite3, then the service is restarted so the
+# in-memory caches (BrandingHandle, ThemeHandle) pick up the new rows.
+#
+# Idempotent: every UPDATE in the seed is guarded with `WHERE value=...`
+# clauses that only match the placeholder defaults from migrations, so
+# re-running on an already-customised DB is a no-op.
+cmd_apply_seeds() {
+    # Find seeds in two patterns: `*.deploy.sql` (deployment-agnostic)
+    # and `*.${prefix}.sql` where prefix is APP_NAME minus '-server'
+    # (e.g. data/branding.davids.sql for APP_NAME=davidspizzeria-server).
+    local prefix="${APP_NAME%-server}"
+    local seeds=()
+    shopt -s nullglob
+    for f in data/*.deploy.sql data/*."${prefix}".sql; do
+        [[ -f "$f" ]] && seeds+=("$f")
+    done
+    shopt -u nullglob
+
+    if [[ ${#seeds[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo ""
+    echo "=== Applying ${#seeds[@]} per-deployment seed SQL file(s) ==="
+
+    # Resolve the prod SQLite file path. By convention the server's
+    # WorkingDirectory is $REMOTE_BASE and the DB lives at data/<x>.db
+    # under that, with the filename derived from APP_NAME.
+    local db_filename="${prefix}.db"
+    local remote_db="$REMOTE_BASE/data/$db_filename"
+
+    for seed in "${seeds[@]}"; do
+        local base
+        base="$(basename "$seed")"
+        echo "  → uploading $base"
+        scp -q "$seed" "$SSH_HOST:/tmp/$base"
+        echo "  → applying  $base on $remote_db"
+        ssh_cmd "sudo sqlite3 '$remote_db' < '/tmp/$base' && sudo rm -f '/tmp/$base'"
+    done
+
+    echo "  → restarting $APP_NAME so in-memory caches pick up the seeds"
+    ssh_cmd "sudo systemctl restart $APP_NAME"
 }
 
 cmd_full() {
@@ -491,16 +541,17 @@ cmd_status() {
 COMMAND="${1:-}"
 
 case "$COMMAND" in
-    build)    cmd_build ;;
-    deploy)   cmd_deploy ;;
-    full)     cmd_full ;;
-    upload)   cmd_upload ;;
-    setup)    cmd_setup ;;
-    restart)  cmd_restart ;;
-    logs)     cmd_logs ;;
-    status)   cmd_status ;;
-    backup)   cmd_backup ;;
-    backups)  cmd_backups ;;
-    restore)  cmd_restore ;;
-    *)        usage ;;
+    build)        cmd_build ;;
+    deploy)       cmd_deploy ;;
+    full)         cmd_full ;;
+    upload)       cmd_upload ;;
+    setup)        cmd_setup ;;
+    restart)      cmd_restart ;;
+    apply-seeds)  cmd_apply_seeds ;;
+    logs)         cmd_logs ;;
+    status)       cmd_status ;;
+    backup)       cmd_backup ;;
+    backups)      cmd_backups ;;
+    restore)      cmd_restore ;;
+    *)            usage ;;
 esac
