@@ -1,9 +1,13 @@
 #!/bin/bash
-# Rusterando deploy script — single source of truth is `.env` in the
-# repo root. Per-deployment knobs (Davids' deployment vs upstream
-# defaults vs any other shop) live there, not in this script.
+# Rusterando deploy script.
 #
-# Required `.env` keys for a deploy:
+# Each deployment has its own .env file at the repo root. By default
+# the script reads `.env`. Pass `-e <name>` to load `.env.<name>`
+# instead — used to run multiple deployments off the same checkout
+# (e.g. davidspizzeria.de + rusterando.de on the same VPS, different
+# ports).
+#
+# Required `.env*` keys for a deploy:
 #   APP_NAME             = name of the binary on disk + systemd unit
 #                          (e.g. davidspizzeria-server, default rusterando-server)
 #   BIN_NAME             = same as APP_NAME (kept as alias for build-time use;
@@ -11,6 +15,9 @@
 #                          this script renames it to APP_NAME during rsync)
 #   LEPTOS_OUTPUT_NAME   = JS bundle name in /pkg/<name>.<hash>.js
 #                          (e.g. davidspizzeria, default rusterando)
+#   LEPTOS_SITE_ADDR     = bind address, e.g. 127.0.0.1:3001 / 127.0.0.1:3002
+#                          (each deployment binds a different localhost port;
+#                          nginx proxy_pass routes its vhost to the right one)
 #   DEPLOY_REMOTE_BASE   = e.g. /var/www/davidspizzeria.de
 #   SSH_HOST             = e.g. iesna.eu
 #
@@ -19,14 +26,32 @@
 set -e
 
 # =============================================================================
-# Load .env so a single file drives both the build and this script.
+# Parse `-e <name>` (env profile) before anything else, then load the
+# matching .env file. Defaults to `.env` for back-compat.
 # =============================================================================
-if [ -f .env ]; then
-    set -a
-    # shellcheck disable=SC1091
-    . .env
-    set +a
+ENV_PROFILE=""
+if [[ "${1:-}" == "-e" || "${1:-}" == "--env" ]]; then
+    if [[ -z "${2:-}" ]]; then
+        echo "✗ -e requires a profile name (e.g. -e davids)" >&2
+        exit 1
+    fi
+    ENV_PROFILE="$2"
+    shift 2
 fi
+
+ENV_FILE=".env"
+[[ -n "$ENV_PROFILE" ]] && ENV_FILE=".env.$ENV_PROFILE"
+
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+elif [[ -n "$ENV_PROFILE" ]]; then
+    echo "✗ env profile '$ENV_PROFILE' selected but $ENV_FILE not found" >&2
+    exit 1
+fi
+echo "Using env file: $ENV_FILE"
 
 # =============================================================================
 # Configuration (with sensible upstream defaults for fresh checkouts)
@@ -61,7 +86,12 @@ REMOTE_BACKUP_DIR="$REMOTE_BASE/backups"
 # =============================================================================
 usage() {
     cat <<EOF
-Usage: $0 <command>
+Usage: $0 [-e <env-profile>] <command>
+
+Options:
+    -e, --env <name>   Load .env.<name> instead of .env. Used to run
+                       multiple deployments from the same checkout
+                       (e.g. -e davids vs -e demo on the same VPS).
 
 Commands:
     build         Build the release binary for Linux (x86)
@@ -71,24 +101,23 @@ Commands:
     setup         First-time setup: create dirs, install systemd service
     restart       Restart the service on server
     apply-seeds   Apply per-deployment seed SQL (data/*.deploy.sql,
-                  data/*.<deployment>.sql) — idempotent, safe to re-run
+                  data/*.<env-profile>.sql) — idempotent, safe to re-run
     logs          Show service logs (follow)
     status        Show service status
     backup        Create a backup of the current version on the server
     backups       List all available backups
     restore       Restore a backup (interactive selection)
 
-Environment variables:
-    SSH_HOST      SSH destination (default: iesna.eu)
-    APP_NAME      Application name (default: davidspizzeria-server)
-    REMOTE_BASE   Base directory on server (default: /var/www/davidspizzeria.de)
+Configuration is read from .env (or .env.<profile> with -e). Required
+keys: APP_NAME, BIN_NAME, LEPTOS_OUTPUT_NAME, LEPTOS_SITE_ADDR,
+DEPLOY_REMOTE_BASE, SSH_HOST. See README + .env.example.
 
 Examples:
-    $0 build                     # Build x86 binary first
-    $0 deploy                    # Deploy (backup + upload + restart)
-    $0 full                      # Full: build + deploy in one step
-    $0 backup                    # Manual backup
-    $0 backups                   # List backups
+    $0 full                       # Default deployment (.env)
+    $0 -e davids full             # Davids deployment (.env.davids)
+    $0 -e demo full               # Demo deployment (.env.demo, port 3002)
+    $0 -e davids backup           # Manual backup of Davids
+    $0 -e davids restore          # Restore a Davids backup
     $0 restore                   # Restore a previous version
     $0 logs                      # Tail logs
 EOF
@@ -376,17 +405,14 @@ cmd_upload() {
     echo "Uploading site assets..."
     rsync -avz --delete "$LOCAL_SITE_DIR/" "$SSH_HOST:$REMOTE_HTML_DIR/"
 
-    # Upload .env if not exists on server
-    if ! ssh_cmd "test -f $REMOTE_BIN_DIR/.env"; then
-        if [[ -f ".env.production" ]]; then
-            echo "Uploading .env.production as .env..."
-            scp .env.production "$SSH_HOST:$REMOTE_BIN_DIR/.env"
-        elif [[ -f ".env.example" ]]; then
-            echo "Uploading .env.example as .env (edit on server!)..."
-            scp .env.example "$SSH_HOST:$REMOTE_BIN_DIR/.env"
-        fi
-    else
-        echo "Skipping .env (already exists on server)"
+    # Upload .env: ship the locally-loaded $ENV_FILE as .env on the
+    # server (systemd's EnvironmentFile= reads from a fixed path per
+    # deployment). On first deploy this seeds the file; on subsequent
+    # deploys it overwrites — your local copy is the source of truth.
+    if [[ -f "$ENV_FILE" ]]; then
+        echo "Uploading $ENV_FILE as $REMOTE_BIN_DIR/.env..."
+        scp -q "$ENV_FILE" "$SSH_HOST:$REMOTE_BIN_DIR/.env"
+        ssh_cmd "sudo chmod 600 $REMOTE_BIN_DIR/.env"
     fi
 
     # Fix permissions
@@ -419,8 +445,10 @@ RestartSec=5
 Environment=RUST_LOG=info
 Environment=LEPTOS_HASH_FILES=true
 Environment=LEPTOS_SITE_ROOT=$REMOTE_HTML_DIR
-Environment=LEPTOS_SITE_ADDR=127.0.0.1:3001
 Environment=LEPTOS_OUTPUT_NAME=$LEPTOS_OUTPUT_NAME_FOR_UNIT
+# LEPTOS_SITE_ADDR comes from the .env file below — every deployment
+# binds its own localhost port (e.g. 127.0.0.1:3001 vs 3002) and
+# nginx vhost configs route to the right one.
 EnvironmentFile=-$REMOTE_BIN_DIR/.env
 
 [Install]
@@ -475,13 +503,17 @@ cmd_deploy() {
 # clauses that only match the placeholder defaults from migrations, so
 # re-running on an already-customised DB is a no-op.
 cmd_apply_seeds() {
-    # Find seeds in two patterns: `*.deploy.sql` (deployment-agnostic)
-    # and `*.${prefix}.sql` where prefix is APP_NAME minus '-server'
-    # (e.g. data/branding.davids.sql for APP_NAME=davidspizzeria-server).
-    local prefix="${APP_NAME%-server}"
+    # Seed files are matched in two ways:
+    #   1. `*.deploy.sql`        — applied to every deployment.
+    #   2. `*.<env-profile>.sql` — applied only when -e <env-profile> is in
+    #                              effect (e.g. data/branding.davids.sql when
+    #                              run with `-e davids`).
+    # Falls back to the APP_NAME-derived prefix for back-compat with the
+    # pre-`-e` scripts that named seeds after the binary suffix.
+    local profile="${ENV_PROFILE:-${APP_NAME%-server}}"
     local seeds=()
     shopt -s nullglob
-    for f in data/*.deploy.sql data/*."${prefix}".sql; do
+    for f in data/*.deploy.sql data/*."${profile}".sql; do
         [[ -f "$f" ]] && seeds+=("$f")
     done
     shopt -u nullglob
@@ -493,11 +525,18 @@ cmd_apply_seeds() {
     echo ""
     echo "=== Applying ${#seeds[@]} per-deployment seed SQL file(s) ==="
 
-    # Resolve the prod SQLite file path. By convention the server's
-    # WorkingDirectory is $REMOTE_BASE and the DB lives at data/<x>.db
-    # under that, with the filename derived from APP_NAME.
-    local db_filename="${prefix}.db"
-    local remote_db="$REMOTE_BASE/data/$db_filename"
+    # Resolve the prod SQLite file path.
+    #
+    # The server's WorkingDirectory is $REMOTE_BASE; sqlx opens the DB
+    # by the relative path in $DATABASE_URL ("sqlite:./data/foo.db"), so
+    # we strip the prefix and resolve against $REMOTE_BASE here.
+    # Falls back to "${profile}.db" if DATABASE_URL isn't set.
+    local db_rel="${DATABASE_URL#sqlite:}"
+    db_rel="${db_rel#./}"
+    if [[ -z "$db_rel" || "$db_rel" == "$DATABASE_URL" ]]; then
+        db_rel="data/${profile}.db"
+    fi
+    local remote_db="$REMOTE_BASE/$db_rel"
 
     for seed in "${seeds[@]}"; do
         local base
