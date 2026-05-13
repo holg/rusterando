@@ -43,10 +43,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pin to a known-good stable. Bump deliberately.
-      - name: Install Rust stable + wasm32 target
-        uses: dtolnay/rust-toolchain@stable
+      # The repo's rust-toolchain.toml pins nightly, so rustup will
+      # auto-install nightly on first cargo invocation. dtolnay's
+      # action by default reads that file when channel isn't given,
+      # which gets us nightly + the requested components in one step.
+      - name: Install Rust (from rust-toolchain.toml) + wasm32 target
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown
 
@@ -87,7 +91,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: rusterando-check

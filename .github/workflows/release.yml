@@ -69,9 +69,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Install Rust stable + WASM + target
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (matches rust-toolchain.toml = nightly) + WASM + target
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly
           targets: wasm32-unknown-unknown,${{ matrix.target }}
 
       - name: Cargo cache
@@ -176,9 +177,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
 
-      - name: Install Rust stable + target
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (matches rust-toolchain.toml = nightly) + target
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly
           targets: ${{ matrix.target }}
 
       - name: Cargo cache (printer)
