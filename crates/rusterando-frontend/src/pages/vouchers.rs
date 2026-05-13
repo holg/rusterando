@@ -43,17 +43,24 @@ impl VoucherKind {
     }
 }
 
-/// Result of `validate_voucher`. `discount_cents` is what we'd shave
-/// off (subtotal for percent/fixed, delivery fee for free_delivery)
-/// given the current cart subtotal + delivery fee + phone. Zero means
-/// the code is valid but doesn't apply yet (e.g. min subtotal not
-/// reached) — the checkout shows `reason_de` as a hint.
+/// Result of `validate_voucher`. `discount_cents` is the total shaved
+/// off the cart; it is the sum of `discount_items_cents` (reducing
+/// item revenue) and `discount_delivery_cents` (reducing delivery
+/// fee revenue). Splitting matters for Buchhaltung: subtracting the
+/// total from items-only revenue produces a negative Netto whenever
+/// a voucher also covered the delivery fee.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoucherPreview {
     pub code: String,
     pub label: Option<String>,
     pub kind: String,
     pub discount_cents: i64,
+    /// Portion of the discount applied against item subtotal.
+    #[serde(default)]
+    pub discount_items_cents: i64,
+    /// Portion of the discount applied against delivery fee.
+    #[serde(default)]
+    pub discount_delivery_cents: i64,
     /// True iff the discount applies right now (cart passes all
     /// rules). The checkout button stays enabled either way; the
     /// reason text just changes.
@@ -186,17 +193,36 @@ pub mod ssr {
     /// delivery should leave 0€ to pay, not 1,50€. Otherwise the
     /// customer faces a tiny Stripe charge that defeats the whole
     /// point of "voucher covers it all".
-    fn gross_discount(v: &VoucherRow, subtotal_cents: i64, delivery_fee_cents: i64) -> i64 {
+    /// Compute the voucher discount split as (items_part, delivery_part).
+    /// The caller sums them for the total discount; bookkeeping uses
+    /// only the items_part to reduce item revenue so the Netto line
+    /// in the Buchhaltung stays ≥ 0.
+    ///
+    /// Split rules per kind:
+    /// - Percent: items only (delivery untouched).
+    /// - FreeDelivery: delivery only.
+    /// - Fixed: prefer items first up to subtotal_cents, spill onto
+    ///   delivery for the remainder. Customer-visible total is
+    ///   unchanged from the single-i64 version.
+    fn gross_discount_split(
+        v: &VoucherRow,
+        subtotal_cents: i64,
+        delivery_fee_cents: i64,
+    ) -> (i64, i64) {
+        let delivery = delivery_fee_cents.max(0);
         match v.kind {
             VoucherKind::Percent => {
                 let p = v.percent_off.unwrap_or(0).clamp(0, 100);
-                subtotal_cents.saturating_mul(p) / 100
+                let items_part = subtotal_cents.saturating_mul(p) / 100;
+                (items_part, 0)
             }
             VoucherKind::Fixed => {
                 let f = v.amount_off_cents.unwrap_or(0).max(0);
-                f.min(subtotal_cents + delivery_fee_cents.max(0))
+                let items_part = f.min(subtotal_cents);
+                let delivery_part = (f - items_part).min(delivery);
+                (items_part, delivery_part)
             }
-            VoucherKind::FreeDelivery => delivery_fee_cents.max(0),
+            VoucherKind::FreeDelivery => (0, delivery),
         }
     }
 
@@ -322,7 +348,9 @@ pub mod ssr {
             }
         }
 
-        let discount = gross_discount(v, subtotal_cents, delivery_fee_cents);
+        let (items_part, delivery_part) =
+            gross_discount_split(v, subtotal_cents, delivery_fee_cents);
+        let discount = items_part + delivery_part;
         if discount <= 0 {
             return Ok(reject(v, "Kein Rabatt anwendbar."));
         }
@@ -332,6 +360,8 @@ pub mod ssr {
             label: Some(label_for(v)),
             kind: v.kind.as_str().to_string(),
             discount_cents: discount,
+            discount_items_cents: items_part,
+            discount_delivery_cents: delivery_part,
             applies: true,
             reason_de: format!(
                 "{} − {} Rabatt",
@@ -347,17 +377,32 @@ pub mod ssr {
             label: Some(label_for(v)),
             kind: v.kind.as_str().to_string(),
             discount_cents: 0,
+            discount_items_cents: 0,
+            discount_delivery_cents: 0,
             applies: false,
             reason_de: reason.to_string(),
         }
     }
 
+    /// Outcome of a successful in-txn `redeem`. The total
+    /// `discount_cents` equals `discount_items_cents +
+    /// discount_delivery_cents`; the split lets place_order persist
+    /// both onto the order row so Buchhaltung can attribute the
+    /// discount correctly.
+    pub struct RedeemResult {
+        pub voucher_id: String,
+        pub code: String,
+        pub discount_cents: i64,
+        pub discount_items_cents: i64,
+        pub discount_delivery_cents: i64,
+    }
+
     /// Called inside the place_order transaction. Re-runs the rules
     /// against the final cart (in case the cart changed between
     /// validate + place) and inserts a `voucher_redemptions` row.
-    /// Returns (voucher_id, code, discount_cents). The caller is
-    /// expected to use the same `tx` for its own writes so the
-    /// redemption rolls back if the order fails.
+    /// Returns the redemption result with the discount split. The
+    /// caller is expected to use the same `tx` for its own writes
+    /// so the redemption rolls back if the order fails.
     pub async fn redeem<'c>(
         tx: &mut sqlx::Transaction<'c, sqlx::Sqlite>,
         code: &str,
@@ -365,7 +410,7 @@ pub mod ssr {
         subtotal_cents: i64,
         delivery_fee_cents: i64,
         order_id: &str,
-    ) -> Result<(String, String, i64), ServerFnError> {
+    ) -> Result<RedeemResult, ServerFnError> {
         let code_norm = normalise_code(code);
 
         let row = sqlx::query(
@@ -475,7 +520,9 @@ pub mod ssr {
             }
         }
 
-        let discount = gross_discount(&v, subtotal_cents, delivery_fee_cents);
+        let (items_part, delivery_part) =
+            gross_discount_split(&v, subtotal_cents, delivery_fee_cents);
+        let discount = items_part + delivery_part;
         if discount <= 0 {
             return Err(ServerFnError::new("Kein Rabatt anwendbar."));
         }
@@ -495,6 +542,12 @@ pub mod ssr {
         .await
         .map_err(|e| ServerFnError::new(format!("insert redemption: {e}")))?;
 
-        Ok((v.id, v.code, discount))
+        Ok(RedeemResult {
+            voucher_id: v.id,
+            code: v.code,
+            discount_cents: discount,
+            discount_items_cents: items_part,
+            discount_delivery_cents: delivery_part,
+        })
     }
 }

@@ -283,12 +283,18 @@ pub async fn list_admin_history(
         })
         .collect();
 
-    // Total voucher discount in the range. Reconciles brutto (Σ items)
-    // with netto (grand_revenue): `Σ items − voucher_discount_total
-    // = grand_revenue` (plus delivery fees, but those don't show
-    // in the items table anyway).
+    // Total voucher discount in the range — but only the **items
+    // portion**, not the part of the voucher that covered delivery.
+    // Mixing the two would push Netto-Umsatz below zero whenever a
+    // voucher's value exceeded items revenue but was capped against
+    // items+delivery at redemption time.
+    //
+    // The items vs. delivery split is stored on the order row
+    // (voucher_discount_items_cents) by the redeem path. Historical
+    // rows have 0 in the new column (migration default) — that's
+    // fine; they were sandbox test orders pre-split.
     let voucher_discount_total_sql = format!(
-        "SELECT COALESCE(SUM(voucher_discount_cents), 0)
+        "SELECT COALESCE(SUM(voucher_discount_items_cents), 0)
          FROM orders
          WHERE created_at BETWEEN ?1 AND ?2
            AND status != 'cancelled'{mode_clause_v}",

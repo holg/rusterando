@@ -1809,13 +1809,15 @@ pub async fn place_order(
     // order. The discount it returns SHOULD equal what we computed
     // pre-INSERT; we assert that to catch any divergence.
     let mut voucher_discount: i64 = 0;
+    let mut voucher_discount_items: i64 = 0;
+    let mut voucher_discount_delivery: i64 = 0;
     let mut voucher_meta: Option<(String, String)> = None; // (id, code)
     if let Some(raw_code) = voucher_code
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let (vid, vcode, discount) = crate::pages::vouchers::ssr::redeem(
+        let red = crate::pages::vouchers::ssr::redeem(
             &mut tx,
             raw_code,
             &phone_norm,
@@ -1824,7 +1826,7 @@ pub async fn place_order(
             &order_id,
         )
         .await?;
-        if discount != voucher_preview_discount {
+        if red.discount_cents != voucher_preview_discount {
             // Pre-flight evaluate said X, in-txn redeem said Y. Means
             // a concurrent redemption hit a cap between the two reads.
             // Reject conservatively — the customer will retry.
@@ -1832,22 +1834,31 @@ pub async fn place_order(
                 "Gutschein-Stand hat sich gerade geändert — bitte Bestellung erneut absenden.",
             ));
         }
-        voucher_discount = discount;
-        voucher_meta = Some((vid, vcode));
+        voucher_discount = red.discount_cents;
+        voucher_discount_items = red.discount_items_cents;
+        voucher_discount_delivery = red.discount_delivery_cents;
+        voucher_meta = Some((red.voucher_id, red.code));
     }
     if voucher_discount > 0 {
         let (vid, vcode) = voucher_meta.as_ref().expect("set with discount").clone();
         // Snapshot only the voucher columns — total_cents was already
         // written with the post-voucher value in the INSERT above.
+        // voucher_discount_cents stays as the total (= items + delivery)
+        // for kitchen-protocol / printer compat; the split columns are
+        // what Buchhaltung uses to attribute revenue correctly.
         sqlx::query(
             "UPDATE orders SET voucher_id = ?2, voucher_code = ?3,
-                               voucher_discount_cents = ?4
+                               voucher_discount_cents = ?4,
+                               voucher_discount_items_cents = ?5,
+                               voucher_discount_delivery_cents = ?6
              WHERE id = ?1",
         )
         .bind(&order_id)
         .bind(&vid)
         .bind(&vcode)
         .bind(voucher_discount)
+        .bind(voucher_discount_items)
+        .bind(voucher_discount_delivery)
         .execute(&mut *tx)
         .await
         .map_err(|e| ServerFnError::new(format!("apply voucher: {e}")))?;
