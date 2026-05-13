@@ -218,41 +218,66 @@ pub fn ExtrasAdminPage() -> impl IntoView {
         |_| async move { list_extras_admin().await },
     );
 
+    // Two-tab UI: free-add extras (current page) + option groups (was /admin/options).
+    // RwSignal so a click flips without a route change — both panels share the
+    // same AdminShell chrome.
+    let tab = RwSignal::new("extras".to_string());
+    let is_extras = Memo::new(move |_| tab.get() == "extras");
+    let is_options = Memo::new(move |_| tab.get() == "options");
+
     view! {
         <AdminShell>
             <section class="extras-admin">
                 <header class="admin-bar">
-                    <h1>"Pizza-Extras"</h1>
+                    <h1>"Extras & Auswahl-Gruppen"</h1>
                 </header>
+                <nav class="admin-tabs">
+                    <button
+                        class=move || if is_extras.get() { "tab active" } else { "tab" }
+                        on:click=move |_| tab.set("extras".to_string())>
+                        "Extras (frei wählbar)"
+                    </button>
+                    <button
+                        class=move || if is_options.get() { "tab active" } else { "tab" }
+                        on:click=move |_| tab.set("options".to_string())>
+                        "Auswahl-Gruppen (Pflicht / max-N)"
+                    </button>
+                </nav>
 
-                <p class="hint">
-                    "Diese Liste erscheint im Online-Shop unter jeder Pizza/Calzone als Auswahl. "
-                    "Nicht aktive Extras werden dem Kunden nicht angezeigt."
-                </p>
+                <div class=move || if is_extras.get() { "tab-panel" } else { "tab-panel hidden" }>
+                    <p class="hint">
+                        "Diese Liste erscheint im Online-Shop unter jeder Pizza/Calzone als Auswahl. "
+                        "Nicht aktive Extras werden dem Kunden nicht angezeigt."
+                    </p>
 
-                <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
-                    {move || extras.get().map(|res| match res {
-                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                        Ok(rows) => view! { <ExtrasTable rows updater/> }.into_any(),
+                    <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+                        {move || extras.get().map(|res| match res {
+                            Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                            Ok(rows) => view! { <ExtrasTable rows updater/> }.into_any(),
+                        })}
+                    </Suspense>
+
+                    <h2>"Neuen Extra hinzufügen"</h2>
+                    <ActionForm action=creator attr:class="extras-create">
+                        <label>
+                            <span>"Bezeichnung"</span>
+                            <input type="text" name="label" required placeholder="z.B. Rucola"/>
+                        </label>
+                        <label>
+                            <span>"Preis (Cent)"</span>
+                            <input type="number" name="price_cents" min="0" value="100" required/>
+                        </label>
+                        <button type="submit" class="btn primary">"Hinzufügen"</button>
+                    </ActionForm>
+                    {move || creator.value().get().and_then(|res| match res {
+                        Err(e) => Some(view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any()),
+                        Ok(_) => None,
                     })}
-                </Suspense>
+                </div>
 
-                <h2>"Neuen Extra hinzufügen"</h2>
-                <ActionForm action=creator attr:class="extras-create">
-                    <label>
-                        <span>"Bezeichnung"</span>
-                        <input type="text" name="label" required placeholder="z.B. Rucola"/>
-                    </label>
-                    <label>
-                        <span>"Preis (Cent)"</span>
-                        <input type="number" name="price_cents" min="0" value="100" required/>
-                    </label>
-                    <button type="submit" class="btn primary">"Hinzufügen"</button>
-                </ActionForm>
-                {move || creator.value().get().and_then(|res| match res {
-                    Err(e) => Some(view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any()),
-                    Ok(_) => None,
-                })}
+                <div class=move || if is_options.get() { "tab-panel" } else { "tab-panel hidden" }>
+                    <crate::pages::admin::options_admin::OptionsAdminBody/>
+                </div>
             </section>
         </AdminShell>
     }

@@ -160,18 +160,14 @@ pub async fn create_voucher(form: CreateVoucherForm) -> Result<String, ServerFnE
         VoucherKind::Percent => {
             let p = form.percent_off.unwrap_or(0);
             if !(1..=100).contains(&p) {
-                return Err(ServerFnError::new(
-                    "Prozent muss zwischen 1 und 100 liegen",
-                ));
+                return Err(ServerFnError::new("Prozent muss zwischen 1 und 100 liegen"));
             }
             (Some(p), None)
         }
         VoucherKind::Fixed => {
             let c = form.amount_off_cents.unwrap_or(0);
             if c <= 0 {
-                return Err(ServerFnError::new(
-                    "Fester Rabatt muss > 0 Cent sein",
-                ));
+                return Err(ServerFnError::new("Fester Rabatt muss > 0 Cent sein"));
             }
             (None, Some(c))
         }
@@ -240,18 +236,14 @@ pub async fn update_voucher(form: UpdateVoucherForm) -> Result<(), ServerFnError
         VoucherKind::Percent => {
             let p = form.percent_off.unwrap_or(0);
             if !(1..=100).contains(&p) {
-                return Err(ServerFnError::new(
-                    "Prozent muss zwischen 1 und 100 liegen",
-                ));
+                return Err(ServerFnError::new("Prozent muss zwischen 1 und 100 liegen"));
             }
             (Some(p), None)
         }
         VoucherKind::Fixed => {
             let c = form.amount_off_cents.unwrap_or(0);
             if c <= 0 {
-                return Err(ServerFnError::new(
-                    "Fester Rabatt muss > 0 Cent sein",
-                ));
+                return Err(ServerFnError::new("Fester Rabatt muss > 0 Cent sein"));
             }
             (None, Some(c))
         }
@@ -307,14 +299,12 @@ pub async fn toggle_voucher(id: String, active: bool) -> Result<(), ServerFnErro
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
-    sqlx::query(
-        "UPDATE vouchers SET active = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1",
-    )
-    .bind(&id)
-    .bind(if active { 1 } else { 0 })
-    .execute(&db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("toggle voucher: {e}")))?;
+    sqlx::query("UPDATE vouchers SET active = ?2, updated_at = CURRENT_TIMESTAMP WHERE id = ?1")
+        .bind(&id)
+        .bind(if active { 1 } else { 0 })
+        .execute(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("toggle voucher: {e}")))?;
     Ok(())
 }
 
@@ -332,13 +322,12 @@ pub async fn delete_voucher(id: String) -> Result<(), ServerFnError> {
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
     // Reject delete if redemptions exist; admin should toggle off instead.
-    let used: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM voucher_redemptions WHERE voucher_id = ?1",
-    )
-    .bind(&id)
-    .fetch_one(&db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("count redemptions: {e}")))?;
+    let used: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM voucher_redemptions WHERE voucher_id = ?1")
+            .bind(&id)
+            .fetch_one(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("count redemptions: {e}")))?;
     if used.0 > 0 {
         return Err(ServerFnError::new(
             "Code wurde bereits eingelöst — bitte deaktivieren statt löschen.",
@@ -449,7 +438,10 @@ fn CreateVoucherCard(creator: ServerAction<CreateVoucher>) -> impl IntoView {
         let parse_int = |s: String| s.trim().parse::<i64>().ok();
         let parse_eur = |s: String| -> Option<i64> {
             let trimmed = s.trim().replace(',', ".");
-            trimmed.parse::<f64>().ok().map(|f| (f * 100.0).round() as i64)
+            trimmed
+                .parse::<f64>()
+                .ok()
+                .map(|f| (f * 100.0).round() as i64)
         };
 
         let form = CreateVoucherForm {
@@ -574,9 +566,9 @@ fn CreateVoucherCard(creator: ServerAction<CreateVoucher>) -> impl IntoView {
 
             <div class="actions">
                 <button class="btn primary" on:click=on_submit>"Anlegen"</button>
-                {move || creator.value().get().and_then(|res| match res {
-                    Ok(_) => Some(view! { <span class="ok">"✓ Gespeichert"</span> }.into_any()),
-                    Err(e) => Some(view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any()),
+                {move || creator.value().get().map(|res| match res {
+                    Ok(_) => view! { <span class="ok">"✓ Gespeichert"</span> }.into_any(),
+                    Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),
                 })}
             </div>
         </details>
@@ -862,4 +854,3 @@ fn VoucherEditPanel(
         </div>
     }
 }
-

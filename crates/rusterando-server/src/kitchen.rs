@@ -438,9 +438,7 @@ pub async fn build_order_for_kitchen(
         .try_get::<Option<String>, _>("voucher_code")
         .unwrap_or(None)
         .unwrap_or_default();
-    let voucher_discount_cents: i64 = row
-        .try_get::<i64, _>("voucher_discount_cents")
-        .unwrap_or(0);
+    let voucher_discount_cents: i64 = row.try_get::<i64, _>("voucher_discount_cents").unwrap_or(0);
     // SQLite returns strftime('%s', ...) as text. Parse to i64.
     let created_at_unix: i64 = row.get::<String, _>("created_at_unix").parse().unwrap_or(0);
     let updated_at_unix: i64 = row.get::<String, _>("updated_at_unix").parse().unwrap_or(0);

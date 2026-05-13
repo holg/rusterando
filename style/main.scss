@@ -2173,6 +2173,62 @@ button.add-item {
   }
 }
 
+// Required-choice option groups on /menu (Dressing, Beilage, …).
+// Each fieldset is a visually-bounded block so the customer can tell
+// the groups apart at a glance.
+.option-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0.4rem 0 0.5rem;
+}
+.option-group {
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.5rem 0.7rem 0.55rem;
+  background: #fffaf3;
+  > legend {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--text);
+    padding: 0 0.35rem;
+    .req { color: var(--primary); font-weight: 700; }
+  }
+  .option-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.2rem 0 0;
+    display: flex;
+    flex-direction: column;
+    // Soft divider line between options so radios don't merge visually.
+    > li + li {
+      border-top: 1px dashed var(--border);
+    }
+  }
+  .option-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.1rem;
+    cursor: pointer;
+    .option-label { flex: 1; }
+    .option-price {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.85rem;
+    }
+    input[type="radio"], input[type="checkbox"] {
+      accent-color: var(--primary);
+      flex: 0 0 auto;
+    }
+  }
+  .option-hint {
+    margin: 0.35rem 0 0;
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+}
+
 // Per-line extras list (cart drawer + invoice + customer confirmation).
 .cart-line .extras,
 .confirm-items .extras,
@@ -2209,6 +2265,115 @@ button.add-item {
     gap: 0.7rem;
     align-items: end;
     @media (max-width: 600px) { grid-template-columns: 1fr; }
+  }
+
+  // Tab bar above the Extras / Auswahl-Gruppen panels.
+  .admin-tabs {
+    display: flex;
+    gap: 0.5rem;
+    border-bottom: 2px solid var(--border);
+    margin: 1rem 0 1.25rem 0;
+
+    button.tab {
+      background: transparent;
+      color: var(--muted);
+      border: 1px solid transparent;
+      border-bottom: 0;
+      border-radius: 0.5rem 0.5rem 0 0;
+      padding: 0.55rem 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: -2px; // overlap the underline so active tab "owns" it
+    }
+    button.tab:hover {
+      color: var(--text);
+      background: rgba(0,0,0,0.03);
+    }
+    button.tab.active {
+      color: var(--primary);
+      background: var(--bg-elev);
+      border-color: var(--border);
+      border-bottom: 2px solid var(--bg-elev);
+    }
+  }
+  .tab-panel.hidden { display: none; }
+
+  // Per-group bulk-attach row inside the Auswahl-Gruppen tab.
+  .options-admin {
+    .option-group-card {
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      background: var(--bg-elev);
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    .og-grid {
+      display: grid;
+      grid-template-columns: 2fr 4rem 4rem 5rem auto;
+      gap: 0.6rem;
+      align-items: end;
+      @media (max-width: 720px) { grid-template-columns: 1fr 1fr; }
+    }
+    .og-actions { margin-top: 0.6rem; display: flex; gap: 0.5rem; }
+    .options-table {
+      width: 100%;
+      margin-top: 0.75rem;
+      border-collapse: collapse;
+      th, td { padding: 0.3rem 0.4rem; text-align: left; }
+      th { border-bottom: 1px solid var(--border); font-size: 0.85rem; color: var(--muted); }
+      .cell-input { width: 100%; padding: 0.3rem; }
+      .cell-input.narrow { width: 5rem; }
+      .muted { color: var(--muted); margin-left: 0.4rem; font-size: 0.8rem; }
+    }
+    .og-applied {
+      margin-top: 0.8rem;
+      padding-top: 0.6rem;
+      border-top: 1px dashed var(--border);
+      font-size: 0.85rem;
+      .label { color: var(--muted); margin-right: 0.4rem; }
+      .chip {
+        display: inline-block;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0.1rem 0.55rem;
+        margin: 0.1rem 0.25rem 0.1rem 0;
+        font-size: 0.8rem;
+      }
+      em.muted { color: var(--muted); font-style: italic; }
+    }
+    .og-bulk {
+      margin-top: 0.5rem;
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+      flex-wrap: wrap;
+      label { display: flex; gap: 0.4rem; align-items: center; }
+      select { padding: 0.35rem 0.5rem; border: 1px solid var(--border); border-radius: 0.3rem; }
+    }
+    .options-create {
+      display: grid;
+      grid-template-columns: 2fr 4rem 4rem auto;
+      gap: 0.6rem;
+      align-items: end;
+      margin-bottom: 1rem;
+      @media (max-width: 600px) { grid-template-columns: 1fr; }
+    }
+    .ok { color: var(--success); }
+    .warn {
+      margin: 0.5rem 0;
+      padding: 0.5rem 0.75rem;
+      background: #fff4e0;
+      border: 1px solid #f5c518;
+      border-radius: 0.4rem;
+      color: #5a3a00;
+    }
+    .opts-h {
+      margin: 0.8rem 0 0.3rem 0;
+      font-size: 0.9rem;
+      color: var(--muted);
+      font-weight: 600;
+    }
   }
 }
 

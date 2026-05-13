@@ -61,6 +61,24 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::admin::zones::DeleteZone>();
     leptos::server_fn::axum::register_explicit::<pages::admin::pdf::SavePdfTemplate>();
     leptos::server_fn::axum::register_explicit::<pages::admin::pdf::GetPdfDefaults>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::ListOptionGroupsAdmin>(
+    );
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::CreateOptionGroup>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::UpdateOptionGroup>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::DeleteOptionGroup>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::CreateOption>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::UpdateOption>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::DeleteOption>();
+    leptos::server_fn::axum::register_explicit::<
+        pages::admin::options_admin::ListCategoriesForAttach,
+    >();
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::ListGroupAttachments>(
+    );
+    leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::AttachGroupToCategory>(
+    );
+    leptos::server_fn::axum::register_explicit::<
+        pages::admin::options_admin::DetachGroupFromCategory,
+    >();
     leptos::server_fn::axum::register_explicit::<pages::session::SessionLogout>();
     leptos::server_fn::axum::register_explicit::<pages::session::CurrentRole>();
     leptos::server_fn::axum::register_explicit::<pages::session::RequireRoleOrRedirect>();

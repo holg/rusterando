@@ -227,9 +227,11 @@ pub mod ssr {
         delivery_fee_cents: i64,
     ) -> Result<VoucherPreview, ServerFnError> {
         let now = Utc::now().naive_utc();
-        let parse_iso = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-            .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
-            .ok();
+        let parse_iso = |s: &str| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+                .ok()
+        };
 
         if let Some(from) = v.valid_from.as_deref().and_then(parse_iso) {
             if now < from {
@@ -275,13 +277,12 @@ pub mod ssr {
 
         // Global cap: count all redemptions of this voucher_id.
         if v.global_cap > 0 {
-            let used: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM voucher_redemptions WHERE voucher_id = ?1",
-            )
-            .bind(&v.id)
-            .fetch_one(db)
-            .await
-            .map_err(|e| ServerFnError::new(format!("global cap check: {e}")))?;
+            let used: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM voucher_redemptions WHERE voucher_id = ?1")
+                    .bind(&v.id)
+                    .fetch_one(db)
+                    .await
+                    .map_err(|e| ServerFnError::new(format!("global cap check: {e}")))?;
             if used.0 >= v.global_cap {
                 return Ok(reject(v, "Code ist ausgeschöpft."));
             }
@@ -403,9 +404,11 @@ pub mod ssr {
 
         // Re-validate inside the txn — caps must read committed state.
         let now = Utc::now().naive_utc();
-        let parse_iso = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-            .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
-            .ok();
+        let parse_iso = |s: &str| {
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+                .ok()
+        };
         if let Some(from) = v.valid_from.as_deref().and_then(parse_iso) {
             if now < from {
                 return Err(ServerFnError::new("Code ist noch nicht gültig."));
@@ -432,13 +435,12 @@ pub mod ssr {
             )));
         }
         if v.global_cap > 0 {
-            let used: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM voucher_redemptions WHERE voucher_id = ?1",
-            )
-            .bind(&v.id)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(|e| ServerFnError::new(format!("global cap: {e}")))?;
+            let used: (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM voucher_redemptions WHERE voucher_id = ?1")
+                    .bind(&v.id)
+                    .fetch_one(&mut **tx)
+                    .await
+                    .map_err(|e| ServerFnError::new(format!("global cap: {e}")))?;
             if used.0 >= v.global_cap {
                 return Err(ServerFnError::new("Code ist ausgeschöpft."));
             }

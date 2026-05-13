@@ -215,19 +215,35 @@ fn SimpleFieldsCard(
         });
     };
     let reset_tag = move |_| {
-        let d = defaults.get().and_then(|r| r.ok()).map(|d| d.tagline).unwrap_or_default();
+        let d = defaults
+            .get()
+            .and_then(|r| r.ok())
+            .map(|d| d.tagline)
+            .unwrap_or_default();
         reset("pdf_tagline", tag_sig, d);
     };
     let reset_hours = move |_| {
-        let d = defaults.get().and_then(|r| r.ok()).map(|d| d.hours).unwrap_or_default();
+        let d = defaults
+            .get()
+            .and_then(|r| r.ok())
+            .map(|d| d.hours)
+            .unwrap_or_default();
         reset("pdf_hours", hours_sig, d);
     };
     let reset_pizza = move |_| {
-        let d = defaults.get().and_then(|r| r.ok()).map(|d| d.extras_pizza).unwrap_or_default();
+        let d = defaults
+            .get()
+            .and_then(|r| r.ok())
+            .map(|d| d.extras_pizza)
+            .unwrap_or_default();
         reset("pdf_extras_pizza", pizza_sig, d);
     };
     let reset_pasta = move |_| {
-        let d = defaults.get().and_then(|r| r.ok()).map(|d| d.extras_pasta).unwrap_or_default();
+        let d = defaults
+            .get()
+            .and_then(|r| r.ok())
+            .map(|d| d.extras_pasta)
+            .unwrap_or_default();
         reset("pdf_extras_pasta", pasta_sig, d);
     };
 
@@ -376,7 +392,7 @@ fn ImageSlot(
                     if p.is_empty() { "—".to_string() } else { p }
                 }}
             </p>
-            {move || path.get().is_empty().then(|| ()).is_none().then(|| view! {
+            {move || path.get().is_empty().then_some(()).is_none().then(|| view! {
                 <img class="preview"
                     src=move || path.get()
                     alt="Vorschau"/>
@@ -415,14 +431,11 @@ async fn upload_via_fetch(file: web_sys::File) -> Result<String, String> {
     let resp: web_sys::Response = resp_value
         .dyn_into()
         .map_err(|_| "response cast".to_string())?;
-    let text = JsFuture::from(
-        resp.text()
-            .map_err(|_| "response.text()".to_string())?,
-    )
-    .await
-    .map_err(|_| "response body".to_string())?
-    .as_string()
-    .unwrap_or_default();
+    let text = JsFuture::from(resp.text().map_err(|_| "response.text()".to_string())?)
+        .await
+        .map_err(|_| "response body".to_string())?
+        .as_string()
+        .unwrap_or_default();
     if !resp.ok() {
         return Err(text);
     }
@@ -543,14 +556,11 @@ async fn test_render(source: &str) -> Result<(), String> {
     if resp.ok() {
         Ok(())
     } else {
-        let text = JsFuture::from(
-            resp.text()
-                .map_err(|_| "response.text()".to_string())?,
-        )
-        .await
-        .map_err(|_| "response body".to_string())?
-        .as_string()
-        .unwrap_or_else(|| format!("HTTP {}", resp.status()));
+        let text = JsFuture::from(resp.text().map_err(|_| "response.text()".to_string())?)
+            .await
+            .map_err(|_| "response body".to_string())?
+            .as_string()
+            .unwrap_or_else(|| format!("HTTP {}", resp.status()));
         Err(text)
     }
 }

@@ -32,6 +32,12 @@ pub async fn update_menu_item(
     is_spicy: bool,
     included_extras_count: i64,
     flat_extra_price_cents: Option<i64>,
+    allow_extras: bool,
+    /// Replace the option-group attachments for this item. Empty
+    /// vec = no required-choice groups attached (item has no
+    /// dressings / sides / etc. picker).
+    #[server(default)]
+    option_group_ids: Vec<String>,
 ) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
 
@@ -64,6 +70,11 @@ pub async fn update_menu_item(
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
+    // One transaction: item update + option-group attachment swap.
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("begin tx: {e}")))?;
     sqlx::query(
         "UPDATE menu_items
          SET category_id = ?1,
@@ -79,8 +90,9 @@ pub async fn update_menu_item(
              is_spicy = ?11,
              included_extras_count = ?12,
              flat_extra_price_cents = ?13,
+             allow_extras = ?14,
              updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?14",
+         WHERE id = ?15",
     )
     .bind(&category_id)
     .bind(&menu_number)
@@ -95,10 +107,39 @@ pub async fn update_menu_item(
     .bind(if is_spicy { 1_i64 } else { 0_i64 })
     .bind(included_extras_count)
     .bind(flat_extra_price_cents)
+    .bind(if allow_extras { 1_i64 } else { 0_i64 })
     .bind(&id)
-    .execute(&db)
+    .execute(&mut *tx)
     .await
     .map_err(|e| ServerFnError::new(format!("update item: {e}")))?;
+
+    // Replace-all on attachments. With a few groups per item this is
+    // cheap and avoids set-diff logic. Skip rows where group_id is
+    // empty (defensive — caller shouldn't send those anyway).
+    sqlx::query("DELETE FROM menu_item_option_groups WHERE menu_item_id = ?1")
+        .bind(&id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("clear attachments: {e}")))?;
+    for (idx, gid) in option_group_ids
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .enumerate()
+    {
+        sqlx::query(
+            "INSERT INTO menu_item_option_groups (menu_item_id, group_id, sort_order)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(&id)
+        .bind(gid)
+        .bind(idx as i64 * 10)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("attach group: {e}")))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("commit: {e}")))?;
 
     Ok(())
 }
@@ -231,6 +272,14 @@ pub fn AdminMenuPage() -> impl IntoView {
         move || (saver.version().get(), creator.version().get()),
         |_| async move { list_admin_menu().await },
     );
+    // All option-groups for the per-item multi-select. Stable enough
+    // that we refetch only on save (so a new group created via the
+    // Auswahl-Gruppen tab on /admin/extras shows up after the next
+    // per-item save).
+    let groups = Resource::new(
+        move || saver.version().get(),
+        |_| async move { crate::pages::admin::options_admin::list_option_groups_admin().await },
+    );
 
     view! {
         <AdminShell>
@@ -241,10 +290,22 @@ pub fn AdminMenuPage() -> impl IntoView {
                 </div>
 
                 <Suspense fallback=|| view! { <p>"Lädt…"</p> }>
-                    {move || menu.get().map(|res| match res {
-                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                        Ok(payload) => view! { <Editor payload saver creator/> }.into_any(),
-                    })}
+                    {move || {
+                        let m = menu.get();
+                        let g = groups.get();
+                        match (m, g) {
+                            (Some(Err(e)), _) => view! {
+                                <p class="error">{format!("Fehler: {e}")}</p>
+                            }.into_any(),
+                            (_, Some(Err(e))) => view! {
+                                <p class="error">{format!("Auswahl-Gruppen: {e}")}</p>
+                            }.into_any(),
+                            (Some(Ok(payload)), Some(Ok(group_list))) => view! {
+                                <Editor payload group_list saver creator/>
+                            }.into_any(),
+                            _ => view! { <p>"Lädt…"</p> }.into_any(),
+                        }
+                    }}
                 </Suspense>
 
                 {move || match saver.value().get() {
@@ -265,6 +326,8 @@ pub fn AdminMenuPage() -> impl IntoView {
 #[component]
 fn Editor(
     payload: MenuPayload,
+    /// All option-groups in the system, used by per-item multi-select.
+    group_list: Vec<crate::pages::admin::options_admin::OptionGroupAdminRow>,
     saver: ServerAction<UpdateMenuItem>,
     creator: ServerAction<CreateMenuItem>,
 ) -> impl IntoView {
@@ -287,7 +350,8 @@ fn Editor(
                 let allergens = allergens.clone();
                 let additives = additives.clone();
                 let cats_for_select = cats_for_select.clone();
-                view! { <CategoryBlock cat cat_items allergens additives cats_for_select saver creator/> }
+                let group_list = group_list.clone();
+                view! { <CategoryBlock cat cat_items allergens additives cats_for_select group_list saver creator/> }
             }).collect_view()}
         </div>
     }
@@ -300,6 +364,7 @@ fn CategoryBlock(
     allergens: Vec<LegendEntry>,
     additives: Vec<LegendEntry>,
     cats_for_select: Vec<MenuCategory>,
+    group_list: Vec<crate::pages::admin::options_admin::OptionGroupAdminRow>,
     saver: ServerAction<UpdateMenuItem>,
     creator: ServerAction<CreateMenuItem>,
 ) -> impl IntoView {
@@ -318,7 +383,8 @@ fn CategoryBlock(
                     let allergens = allergens.clone();
                     let additives = additives.clone();
                     let cats_for_select = cats_for_select.clone();
-                    view! { <ItemCard it allergens additives cats_for_select saver/> }
+                    let group_list = group_list.clone();
+                    view! { <ItemCard it allergens additives cats_for_select group_list saver/> }
                 }).collect_view()}
                 <NewItemRow
                     cat_id=cat_id.clone()
@@ -336,6 +402,7 @@ fn ItemCard(
     allergens: Vec<LegendEntry>,
     additives: Vec<LegendEntry>,
     cats_for_select: Vec<MenuCategory>,
+    group_list: Vec<crate::pages::admin::options_admin::OptionGroupAdminRow>,
     saver: ServerAction<UpdateMenuItem>,
 ) -> impl IntoView {
     let id = it.id.clone();
@@ -357,6 +424,11 @@ fn ItemCard(
     // "fall back to pizza_extras catalog" (encoded as None on the wire).
     let included_extras = RwSignal::new(it.included_extras_count);
     let flat_extra_price = RwSignal::new(it.flat_extra_price_cents.unwrap_or(0));
+    let allow_extras = RwSignal::new(it.allow_extras);
+    // Currently-attached option-group ids. Loaded from the item's
+    // own payload (menu loader already joins menu_item_option_groups).
+    let attached_groups: RwSignal<std::collections::HashSet<String>> =
+        RwSignal::new(it.option_groups.iter().map(|g| g.id.clone()).collect());
 
     let on_save = {
         let id = id.clone();
@@ -388,6 +460,8 @@ fn ItemCard(
                         None
                     }
                 },
+                allow_extras: allow_extras.get(),
+                option_group_ids: attached_groups.get().into_iter().collect(),
             });
         }
     };
@@ -514,11 +588,59 @@ fn ItemCard(
                         on:change=move |ev| is_spicy.set(event_target_checked(&ev))/>
                     <span>"scharf"</span>
                 </label>
+                <label class="flag" title="Globale Extras-Liste (Tabasco, extra Käse …) für diesen Artikel zeigen.">
+                    <input type="checkbox"
+                        prop:checked=move || allow_extras.get()
+                        on:change=move |ev| allow_extras.set(event_target_checked(&ev))/>
+                    <span>"Extras erlaubt"</span>
+                </label>
                 <button class="btn ghost danger" type="button" on:click=toggle_listed>
                     {move || if is_listed.get() { "✕ Vom Menü entfernen" } else { "↺ Wieder ins Menü aufnehmen" }}
                 </button>
                 <button class="btn primary" type="button" on:click=on_save>"Speichern"</button>
             </div>
+            // Option-group attachment row — one checkbox per available group.
+            // Empty if no groups are configured yet.
+            {if group_list.is_empty() {
+                view! {
+                    <p class="hint muted">
+                        "Auswahl-Gruppen (z.B. Dressing) erst unter "
+                        <a href="/admin/extras">"/admin/extras → Auswahl-Gruppen"</a>
+                        " anlegen, dann erscheinen sie hier."
+                    </p>
+                }.into_any()
+            } else {
+                view! {
+                    <div class="option-group-attach">
+                        <span class="label">"Auswahl-Gruppen:"</span>
+                        {group_list.into_iter().map(|g| {
+                            let gid_check = g.id.clone();
+                            let gid_change = g.id.clone();
+                            let label = format!("{} ({}–{})", g.label, g.min_select, g.max_select);
+                            let checked = Memo::new(move |_| {
+                                attached_groups.with(|s| s.contains(&gid_check))
+                            });
+                            view! {
+                                <label class="flag">
+                                    <input type="checkbox"
+                                        prop:checked=move || checked.get()
+                                        on:change=move |ev| {
+                                            let on = event_target_checked(&ev);
+                                            attached_groups.update(|s| {
+                                                if on {
+                                                    s.insert(gid_change.clone());
+                                                } else {
+                                                    s.remove(&gid_change);
+                                                }
+                                            });
+                                        }/>
+                                    <span>{label}</span>
+                                </label>
+                            }
+                        }).collect_view()}
+                    </div>
+                }.into_any()
+            }}
             <Show when=move || !is_listed.get() fallback=|| ()>
                 <p class="hint warn">
                     "Dieser Artikel ist auf der öffentlichen Speisekarte ausgeblendet. Bestehende Bestellungen bleiben erhalten."

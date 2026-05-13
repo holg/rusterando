@@ -95,13 +95,40 @@ async fn main() {
         .await
         .expect("open sqlite pool");
 
-    // DB-Schema-Versionierung läuft aktuell out-of-band: die Produktion
-    // hat eine fertige `data/<shop>.db`, neue Forks müssen ihre eigene
-    // Setup-Prozedur fahren (z.B. via sqlite3 < schema.sql aus dem
-    // privaten data/-Verzeichnis). Die alte `sqlx::migrate!()`-Aufruf
-    // erforderte ein eingechecktes `migrations/`-Verzeichnis, das wir
-    // im public repo nicht mehr halten.
-    tracing::info!("skipping migrations: DB-Schema wird out-of-band gepflegt");
+    // Two-layer migrations:
+    //   * the embedded folder under repo `migrations/` is the
+    //     brand-neutral baseline schema. Compile-time included via
+    //     sqlx::migrate!() so every binary carries its own schema.
+    //   * an optional runtime overlay folder (env: MIGRATIONS_OVERLAY)
+    //     is applied AFTER the baseline. Used by per-deployment
+    //     overlays (e.g. Davids' menu seed) that must not leak into
+    //     the public repo. Each overlay folder is a normal sqlx
+    //     migrations dir, with its own version timestamps.
+    //
+    // sqlx tracks both layers in the same _sqlx_migrations table; the
+    // overlay's versions must NOT clash with baseline versions. Use a
+    // distinct timestamp prefix (e.g. 99999999000001) in overlay files
+    // so they sort after every baseline migration.
+    sqlx::migrate!("../../migrations")
+        .run(&db)
+        .await
+        .expect("run baseline migrations");
+    tracing::info!("baseline migrations applied");
+
+    if let Ok(overlay_dir) = std::env::var("MIGRATIONS_OVERLAY") {
+        let overlay_path = std::path::PathBuf::from(&overlay_dir);
+        match sqlx::migrate::Migrator::new(overlay_path.as_path()).await {
+            Ok(migrator) => {
+                migrator.run(&db).await.expect("run overlay migrations");
+                tracing::info!("overlay migrations applied: {overlay_dir}");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "MIGRATIONS_OVERLAY={overlay_dir} could not be read: {e} — skipping overlay"
+                );
+            }
+        }
+    }
 
     let admin_password = std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| {
         tracing::warn!("ADMIN_PASSWORD not set — defaulting to 'admin' for local dev");
@@ -565,11 +592,7 @@ async fn pdf_test_render_handler(
     {
         Ok(p) => p,
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Datenbank: {e}"),
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Datenbank: {e}")).into_response();
         }
     };
     // Pull live override images so the test-render uses the same
@@ -683,7 +706,11 @@ async fn history_csv_handler(
         .as_deref()
         .map(|s| matches!(s, "true" | "1" | "yes"))
         .unwrap_or(false);
-    let mode_clause = if include_test { "" } else { " AND stripe_mode = 'live'" };
+    let mode_clause = if include_test {
+        ""
+    } else {
+        " AND stripe_mode = 'live'"
+    };
 
     let sql = format!(
         "SELECT order_number, created_at, status, contact_name, contact_phone,

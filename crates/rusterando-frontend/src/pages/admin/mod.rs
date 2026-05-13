@@ -6,6 +6,7 @@ pub mod home;
 pub mod home_admin;
 pub mod login;
 pub mod menu_admin;
+pub mod options_admin;
 pub mod orders;
 pub mod pdf;
 pub mod settings_admin;

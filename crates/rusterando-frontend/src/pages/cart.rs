@@ -5,7 +5,7 @@ use leptos::prelude::*;
 use rusterando_shared::models::CartView;
 
 #[cfg(feature = "ssr")]
-use rusterando_shared::models::{CartExtra, CartLine, SizeChoice};
+use rusterando_shared::models::{CartExtra, CartLine, CartSelectedOption, SizeChoice};
 
 #[cfg(feature = "ssr")]
 const CART_COOKIE: &str = "dp_cart";
@@ -71,6 +71,7 @@ pub mod ssr {
                 i64,
                 i64,
                 Option<String>,
+                Option<String>,
             ),
         >(
             "SELECT ci.id,
@@ -80,7 +81,8 @@ pub mod ssr {
                     ci.options_json,
                     ci.quantity,
                     ci.unit_price_cents,
-                    ci.extras_json
+                    ci.extras_json,
+                    ci.selected_options_json
              FROM cart_items ci
              JOIN menu_items mi ON mi.id = ci.menu_item_id
              WHERE ci.cart_id = ?1
@@ -104,6 +106,7 @@ pub mod ssr {
             quantity,
             unit_price_cents,
             extras_json,
+            selected_options_json,
         ) in rows
         {
             let opts: Options = serde_json::from_str(&options_json).unwrap_or_default();
@@ -111,8 +114,13 @@ pub mod ssr {
                 .as_deref()
                 .and_then(|j| serde_json::from_str(j).ok())
                 .unwrap_or_default();
+            let selected_options: Vec<CartSelectedOption> = selected_options_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default();
             let extras_unit_cents: i64 = extras.iter().map(|e| e.price_cents).sum();
-            let line_total = (unit_price_cents + extras_unit_cents) * quantity;
+            let options_unit_cents: i64 = selected_options.iter().map(|o| o.price_cents).sum();
+            let line_total = (unit_price_cents + extras_unit_cents + options_unit_cents) * quantity;
             subtotal += line_total;
             item_count += quantity;
             lines.push(CartLine {
@@ -126,6 +134,7 @@ pub mod ssr {
                 unit_price_cents,
                 extras_unit_cents,
                 extras,
+                selected_options,
                 line_total_cents: line_total,
             });
         }
@@ -178,6 +187,12 @@ pub async fn add_to_cart(
     /// changes later don't rewrite history. Empty for non-pizza items.
     #[server(default)]
     extras_ids: Vec<String>,
+    /// Catalog ids of options the customer picked from required-choice
+    /// groups (e.g. a salad's dressing). Server resolves to labels +
+    /// prices, validates min/max per group, snapshots. Empty when the
+    /// item has no option groups attached.
+    #[server(default)]
+    selected_option_ids: Vec<String>,
 ) -> Result<CartView, ServerFnError> {
     use sqlx::SqlitePool;
 
@@ -312,17 +327,109 @@ pub async fn add_to_cart(
         )
     };
 
+    // Resolve picked options against item_option_groups + item_options.
+    // We need to know:
+    //   1. which groups this item has (for min/max validation)
+    //   2. which group each chosen option_id belongs to (to count
+    //      picks per group)
+    //   3. the snapshot label + price for the receipt
+    type GroupRow = (String, String, i64, i64);
+    let group_rows: Vec<GroupRow> = sqlx::query_as(
+        "SELECT g.id, g.label, g.min_select, g.max_select
+         FROM item_option_groups g
+         JOIN menu_item_option_groups mg ON mg.group_id = g.id
+         WHERE mg.menu_item_id = ?1 AND g.is_active = 1
+         ORDER BY g.sort_order, g.id",
+    )
+    .bind(&menu_item_id)
+    .fetch_all(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load option groups: {e}")))?;
+
+    let mut selected_options: Vec<CartSelectedOption> = Vec::new();
+    if !selected_option_ids.is_empty() {
+        let placeholders = selected_option_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        let q = format!(
+            "SELECT o.id, o.label, o.price_cents, o.group_id, g.label AS group_label
+             FROM item_options o
+             JOIN item_option_groups g ON g.id = o.group_id
+             WHERE o.is_active = 1 AND g.is_active = 1
+               AND o.id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_as::<_, (String, String, i64, String, String)>(&q);
+        for id in &selected_option_ids {
+            query = query.bind(id);
+        }
+        let resolved = query
+            .fetch_all(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("resolve options: {e}")))?;
+
+        // Reject picks from groups not attached to this item — protects
+        // against clients submitting arbitrary option ids by URL hack.
+        let allowed_group_ids: std::collections::HashSet<&str> =
+            group_rows.iter().map(|(id, _, _, _)| id.as_str()).collect();
+        for (oid, olabel, price_cents, gid, glabel) in resolved {
+            if !allowed_group_ids.contains(gid.as_str()) {
+                return Err(ServerFnError::new(format!(
+                    "Option {oid} gehört nicht zu einer für diesen Artikel verfügbaren Gruppe"
+                )));
+            }
+            selected_options.push(CartSelectedOption {
+                group_id: gid,
+                group_label: glabel,
+                option_id: oid,
+                option_label: olabel,
+                price_cents,
+            });
+        }
+    }
+
+    // Validate min/max per attached group against the picks we got.
+    for (gid, glabel, min_sel, max_sel) in &group_rows {
+        let picked_count = selected_options
+            .iter()
+            .filter(|o| &o.group_id == gid)
+            .count() as i64;
+        if picked_count < *min_sel {
+            return Err(ServerFnError::new(format!(
+                "Bitte mindestens {min_sel} Auswahl bei \"{glabel}\""
+            )));
+        }
+        if picked_count > *max_sel {
+            return Err(ServerFnError::new(format!(
+                "Höchstens {max_sel} Auswahl bei \"{glabel}\" möglich"
+            )));
+        }
+    }
+
+    let selected_options_json = if selected_options.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&selected_options)
+                .map_err(|e| ServerFnError::new(format!("serialise options: {e}")))?,
+        )
+    };
+
     // Merge with an existing identical line (same item + same options + same
-    // extras). Different extras → new line, even if the base item matches.
+    // extras + same option picks). Different extras → new line, even if the
+    // base item matches.
     let existing: Option<(String, i64)> = sqlx::query_as(
         "SELECT id, quantity FROM cart_items
          WHERE cart_id = ?1 AND menu_item_id = ?2 AND options_json = ?3
-               AND COALESCE(extras_json, '') = COALESCE(?4, '')",
+               AND COALESCE(extras_json, '') = COALESCE(?4, '')
+               AND COALESCE(selected_options_json, '') = COALESCE(?5, '')",
     )
     .bind(&cart_id)
     .bind(&menu_item_id)
     .bind(&opts_json)
     .bind(extras_json.as_deref())
+    .bind(selected_options_json.as_deref())
     .fetch_optional(&db)
     .await
     .map_err(|e| ServerFnError::new(format!("lookup existing: {e}")))?;
@@ -338,8 +445,9 @@ pub async fn add_to_cart(
         let line_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO cart_items
-                (id, cart_id, menu_item_id, quantity, options_json, unit_price_cents, extras_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (id, cart_id, menu_item_id, quantity, options_json,
+                 unit_price_cents, extras_json, selected_options_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(&line_id)
         .bind(&cart_id)
@@ -348,6 +456,7 @@ pub async fn add_to_cart(
         .bind(&opts_json)
         .bind(unit_price)
         .bind(extras_json.as_deref())
+        .bind(selected_options_json.as_deref())
         .execute(&db)
         .await
         .map_err(|e| ServerFnError::new(format!("insert line: {e}")))?;

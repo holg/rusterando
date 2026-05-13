@@ -141,8 +141,6 @@ pub async fn list_admin_menu() -> Result<MenuPayload, ServerFnError> {
 /// to listed items only (`is_listed = 1`).
 #[cfg(feature = "ssr")]
 async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>, ServerFnError> {
-    // sqlx's tuple FromRow tops out at 16 elements; we have 18, so use
-    // a private struct with #[derive(sqlx::FromRow)].
     #[derive(sqlx::FromRow)]
     struct ItemRow {
         id: String,
@@ -163,6 +161,7 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
         sort_order: i64,
         included_extras_count: i64,
         flat_extra_price_cents: Option<i64>,
+        allow_extras: i64,
     }
 
     let where_clause = if admin { "" } else { "WHERE is_listed = 1" };
@@ -170,7 +169,7 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
         "SELECT id, category_id, menu_number, name, description, item_type,
                 price_small_cents, price_large_cents, size_small_label, size_large_label,
                 allergen_codes, additive_codes, is_spicy, is_available, is_listed, sort_order,
-                included_extras_count, flat_extra_price_cents
+                included_extras_count, flat_extra_price_cents, allow_extras
          FROM menu_items
          {where_clause}
          ORDER BY sort_order,
@@ -182,27 +181,82 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
         .await
         .map_err(|e| ServerFnError::new(format!("load items: {e}")))?;
 
+    // Per-item option groups + their options. Load in two batched
+    // queries so we don't N+1 even with 100+ items on the menu.
+    use rusterando_shared::models::{OptionGroup, OptionItem};
+    use std::collections::HashMap;
+
+    let group_rows = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(
+        "SELECT mg.menu_item_id, g.id, g.label, g.min_select, g.max_select, g.sort_order
+         FROM menu_item_option_groups mg
+         JOIN item_option_groups g ON g.id = mg.group_id
+         WHERE g.is_active = 1
+         ORDER BY mg.menu_item_id, g.sort_order, g.id",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load option groups: {e}")))?;
+
+    // group_id → Vec<OptionItem>
+    let option_rows = sqlx::query_as::<_, (String, String, String, i64, i64)>(
+        "SELECT group_id, id, label, price_cents, sort_order
+         FROM item_options
+         WHERE is_active = 1
+         ORDER BY group_id, sort_order, id",
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load options: {e}")))?;
+
+    let mut options_by_group: HashMap<String, Vec<OptionItem>> = HashMap::new();
+    for (gid, oid, label, price_cents, sort_order) in option_rows {
+        options_by_group.entry(gid).or_default().push(OptionItem {
+            id: oid,
+            label,
+            price_cents,
+            sort_order,
+        });
+    }
+
+    let mut groups_by_item: HashMap<String, Vec<OptionGroup>> = HashMap::new();
+    for (mi_id, gid, glabel, min_sel, max_sel, sort_order) in group_rows {
+        let options = options_by_group.get(&gid).cloned().unwrap_or_default();
+        groups_by_item.entry(mi_id).or_default().push(OptionGroup {
+            id: gid,
+            label: glabel,
+            min_select: min_sel,
+            max_select: max_sel,
+            sort_order,
+            options,
+        });
+    }
+
     Ok(item_rows
         .into_iter()
-        .map(|r| MenuItem {
-            id: r.id,
-            category_id: r.category_id,
-            menu_number: r.menu_number,
-            name: r.name,
-            description: r.description,
-            item_type: r.item_type,
-            price_small_cents: r.price_small_cents,
-            price_large_cents: r.price_large_cents,
-            size_small_label: r.size_small_label,
-            size_large_label: r.size_large_label,
-            allergen_codes: r.allergen_codes,
-            additive_codes: r.additive_codes,
-            is_spicy: r.is_spicy != 0,
-            is_available: r.is_available != 0,
-            is_listed: r.is_listed != 0,
-            sort_order: r.sort_order,
-            included_extras_count: r.included_extras_count,
-            flat_extra_price_cents: r.flat_extra_price_cents,
+        .map(|r| {
+            let option_groups = groups_by_item.remove(&r.id).unwrap_or_default();
+            MenuItem {
+                id: r.id,
+                category_id: r.category_id,
+                menu_number: r.menu_number,
+                name: r.name,
+                description: r.description,
+                item_type: r.item_type,
+                price_small_cents: r.price_small_cents,
+                price_large_cents: r.price_large_cents,
+                size_small_label: r.size_small_label,
+                size_large_label: r.size_large_label,
+                allergen_codes: r.allergen_codes,
+                additive_codes: r.additive_codes,
+                is_spicy: r.is_spicy != 0,
+                is_available: r.is_available != 0,
+                is_listed: r.is_listed != 0,
+                sort_order: r.sort_order,
+                included_extras_count: r.included_extras_count,
+                flat_extra_price_cents: r.flat_extra_price_cents,
+                allow_extras: r.allow_extras != 0,
+                option_groups,
+            }
         })
         .collect())
 }
@@ -369,12 +423,64 @@ fn Card(it: MenuItem) -> impl IntoView {
     let small_price = it.price_small_cents;
     let large_price = it.price_large_cents.unwrap_or(0);
 
-    // Extras picker is shown only for pizza-type items. Other categories
-    // (drinks, salads, pasta) skip it; the schema would let us extend later.
-    let allows_extras = matches!(it.item_type.as_str(), "pizza" | "calzone");
+    // Whether the extras (Tabasco, extra cheese, …) checkboxes are
+    // shown for this item. Driven by the per-item `allow_extras`
+    // column; the legacy "pizza | calzone" heuristic was wrong for
+    // pasta items that DO allow extras and salads that don't.
+    let allows_extras = it.allow_extras;
     let selected_extras: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
     let extras_catalog: StoredValue<Vec<PizzaExtra>> =
         use_context().unwrap_or_else(|| StoredValue::new(Vec::new()));
+
+    // Required-choice option groups (e.g. salad dressing). Tracked as
+    // a parallel signal `(group_id → Vec<option_id>)` so a single
+    // dressing pick is a 1-element Vec, and "pick up to 2 sides"
+    // groups also work.
+    let option_groups: StoredValue<Vec<rusterando_shared::models::OptionGroup>> =
+        StoredValue::new(it.option_groups.clone());
+    let selected_options: RwSignal<std::collections::HashMap<String, Vec<String>>> =
+        RwSignal::new(std::collections::HashMap::new());
+
+    // Flatten all picked option_ids for the AddToCart dispatch.
+    let collect_option_ids = move || -> Vec<String> {
+        selected_options
+            .get_untracked()
+            .into_values()
+            .flatten()
+            .collect()
+    };
+
+    // True iff every group with `min_select > 0` has at least
+    // min_select picks AND no group exceeds max_select. Used to gate
+    // the size buttons.
+    let options_valid = Memo::new(move |_| -> bool {
+        let picks = selected_options.get();
+        option_groups.with_value(|groups| {
+            groups.iter().all(|g| {
+                let n = picks.get(&g.id).map(|v| v.len() as i64).unwrap_or(0);
+                n >= g.min_select && n <= g.max_select
+            })
+        })
+    });
+    // Sum of picked option prices, for the live total price on the
+    // add buttons. v1 dressings are all 0 €, but the wiring is here
+    // for premium-options later.
+    let options_sum_cents = Memo::new(move |_| -> i64 {
+        selected_options.with(|m| {
+            let ids: std::collections::HashSet<&str> =
+                m.values().flatten().map(String::as_str).collect();
+            if ids.is_empty() {
+                return 0;
+            }
+            option_groups.with_value(|gs| {
+                gs.iter()
+                    .flat_map(|g| g.options.iter())
+                    .filter(|o| ids.contains(o.id.as_str()))
+                    .map(|o| o.price_cents)
+                    .sum()
+            })
+        })
+    });
 
     // Per-item flat-pricing rule (mirrors `add_to_cart` in cart.rs):
     //   * `included` extras are free.
@@ -422,8 +528,10 @@ fn Card(it: MenuItem) -> impl IntoView {
                 size: size.to_string(),
                 quantity: 1,
                 extras_ids: selected_extras.get_untracked(),
+                selected_option_ids: collect_option_ids(),
             });
             selected_extras.set(Vec::new());
+            selected_options.set(std::collections::HashMap::new());
             ctx.open.set(true);
         }
     };
@@ -435,8 +543,10 @@ fn Card(it: MenuItem) -> impl IntoView {
                 size: "large".to_string(),
                 quantity: 1,
                 extras_ids: selected_extras.get_untracked(),
+                selected_option_ids: collect_option_ids(),
             });
             selected_extras.set(Vec::new());
+            selected_options.set(std::collections::HashMap::new());
             ctx.open.set(true);
         }
     };
@@ -469,6 +579,10 @@ fn Card(it: MenuItem) -> impl IntoView {
                     </span>
                 })}
             </div>
+            <OptionGroupsPicker
+                groups=option_groups
+                selected=selected_options
+            />
             {allows_extras.then(|| view! {
                 <ExtrasPicker
                     selected=selected_extras
@@ -480,25 +594,31 @@ fn Card(it: MenuItem) -> impl IntoView {
             <div class="add-row">
                 {if has_large {
                     view! {
-                        <button class="add" disabled=unavailable on:click=add_small>
+                        <button class="add"
+                            disabled=move || unavailable || !options_valid.get()
+                            on:click=add_small>
                             <span class="add-size">{small_label.clone()}</span>
                             <span class="add-price">
-                                {move || format_eur(small_price + extras_sum_cents.get())}
+                                {move || format_eur(small_price + extras_sum_cents.get() + options_sum_cents.get())}
                             </span>
                         </button>
-                        <button class="add" disabled=unavailable on:click=add_large>
+                        <button class="add"
+                            disabled=move || unavailable || !options_valid.get()
+                            on:click=add_large>
                             <span class="add-size">{large_label.clone()}</span>
                             <span class="add-price">
-                                {move || format_eur(large_price + extras_sum_cents.get())}
+                                {move || format_eur(large_price + extras_sum_cents.get() + options_sum_cents.get())}
                             </span>
                         </button>
                     }.into_any()
                 } else {
                     view! {
-                        <button class="add wide" disabled=unavailable on:click=add_small>
+                        <button class="add wide"
+                            disabled=move || unavailable || !options_valid.get()
+                            on:click=add_small>
                             <span class="add-size">"Hinzufügen"</span>
                             <span class="add-price">
-                                {move || format_eur(small_price + extras_sum_cents.get())}
+                                {move || format_eur(small_price + extras_sum_cents.get() + options_sum_cents.get())}
                             </span>
                         </button>
                     }.into_any()
@@ -606,6 +726,98 @@ fn ExtrasPicker(
                 }).collect_view()}
             </ul>
         </details>
+    }
+    .into_any()
+}
+
+/// Required-choice option groups (Dressing, Beilage, …). Renders one
+/// fieldset per group. max_select==1 → radio buttons; otherwise
+/// checkboxes capped at max_select picks.
+#[component]
+fn OptionGroupsPicker(
+    groups: StoredValue<Vec<rusterando_shared::models::OptionGroup>>,
+    selected: RwSignal<std::collections::HashMap<String, Vec<String>>>,
+) -> impl IntoView {
+    let list = groups.with_value(|v| v.clone());
+    if list.is_empty() {
+        return ().into_any();
+    }
+    view! {
+        <div class="option-groups">
+            {list.into_iter().map(|g| {
+                let group_id = g.id.clone();
+                let label = g.label.clone();
+                let required = g.min_select > 0;
+                let single = g.max_select == 1;
+                let max_select = g.max_select;
+                let min_select = g.min_select;
+                view! {
+                    <fieldset class="option-group">
+                        <legend>
+                            {label}
+                            {required.then(|| view! { <span class="req">" *"</span> })}
+                        </legend>
+                        <ul class="option-list">
+                            {g.options.into_iter().map(|o| {
+                                let opt_id = o.id.clone();
+                                let opt_label = o.label.clone();
+                                let opt_price = o.price_cents;
+                                let gid_check = group_id.clone();
+                                let oid_check = opt_id.clone();
+                                let gid_change = group_id.clone();
+                                let oid_change = opt_id.clone();
+                                let is_picked = Memo::new(move |_| {
+                                    selected.with(|m| {
+                                        m.get(&gid_check).map(|v| v.contains(&oid_check)).unwrap_or(false)
+                                    })
+                                });
+                                let price_label = if opt_price == 0 {
+                                    "gratis".to_string()
+                                } else {
+                                    format!("+{}", format_eur(opt_price))
+                                };
+                                let input_type = if single { "radio" } else { "checkbox" };
+                                view! {
+                                    <li>
+                                        <label class="option-row">
+                                            <input
+                                                type=input_type
+                                                name=group_id.clone()
+                                                prop:checked=move || is_picked.get()
+                                                on:change=move |ev| {
+                                                    let on = event_target_checked(&ev);
+                                                    selected.update(|m| {
+                                                        let entry = m.entry(gid_change.clone()).or_default();
+                                                        if single {
+                                                            // Radio: clear group + set this one if on.
+                                                            entry.clear();
+                                                            if on {
+                                                                entry.push(oid_change.clone());
+                                                            }
+                                                        } else {
+                                                            entry.retain(|x| x != &oid_change);
+                                                            if on && (entry.len() as i64) < max_select {
+                                                                entry.push(oid_change.clone());
+                                                            }
+                                                        }
+                                                    });
+                                                }/>
+                                            <span class="option-label">{opt_label}</span>
+                                            <span class="option-price">{price_label}</span>
+                                        </label>
+                                    </li>
+                                }
+                            }).collect_view()}
+                        </ul>
+                        {(!single && min_select > 0).then(|| view! {
+                            <p class="option-hint">
+                                {format!("Bitte {min_select}–{max_select} auswählen.")}
+                            </p>
+                        })}
+                    </fieldset>
+                }
+            }).collect_view()}
+        </div>
     }
     .into_any()
 }

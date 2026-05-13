@@ -10,9 +10,6 @@ tmp/
 package-lock.json
 .DS_Store
 
-# DB-Schema-Setup läuft out-of-band (see crates/rusterando-server/src/main.rs).
-# Wer ein Schema-Snapshot oder seed-SQL lokal pflegen will: data/private/.
-migrations/
 
 # Local-only secrets / scratch space (Apple Developer credentials,
 # APNs auth key, scratch notes — see docs/apple_setup.md). Never commit.

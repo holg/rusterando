@@ -28,6 +28,11 @@ env:
   # back on for the artifact builds.
   CARGO_INCREMENTAL: "0"
   RUSTFLAGS: "-D warnings"
+  # Opt actions/checkout@v4 (and other JS-based actions) onto Node 24
+  # ahead of GitHub's 2026-06-02 forced cutover. Our build is pure Rust
+  # — Node only powers the action-runner shims around it. This silences
+  # the Node-20 deprecation warning surfaced in the runner logs.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   check:

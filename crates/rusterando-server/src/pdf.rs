@@ -288,9 +288,7 @@ impl World for MenuWorld {
                 self.ad_cover.clone().unwrap_or_else(|| BLANK_PNG.to_vec()),
             )),
             Some(p) if p == ASSET_AD_CENTER_VPATH => Ok(Bytes::new(
-                self.ad_center
-                    .clone()
-                    .unwrap_or_else(|| BLANK_PNG.to_vec()),
+                self.ad_center.clone().unwrap_or_else(|| BLANK_PNG.to_vec()),
             )),
             Some(p) if p == ASSET_AD_BACK_VPATH => Ok(Bytes::new(
                 self.ad_back.clone().unwrap_or_else(|| BLANK_PNG.to_vec()),

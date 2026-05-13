@@ -393,7 +393,11 @@ fn OrderCard(
         "🏪 ABHOLUNG"
     };
     let is_test = r.stripe_mode != "live";
-    let card_cls = if is_test { "order-card test-order" } else { "order-card" };
+    let card_cls = if is_test {
+        "order-card test-order"
+    } else {
+        "order-card"
+    };
     view! {
         <li class=card_cls>
             <div class="order-head">

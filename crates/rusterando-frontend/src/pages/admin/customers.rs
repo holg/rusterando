@@ -320,10 +320,7 @@ pub async fn update_admin_customer(
     prefix = "/api",
     endpoint = "set_customer_blacklist"
 )]
-pub async fn set_customer_blacklist(
-    id: String,
-    blacklisted: bool,
-) -> Result<(), ServerFnError> {
+pub async fn set_customer_blacklist(id: String, blacklisted: bool) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
     crate::pages::admin::require_admin().await?;
 
@@ -374,12 +371,7 @@ pub fn AdminCustomersPage() -> impl IntoView {
     let updater = ServerAction::<UpdateAdminCustomer>::new();
     let blacklister = ServerAction::<SetCustomerBlacklist>::new();
     let customers = Resource::new(
-        move || {
-            (
-                updater.version().get(),
-                blacklister.version().get(),
-            )
-        },
+        move || (updater.version().get(), blacklister.version().get()),
         |_| async move { list_admin_customers().await },
     );
 
@@ -609,13 +601,7 @@ pub fn AdminCustomerDetailPage() -> impl IntoView {
     let blacklister = ServerAction::<SetCustomerBlacklist>::new();
 
     let detail = Resource::new(
-        move || {
-            (
-                id(),
-                updater.version().get(),
-                blacklister.version().get(),
-            )
-        },
+        move || (id(), updater.version().get(), blacklister.version().get()),
         |(id, _, _)| async move { get_admin_customer(id).await },
     );
 
@@ -806,9 +792,7 @@ fn format_unix_short(unix: i64) -> String {
         return "—".to_string();
     }
     use chrono::{DateTime, Local};
-    DateTime::<Local>::from(
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix as u64),
-    )
-    .format("%d.%m. %H:%M")
-    .to_string()
+    DateTime::<Local>::from(std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix as u64))
+        .format("%d.%m. %H:%M")
+        .to_string()
 }

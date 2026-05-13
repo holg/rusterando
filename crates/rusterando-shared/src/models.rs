@@ -38,6 +38,22 @@ pub struct MenuItem {
     /// then €3 each; by 36 cm pizza: 0 free, €1 each).
     #[serde(default)]
     pub flat_extra_price_cents: Option<i64>,
+    /// Whether the public-menu picker should show the global extras
+    /// (pizza_extras) checkboxes for this item. Default true — drinks
+    /// and a few salads opt out via /admin/menu. Hides the entire
+    /// "Extras" block in the order modal when false.
+    #[serde(default = "default_allow_extras")]
+    pub allow_extras: bool,
+    /// Option groups attached to this item (e.g. "Dressing" on a
+    /// salad). The picker renders these as radios (when max_select=1)
+    /// or checkboxes. The min_select bound enforces "required pick".
+    /// Empty for items with no group attachments.
+    #[serde(default)]
+    pub option_groups: Vec<OptionGroup>,
+}
+
+fn default_allow_extras() -> bool {
+    true
 }
 
 fn default_listed() -> bool {
@@ -111,6 +127,12 @@ pub struct CartLine {
     /// Snapshotted picked extras for receipt history. Empty when no extras.
     #[serde(default)]
     pub extras: Vec<CartExtra>,
+    /// Snapshotted picks from required-choice option groups (e.g. salad
+    /// dressing). Receipts read this directly. Empty when the item has
+    /// no option groups attached. Like `extras`, the labels + prices
+    /// are snapshot at add-to-cart time.
+    #[serde(default)]
+    pub selected_options: Vec<CartSelectedOption>,
     pub line_total_cents: i64,
 }
 
@@ -126,6 +148,41 @@ pub struct CartExtra {
 /// Catalog row served to the menu page. The picker shows these checkboxes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PizzaExtra {
+    pub id: String,
+    pub label: String,
+    pub price_cents: i64,
+    pub sort_order: i64,
+}
+
+/// One snapshot of a chosen option from a required-choice group
+/// (Dressing, Beilage, …) on a cart/order line. Same role as
+/// `CartExtra` but distinguished by the group it came from so the
+/// receipt can label it as "Joghurt-Dressing" under the "Dressing"
+/// caption.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CartSelectedOption {
+    pub group_id: String,
+    pub group_label: String,
+    pub option_id: String,
+    pub option_label: String,
+    pub price_cents: i64,
+}
+
+/// Catalog row for the menu page: an option group attached to an item.
+/// The frontend renders a radio (max_select=1) or checkbox group based
+/// on min/max bounds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OptionGroup {
+    pub id: String,
+    pub label: String,
+    pub min_select: i64,
+    pub max_select: i64,
+    pub sort_order: i64,
+    pub options: Vec<OptionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OptionItem {
     pub id: String,
     pub label: String,
     pub price_cents: i64,

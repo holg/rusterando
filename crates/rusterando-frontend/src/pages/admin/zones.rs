@@ -130,9 +130,9 @@ pub async fn create_zone(form: CreateZoneForm) -> Result<String, ServerFnError> 
 
     match res {
         Ok(_) => Ok(id),
-        Err(sqlx::Error::Database(e)) if e.message().contains("UNIQUE") => Err(
-            ServerFnError::new(format!("PLZ '{postcode}' existiert bereits.")),
-        ),
+        Err(sqlx::Error::Database(e)) if e.message().contains("UNIQUE") => Err(ServerFnError::new(
+            format!("PLZ '{postcode}' existiert bereits."),
+        )),
         Err(e) => Err(ServerFnError::new(format!("INSERT zone: {e}"))),
     }
 }
@@ -178,9 +178,9 @@ pub async fn update_zone(form: UpdateZoneForm) -> Result<(), ServerFnError> {
 
     match res {
         Ok(_) => Ok(()),
-        Err(sqlx::Error::Database(e)) if e.message().contains("UNIQUE") => Err(
-            ServerFnError::new(format!("PLZ '{postcode}' wird bereits genutzt.")),
-        ),
+        Err(sqlx::Error::Database(e)) if e.message().contains("UNIQUE") => Err(ServerFnError::new(
+            format!("PLZ '{postcode}' wird bereits genutzt."),
+        )),
         Err(e) => Err(ServerFnError::new(format!("UPDATE zone: {e}"))),
     }
 }
@@ -201,13 +201,12 @@ pub async fn delete_zone(id: String) -> Result<(), ServerFnError> {
     // Reject delete if any address or order still references the zone —
     // deactivate-instead is the safer path. Customer recall + history
     // would otherwise lose their zone snapshot.
-    let used_addr: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM customer_addresses WHERE delivery_zone_id = ?1",
-    )
-    .bind(&id)
-    .fetch_one(&db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("address ref count: {e}")))?;
+    let used_addr: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM customer_addresses WHERE delivery_zone_id = ?1")
+            .bind(&id)
+            .fetch_one(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("address ref count: {e}")))?;
     if used_addr.0 > 0 {
         return Err(ServerFnError::new(
             "Zone wird von gespeicherten Adressen referenziert — bitte deaktivieren statt löschen.",
@@ -336,9 +335,9 @@ fn CreateZoneCard(creator: ServerAction<CreateZone>) -> impl IntoView {
             </div>
             <div class="actions">
                 <button class="btn primary" on:click=on_submit>"Anlegen"</button>
-                {move || creator.value().get().and_then(|res| match res {
-                    Ok(_) => Some(view! { <span class="ok">"✓ Gespeichert"</span> }.into_any()),
-                    Err(e) => Some(view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any()),
+                {move || creator.value().get().map(|res| match res {
+                    Ok(_) => view! { <span class="ok">"✓ Gespeichert"</span> }.into_any(),
+                    Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),
                 })}
             </div>
         </details>

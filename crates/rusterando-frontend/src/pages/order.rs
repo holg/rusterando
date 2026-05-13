@@ -1714,18 +1714,17 @@ pub async fn place_order(
     // to the kitchen, no Stripe Intent. Without this branch the customer
     // would face a Stripe Payment Element with a €0 amount, which is invalid.
     let total_after_voucher_is_zero = total_after_voucher == 0;
-    let (initial_status, initial_payment_status) = if payment_method == "card"
-        && !total_after_voucher_is_zero
-    {
-        ("pending_payment", "pending")
-    } else if total_after_voucher_is_zero && voucher_preview_discount > 0 {
-        // Order is effectively free — fully covered by voucher. Mark as
-        // "received" so the kitchen sees it; payment_status='voucher_paid'
-        // distinguishes it from cash-on-pickup for the Buchhaltung.
-        ("received", "voucher_paid")
-    } else {
-        ("received", "cash_on_pickup")
-    };
+    let (initial_status, initial_payment_status) =
+        if payment_method == "card" && !total_after_voucher_is_zero {
+            ("pending_payment", "pending")
+        } else if total_after_voucher_is_zero && voucher_preview_discount > 0 {
+            // Order is effectively free — fully covered by voucher. Mark as
+            // "received" so the kitchen sees it; payment_status='voucher_paid'
+            // distinguishes it from cash-on-pickup for the Buchhaltung.
+            ("received", "voucher_paid")
+        } else {
+            ("received", "cash_on_pickup")
+        };
 
     // Atomic write: customers + customer_addresses + orders + order_items,
     // then clear cart.
@@ -1794,7 +1793,7 @@ pub async fn place_order(
     .bind(scheduled_for.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string()))
     .bind(subtotal)
     .bind(delivery_fee)
-    .bind(total_after_voucher)  // post-voucher total — Stripe-branch sees correct amount
+    .bind(total_after_voucher) // post-voucher total — Stripe-branch sees correct amount
     .bind(initial_payment_status)
     .bind(&customer_id)
     .bind(address_id.as_deref())
@@ -1811,7 +1810,11 @@ pub async fn place_order(
     // pre-INSERT; we assert that to catch any divergence.
     let mut voucher_discount: i64 = 0;
     let mut voucher_meta: Option<(String, String)> = None; // (id, code)
-    if let Some(raw_code) = voucher_code.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(raw_code) = voucher_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let (vid, vcode, discount) = crate::pages::vouchers::ssr::redeem(
             &mut tx,
             raw_code,
@@ -1869,11 +1872,23 @@ pub async fn place_order(
                     .map_err(|e| ServerFnError::new(format!("serialise extras: {e}")))?,
             )
         };
+        // Same shape, but for required-choice option groups (dressing
+        // etc.). The cart already validated min/max at add-time; this
+        // is just the snapshot.
+        let selected_options_json = if line.selected_options.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&line.selected_options)
+                    .map_err(|e| ServerFnError::new(format!("serialise options: {e}")))?,
+            )
+        };
         sqlx::query(
             "INSERT INTO order_items
                 (id, order_id, menu_item_id, name_snapshot, menu_number_snapshot,
-                 quantity, options_json, unit_price_cents, line_total_cents, extras_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                 quantity, options_json, unit_price_cents, line_total_cents,
+                 extras_json, selected_options_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         )
         .bind(&line_id)
         .bind(&order_id)
@@ -1885,6 +1900,7 @@ pub async fn place_order(
         .bind(line.unit_price_cents)
         .bind(line.line_total_cents)
         .bind(extras_json.as_deref())
+        .bind(selected_options_json.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(|e| ServerFnError::new(format!("insert order_item: {e}")))?;

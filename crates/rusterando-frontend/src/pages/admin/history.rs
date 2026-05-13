@@ -72,8 +72,8 @@ pub struct HistoryReport {
     endpoint = "list_admin_history"
 )]
 pub async fn list_admin_history(
-    from: String,      // YYYY-MM-DD inclusive
-    to: String,        // YYYY-MM-DD inclusive
+    from: String,       // YYYY-MM-DD inclusive
+    to: String,         // YYYY-MM-DD inclusive
     include_test: bool, // false = nur stripe_mode='live' (Buchhaltung-Default)
 ) -> Result<HistoryReport, ServerFnError> {
     use sqlx::SqlitePool;
@@ -95,7 +95,11 @@ pub async fn list_admin_history(
     // Summen dürfen NIE durch Test-Daten verfälscht werden. Mit `include_test`
     // true sieht der Admin trotzdem den Mix — etwa um eine Test-Order
     // wiederzufinden.
-    let mode_clause = if include_test { "" } else { " AND stripe_mode = 'live'" };
+    let mode_clause = if include_test {
+        ""
+    } else {
+        " AND stripe_mode = 'live'"
+    };
 
     let order_sql = format!(
         "SELECT id, order_number, status, contact_name, created_at, scheduled_for,
@@ -249,7 +253,11 @@ pub async fn list_admin_history(
            AND o.status != 'cancelled'{mode_clause_items}
          GROUP BY oi.name_snapshot, oi.options_json
          ORDER BY qty DESC",
-        mode_clause_items = if include_test { "" } else { " AND o.stripe_mode = 'live'" }
+        mode_clause_items = if include_test {
+            ""
+        } else {
+            " AND o.stripe_mode = 'live'"
+        }
     );
     let item_rows = sqlx::query_as::<_, (String, String, i64, i64)>(&items_sql)
         .bind(&from_ts)
@@ -284,7 +292,11 @@ pub async fn list_admin_history(
          FROM orders
          WHERE created_at BETWEEN ?1 AND ?2
            AND status != 'cancelled'{mode_clause_v}",
-        mode_clause_v = if include_test { "" } else { " AND stripe_mode = 'live'" }
+        mode_clause_v = if include_test {
+            ""
+        } else {
+            " AND stripe_mode = 'live'"
+        }
     );
     let (voucher_discount_total,): (i64,) = sqlx::query_as(&voucher_discount_total_sql)
         .bind(&from_ts)
@@ -332,9 +344,7 @@ pub fn AdminHistoryPage() -> impl IntoView {
 
     let report = Resource::new(
         move || (from.get(), to.get(), include_test.get()),
-        |(from, to, include_test)| async move {
-            list_admin_history(from, to, include_test).await
-        },
+        |(from, to, include_test)| async move { list_admin_history(from, to, include_test).await },
     );
 
     let csv_href = move || {
