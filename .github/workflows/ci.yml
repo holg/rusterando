@@ -1,0 +1,90 @@
+# Rusterando — pull-request CI.
+#
+# Mirrors scripts/test-ci-locally.sh on a Linux runner. Fast (~5 min)
+# so it gates merges without slowing the loop. The full release build
+# lives in release.yml and only fires on `v*` tags.
+#
+# What's NOT in here:
+#   - Pi cross-build (covered by release.yml on tag pushes)
+#   - cargo-leptos full release build (slow LTO; release.yml runs it)
+#   - iOS / Android workflows (need macOS runner + signing config;
+#     deferred until there's a public Apple Team / Play account)
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref so a fast-follow push doesn't
+# pile up jobs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Smaller, deterministic builds on the runner. release.yml flips LTO
+  # back on for the artifact builds.
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: fmt + clippy + check (SSR + WASM hydrate)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to a known-good stable. Bump deliberately.
+      - name: Install Rust stable + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      # Cache the cargo registry + target/ across pushes to the same
+      # branch. swatinem/rust-cache is the standard idiom for Rust CI
+      # and respects Cargo.lock for keying.
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Share the cache across all jobs that hit the same Cargo.lock,
+          # not just this workflow's own runs.
+          shared-key: rusterando-check
+
+      # OpenSSL headers for openssl-sys (server's apns-h2 dep).
+      # Ubuntu's libssl-dev is glibc-compatible; matches what the
+      # production server runs against.
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (SSR)
+        run: cargo clippy --package rusterando-frontend --features ssr -- -D warnings
+
+      - name: cargo check (SSR)
+        run: cargo check --package rusterando-frontend --features ssr
+
+      - name: cargo check (WASM hydrate)
+        run: cargo check --package rusterando-frontend --features hydrate --target wasm32-unknown-unknown
+
+      - name: cargo check (server, host target)
+        run: cargo check --package rusterando-server
+
+  protocol-tests:
+    name: kitchen-protocol tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusterando-check
+      - name: Run protocol tests
+        run: cargo test --package kitchen-protocol

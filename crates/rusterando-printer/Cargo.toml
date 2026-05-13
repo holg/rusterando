@@ -1,0 +1,53 @@
+[package]
+name = "rusterando-printer"
+version = "0.1.0"
+edition = "2021"
+
+# Pi binary. Cross-compiles to aarch64-unknown-linux-gnu using the
+# brew toolchain + the C23 shim from scripts/cross-shims/. Excluded
+# from the main workspace (see top-level Cargo.toml) because its dep
+# set differs from the server (escpos, file driver) and its target
+# triple is always cross.
+#
+# Build from the repo root:
+#   cargo build -p rusterando-printer \
+#       --manifest-path crates/rusterando-printer/Cargo.toml \
+#       --target aarch64-unknown-linux-gnu --release
+#
+# Or, since aws-lc-sys is gone now and the rest of the deps cross-
+# compile cleanly, scripts/cross_build_on_mac.sh aarch64-linux-gnu
+# will build it alongside rusterando-server once it's added to the
+# leptos build (we don't — kept separate).
+
+[[bin]]
+name = "rusterando-printer"
+path = "src/main.rs"
+
+[dependencies]
+# Protocol crate. Relative path because this crate isn't a workspace
+# member — `{ workspace = true }` is unavailable here.
+kitchen-protocol = { path = "../kitchen-protocol" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+bytes = "1"
+
+postcard = { version = "1", features = ["use-std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# ESC/POS receipt formatting. The escpos crate handles alignment,
+# bold, size, cut commands so we don't hand-roll byte sequences.
+# `codes_2d` enables the QR-code support used in the receipt footer.
+escpos = { version = "0.16", features = ["codes_2d"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = true

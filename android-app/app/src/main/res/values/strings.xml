@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    app_name is overridden per flavor via resValue in build.gradle.kts.
+    associated_domain is overridden per flavor via the flavor-specific
+    strings.xml. Anything truly shared (button labels, error strings) can
+    land here once the native shell grows beyond the WebView.
+-->
+<resources>
+    <string name="settings_open_content_description">Einstellungen öffnen</string>
+</resources>

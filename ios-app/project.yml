@@ -1,0 +1,78 @@
+name: RusterandoApps
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: 15.0
+  developmentLanguage: de
+  createIntermediateGroups: true
+
+# PUBLIC project file. Holds an example target with PLACEHOLDER
+# bundle id, name, and entitlements so the repo can be cloned and
+# built by anyone without leaking publisher-specific config.
+#
+# To ship the app under YOUR Apple Developer account (whether as
+# "Davids Pizzeria", "Rusterando", or anything else):
+#
+#   1. cp project.local.example.yml project.local.yml
+#   2. Fill in your DEVELOPMENT_TEAM (Apple Team ID).
+#   3. Add one target stanza per app you ship. Each one names its
+#      own bundle id, display name, applinks domain, and the
+#      SeedShopURL/SeedShopName for ShopStore's first-launch seed.
+#   4. xcodegen
+#
+# project.local.yml is gitignored. To opt into your private
+# overlay, set USE_LOCAL=true when running xcodegen:
+#
+#   USE_LOCAL=true xcodegen
+#
+# When USE_LOCAL is unset (the default for fresh OSS clones), the
+# include below is disabled and the project builds with just the
+# public RusterandoExample target.
+include:
+  - path: project.local.yml
+    relativePaths: true
+    enable: ${USE_LOCAL}
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: 1
+    # DEVELOPMENT_TEAM intentionally absent. Provide via project.local.yml.
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "Apple Development"
+    INFOPLIST_KEY_UILaunchStoryboardName: LaunchScreen
+    INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+    INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+    INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.business
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ENABLE_BITCODE: NO
+    GENERATE_INFOPLIST_FILE: NO
+
+targets:
+  # Example target. Placeholder bundle id under com.example, no
+  # applinks, no seed shop. Builds out of the box without an Apple
+  # Developer account (sign with the free personal team). Treat as
+  # documentation of the target shape; real shippable targets are
+  # added via project.local.yml.
+  RusterandoExample:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources/Assets.xcassets
+      - path: Resources/LaunchScreen.storyboard
+    settings:
+      base:
+        PRODUCT_NAME: "Rusterando"
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.rusterando
+    info:
+      path: Info-Example.plist
+      properties:
+        CFBundleDisplayName: "Rusterando"
+        UIBackgroundModes:
+          - remote-notification
+        # No SeedShopName / SeedShopURL — the shop list starts empty.
+    entitlements:
+      path: Rusterando-Example.entitlements
+      properties:
+        aps-environment: development

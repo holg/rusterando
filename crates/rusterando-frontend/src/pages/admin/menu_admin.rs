@@ -273,6 +273,7 @@ fn Editor(
         items,
         allergens,
         additives,
+        shop_phone: _,
     } = payload;
     let cats_for_select: Vec<MenuCategory> = categories.clone();
 

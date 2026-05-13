@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Example flavor's associated domain. Placeholder value; the
+    intent filter's autoVerify will never validate against this
+    so deep links won't open the app on a real device.
+
+    Real publisher flavors override this in their own
+    app/src/<flavor>/res/values/strings.xml (gitignored).
+-->
+<resources>
+    <string name="associated_domain">rusterando.example.com</string>
+</resources>

@@ -71,6 +71,35 @@ pub trait BroadcastSink: Send + Sync {
 #[cfg(feature = "ssr")]
 pub type BroadcastSinkHandle = Option<Arc<dyn BroadcastSink>>;
 
+/// Trait-erased handle into the kitchen-printer outbox. The
+/// rusterando-server crate provides the implementation
+/// (`kitchen::KitchenChannel`) and the SQL that turns an order id into
+/// a `kitchen_protocol::OrderForKitchen` payload. We expose only
+/// `order_id` / `&SqlitePool` so the frontend crate doesn't have to
+/// depend on either rusterando-server or kitchen-protocol.
+///
+/// `None` for the handle on printerless deploys (KITCHEN_LISTEN_ADDR
+/// unset in .env). Callers guard with
+/// `if let Some(k) = use_context::<KitchenSinkHandle>().flatten()`.
+#[cfg(feature = "ssr")]
+#[async_trait::async_trait]
+pub trait KitchenSink: Send + Sync {
+    /// Persist + broadcast a NewOrder kitchen event for `order_id`.
+    async fn broadcast_new_order(
+        &self,
+        db: &sqlx::SqlitePool,
+        order_id: &str,
+    ) -> anyhow::Result<()>;
+
+    /// Persist + broadcast a Reprint kitchen event for `order_id`. Same
+    /// payload as NewOrder; the Pi marks the receipt with a "REPRINT"
+    /// banner. Triggered from the admin orders page.
+    async fn broadcast_reprint(&self, db: &sqlx::SqlitePool, order_id: &str) -> anyhow::Result<()>;
+}
+
+#[cfg(feature = "ssr")]
+pub type KitchenSinkHandle = Option<Arc<dyn KitchenSink>>;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisteredDevice {
     pub token: String,

@@ -34,6 +34,19 @@ struct AppState {
     /// Impressum, home meta, etc.
     #[allow(dead_code)]
     branding: rusterando_frontend::branding::BrandingHandle,
+    /// Kitchen-printer outbox + broadcast channel. `None` when
+    /// KITCHEN_LISTEN_ADDR isn't set (printerless deploys like the
+    /// rusterando demo) — `place_order` and the Stripe webhook both
+    /// guard with `if let Some(_)` so the outbox table stays empty.
+    #[allow(dead_code)]
+    kitchen: Option<rusterando_server::kitchen::KitchenChannel>,
+    /// Active Stripe mode (sandbox vs live), seeded from
+    /// `app_settings.stripe_mode` at boot and write-through-updated
+    /// by `update_setting`. Read at the point of use by
+    /// `place_order`, the two webhook handlers, and the
+    /// payment-method detail lookup.
+    #[allow(dead_code)]
+    stripe_mode: rusterando_frontend::stripe::StripeModeHandle,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
@@ -82,15 +95,17 @@ async fn main() {
         .await
         .expect("open sqlite pool");
 
-    sqlx::migrate!("../../migrations")
-        .run(&db)
-        .await
-        .expect("run migrations");
-    tracing::info!("migrations applied");
+    // DB-Schema-Versionierung läuft aktuell out-of-band: die Produktion
+    // hat eine fertige `data/<shop>.db`, neue Forks müssen ihre eigene
+    // Setup-Prozedur fahren (z.B. via sqlite3 < schema.sql aus dem
+    // privaten data/-Verzeichnis). Die alte `sqlx::migrate!()`-Aufruf
+    // erforderte ein eingechecktes `migrations/`-Verzeichnis, das wir
+    // im public repo nicht mehr halten.
+    tracing::info!("skipping migrations: DB-Schema wird out-of-band gepflegt");
 
     let admin_password = std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| {
-        tracing::warn!("ADMIN_PASSWORD not set — defaulting to 'davids-pizza-admin' for local dev");
-        "davids-pizza-admin".to_string()
+        tracing::warn!("ADMIN_PASSWORD not set — defaulting to 'admin' for local dev");
+        "admin".to_string()
     });
 
     let notifier: NotifierHandle = match EmailNotifier::from_env() {
@@ -131,6 +146,49 @@ async fn main() {
     let branding_initial = rusterando_frontend::branding::ssr::load_branding(&db).await;
     let branding = rusterando_frontend::branding::BrandingHandle::new(branding_initial);
 
+    // Stripe mode — sandbox vs live. Same handle pattern: one boot
+    // read, write-through on `update_setting('stripe_mode', …)`. The
+    // S_STRIPE_* / L_STRIPE_* env vars are loaded from .env above;
+    // we don't validate them here so missing keys surface at the
+    // first request that needs them.
+    let stripe_mode_initial = rusterando_frontend::stripe::ssr::load_mode(&db).await;
+    let stripe_mode = rusterando_frontend::stripe::StripeModeHandle::new(stripe_mode_initial);
+    tracing::info!(mode = ?stripe_mode_initial, "Stripe mode at boot");
+
+    // Kitchen-printer subsystem (see src/kitchen.rs). Spun up only
+    // when KITCHEN_LISTEN_ADDR is set in .env so printerless deploys
+    // skip the outbox writes entirely. Always loopback in production
+    // — the SSH reverse tunnel from each shop's Pi forwards into it.
+    let kitchen = match std::env::var("KITCHEN_LISTEN_ADDR") {
+        Ok(addr_str) => match addr_str.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                let chan = rusterando_server::kitchen::KitchenChannel::new(db.clone());
+                let listener_chan = chan.clone();
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        rusterando_server::kitchen::run_listener(listener_chan, addr).await
+                    {
+                        tracing::error!(error = %e, "kitchen listener exited");
+                    }
+                });
+                tracing::info!(%addr, "kitchen listener enabled");
+                Some(chan)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    addr = %addr_str,
+                    error = %e,
+                    "KITCHEN_LISTEN_ADDR set but unparseable — kitchen disabled",
+                );
+                None
+            }
+        },
+        Err(_) => {
+            tracing::info!("KITCHEN_LISTEN_ADDR unset — kitchen subsystem disabled");
+            None
+        }
+    };
+
     let state = AppState {
         leptos_options: leptos_options.clone(),
         db: db.clone(),
@@ -139,6 +197,8 @@ async fn main() {
         apns,
         theme,
         branding,
+        kitchen,
+        stripe_mode,
     };
 
     let routes = generate_route_list(App);
@@ -150,6 +210,15 @@ async fn main() {
         state.apns.as_ref().map(|h| {
             std::sync::Arc::new(h.clone())
                 as std::sync::Arc<dyn rusterando_frontend::pages::push::BroadcastSink>
+        });
+
+    // Same trait-erasure trick for the kitchen-printer outbox. Frontend
+    // server fns (place_order, admin reprint endpoint) call this without
+    // importing kitchen-protocol or this crate's KitchenChannel.
+    let kitchen_sink: rusterando_frontend::pages::push::KitchenSinkHandle =
+        state.kitchen.as_ref().map(|k| {
+            std::sync::Arc::new(k.clone())
+                as std::sync::Arc<dyn rusterando_frontend::pages::push::KitchenSink>
         });
 
     let app = Router::new()
@@ -164,6 +233,8 @@ async fn main() {
                 let sink = broadcast_sink.clone();
                 let theme = state.theme.clone();
                 let branding = state.branding.clone();
+                let kitchen_sink = kitchen_sink.clone();
+                let stripe_mode = state.stripe_mode.clone();
                 move || {
                     provide_context(db.clone());
                     provide_context(pwd.clone());
@@ -172,6 +243,9 @@ async fn main() {
                     provide_context(sink.clone());
                     provide_context(theme.clone());
                     provide_context(branding.clone());
+                    // KitchenSinkHandle — None on printerless deploys.
+                    provide_context(kitchen_sink.clone());
+                    provide_context(stripe_mode.clone());
                 }
             },
             {
@@ -181,13 +255,28 @@ async fn main() {
         )
         // Specific routes BEFORE the /api/{*fn_name} catch-all so the Leptos
         // server-fn dispatcher doesn't swallow them.
+        //
+        // Stripe webhooks: per-mode routes are authoritative — the
+        // signing secret used to verify the payload is hardwired by
+        // the URL, so Stripe's sandbox dashboard can never end up
+        // mutating live orders or vice versa. The legacy single
+        // route is kept as an alias that dispatches via the active
+        // mode (for shops whose Stripe dashboard still points at it).
+        .route(
+            "/api/webhooks/sandbox/stripe",
+            axum::routing::post(stripe_webhook_sandbox),
+        )
+        .route(
+            "/api/webhooks/live/stripe",
+            axum::routing::post(stripe_webhook_live),
+        )
         .route(
             "/api/webhook/stripe",
-            axum::routing::post(stripe_webhook_handler),
+            axum::routing::post(stripe_webhook_legacy),
         )
         .route(
             "/api/webhooks/stripe",
-            axum::routing::post(stripe_webhook_handler),
+            axum::routing::post(stripe_webhook_legacy),
         )
         // Admin image upload — specific path, registered BEFORE the
         // server-fn catch-all so leptos_axum doesn't swallow it.
@@ -196,6 +285,15 @@ async fn main() {
             "/api/admin/upload_image",
             axum::routing::post(upload_image_handler),
         )
+        // PDF-Editor test-render: takes a Typst-source body, runs the
+        // exact same render path the real /menu.pdf uses, returns
+        // 200 OK on success or 400 + error text on failure. Lets the
+        // editor reject broken templates without poisoning the live
+        // setting.
+        .route(
+            "/api/admin/pdf/test_render",
+            axum::routing::post(pdf_test_render_handler),
+        )
         // Serve uploaded photos from the persistent data dir (lives
         // outside target/site so cargo-leptos rebuilds don't wipe them
         // and the deploy script's data/ rsync preserves them across
@@ -203,7 +301,19 @@ async fn main() {
         .nest_service(
             "/img/uploads",
             tower_http::services::ServeDir::new("data/uploads"),
-        )
+        );
+
+    // Smoke-test endpoint for the kitchen printer chain. Lets us POST
+    // a hand-crafted KitchenEvent and watch the receipt come out the
+    // Pi's printer without going through Stripe. Compiled in only
+    // under `--features debug-inject`; production builds omit it.
+    #[cfg(feature = "debug-inject")]
+    let app = app.route(
+        "/api/kitchen/debug/inject",
+        axum::routing::post(kitchen_debug_inject_handler),
+    );
+
+    let app = app
         .route("/api/{*fn_name}", axum::routing::any(server_fn_handler))
         .route("/qr.svg", axum::routing::get(qr_svg_handler))
         .route("/menu.pdf", axum::routing::get(menu_pdf_handler))
@@ -279,6 +389,40 @@ const MAX_UPLOAD_BYTES: usize = 5 * 1024 * 1024;
 /// `/api/admin/upload_image` — multipart POST that admin uses to attach
 /// a photo to the hero / an offer / a gallery item. Streams bytes,
 /// validates magic bytes, content-hashes the result, writes to
+/// Debug-only: hand-injects a KitchenEvent into the outbox + broadcast
+/// channel. Use case is smoke-testing the printer chain end-to-end
+/// without firing a real order through Stripe. Returns 200 with the
+/// assigned seq id on success, 503 when kitchen is disabled in .env,
+/// 500 on any other error. Only wired into the router when the
+/// `debug-inject` cargo feature is active.
+#[cfg(feature = "debug-inject")]
+async fn kitchen_debug_inject_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::Json(event): axum::Json<kitchen_protocol::KitchenEvent>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let Some(chan) = state.kitchen.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "kitchen disabled — KITCHEN_LISTEN_ADDR unset",
+        )
+            .into_response();
+    };
+
+    match chan.broadcast(event).await {
+        Ok(seq) => {
+            tracing::info!(%seq, "kitchen debug-injected");
+            (StatusCode::OK, format!("queued seq={seq}\n")).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "kitchen debug-inject failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}\n")).into_response()
+        }
+    }
+}
+
 /// `data/uploads/<hash>.<ext>`, returns `{ "path": "/img/uploads/<hash>.<ext>" }`.
 ///
 /// Why content-hash names? Re-uploading the same photo dedupes; the URL
@@ -389,6 +533,71 @@ async fn upload_image_handler(
         .into_response()
 }
 
+/// `/api/admin/pdf/test_render` — test-compile a Typst source against
+/// the live menu payload. Returns 200 + empty body on success, 400 +
+/// error text on Typst compile failure. The body is the raw Typst
+/// source as plain text (UTF-8). Used by the PDF editor to validate
+/// a template change before persisting it.
+async fn pdf_test_render_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let admin_ok = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(';')
+                .any(|c| c.trim().eq_ignore_ascii_case("admin_session=ok"))
+        })
+        .unwrap_or(false);
+    if !admin_ok {
+        return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
+    }
+
+    let site_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
+    let branding = state.branding.get();
+    let payload = match rusterando_server::pdf::load_menu_payload(&state.db, site_url, &branding)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Datenbank: {e}"),
+            )
+                .into_response();
+        }
+    };
+    // Pull live override images so the test-render uses the same
+    // assets the real PDF will. Substitute the supplied template
+    // source instead of the persisted one.
+    let mut overrides = rusterando_server::pdf::load_pdf_overrides(&state.db).await;
+    let source = if body.trim().is_empty() {
+        rusterando_server::pdf::TEMPLATE_SRC.to_string()
+    } else {
+        body
+    };
+    overrides.template_source = Some(source);
+
+    let result = tokio::task::spawn_blocking(move || {
+        rusterando_server::pdf::render_menu_pdf(&payload, &overrides)
+    })
+    .await;
+    match result {
+        Ok(Ok(_bytes)) => (StatusCode::OK, "").into_response(),
+        Ok(Err(e)) => (StatusCode::BAD_REQUEST, format!("{e}")).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("render panicked: {e}"),
+        )
+            .into_response(),
+    }
+}
+
 async fn qr_svg_handler(
     axum::extract::Query(p): axum::extract::Query<QrParams>,
 ) -> impl axum::response::IntoResponse {
@@ -429,6 +638,10 @@ async fn qr_svg_handler(
 struct HistoryCsvParams {
     from: Option<String>,
     to: Option<String>,
+    /// "true" / "1" / "yes" → einbeziehen. Default: nur Live, weil der
+    /// CSV-Export typischerweise dem Steuerberater übergeben wird.
+    #[serde(default)]
+    include_test: Option<String>,
 }
 
 async fn history_csv_handler(
@@ -464,6 +677,21 @@ async fn history_csv_handler(
     let from_ts = format!("{from} 00:00:00");
     let to_ts = format!("{to} 23:59:59");
 
+    // Default = nur Live. Steuerberater darf NIE Test-Umsatz sehen.
+    let include_test = p
+        .include_test
+        .as_deref()
+        .map(|s| matches!(s, "true" | "1" | "yes"))
+        .unwrap_or(false);
+    let mode_clause = if include_test { "" } else { " AND stripe_mode = 'live'" };
+
+    let sql = format!(
+        "SELECT order_number, created_at, status, contact_name, contact_phone,
+                contact_email, scheduled_for, total_cents
+         FROM orders
+         WHERE created_at BETWEEN ?1 AND ?2{mode_clause}
+         ORDER BY created_at ASC",
+    );
     let rows = match sqlx::query_as::<
         _,
         (
@@ -476,13 +704,7 @@ async fn history_csv_handler(
             Option<String>, // scheduled_for
             i64,            // total_cents
         ),
-    >(
-        "SELECT order_number, created_at, status, contact_name, contact_phone,
-                contact_email, scheduled_for, total_cents
-         FROM orders
-         WHERE created_at BETWEEN ?1 AND ?2
-         ORDER BY created_at ASC",
-    )
+    >(&sql)
     .bind(&from_ts)
     .bind(&to_ts)
     .fetch_all(&state.db)
@@ -544,7 +766,63 @@ fn csv_escape(s: &str) -> String {
     }
 }
 
+/// Selects which Stripe key set a webhook handler validates against.
+/// The route URL is the authoritative source — `/api/webhooks/sandbox/stripe`
+/// only ever accepts sandbox-signed payloads, never live. Stops
+/// cross-mode signature confusion at the entry point.
+#[derive(Clone, Copy, Debug)]
+enum WebhookMode {
+    Sandbox,
+    Live,
+    /// Legacy `/api/webhooks/stripe` — reads the active StripeMode
+    /// from the app_settings handle and uses that mode's secret.
+    /// Kept for backwards compatibility with shops whose Stripe
+    /// dashboard still points at the old single endpoint.
+    Active,
+}
+
+impl WebhookMode {
+    fn resolve_keys(self, state: &AppState) -> rusterando_frontend::stripe::StripeKeys {
+        use rusterando_frontend::stripe::{StripeKeys, StripeMode};
+        match self {
+            Self::Sandbox => StripeKeys::for_mode(StripeMode::Sandbox),
+            Self::Live => StripeKeys::for_mode(StripeMode::Live),
+            Self::Active => state.stripe_mode.active_keys(),
+        }
+    }
+}
+
+async fn stripe_webhook_sandbox(
+    state: axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl axum::response::IntoResponse {
+    stripe_webhook_handler(WebhookMode::Sandbox, state, headers, body).await
+}
+
+async fn stripe_webhook_live(
+    state: axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl axum::response::IntoResponse {
+    stripe_webhook_handler(WebhookMode::Live, state, headers, body).await
+}
+
+/// Legacy single-endpoint webhook. Dispatches to whichever mode is
+/// currently active in app_settings. Kept so an existing Stripe
+/// dashboard endpoint at `/api/webhooks/stripe` (or `/api/webhook/stripe`)
+/// doesn't 404 after the migration; new deploys should use the
+/// mode-specific routes.
+async fn stripe_webhook_legacy(
+    state: axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> impl axum::response::IntoResponse {
+    stripe_webhook_handler(WebhookMode::Active, state, headers, body).await
+}
+
 async fn stripe_webhook_handler(
+    mode: WebhookMode,
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
@@ -552,12 +830,16 @@ async fn stripe_webhook_handler(
     use axum::http::StatusCode;
     use stripe::{EventObject, EventType, Webhook};
 
-    let secret = match std::env::var("STRIPE_WEBHOOK_SECRET") {
-        Ok(s) => s,
-        Err(_) => {
-            tracing::error!("STRIPE_WEBHOOK_SECRET not set; rejecting webhook");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
+    let keys = mode.resolve_keys(&state);
+    let secret = if keys.webhook_secret.is_empty() {
+        tracing::error!(
+            ?mode,
+            stripe_mode = ?keys.mode,
+            "webhook secret missing in .env; rejecting webhook",
+        );
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    } else {
+        keys.webhook_secret.clone()
     };
 
     let sig = match headers
@@ -601,7 +883,8 @@ async fn stripe_webhook_handler(
                     tracing::warn!(intent_id = %intent.id, "stripe webhook: missing metadata.order_id");
                     return StatusCode::OK; // ack, nothing we can do
                 }
-                let method_label = lookup_payment_method_detail(&intent.id.to_string()).await;
+                let method_label =
+                    lookup_payment_method_detail(&intent.id.to_string(), &keys.secret_key).await;
                 if let Err(e) = mark_order_paid(
                     &state,
                     &order_id,
@@ -698,10 +981,13 @@ async fn mark_order_paid(
         i64,            // 7 subtotal_cents
         i64,            // 8 delivery_fee_cents
         Option<String>, // 9 delivery_address_json
+        Option<String>, // 10 voucher_code
+        i64,            // 11 voucher_discount_cents
     ) = sqlx::query_as(
         "SELECT order_number, contact_name, contact_phone, contact_email,
                 scheduled_for, total_cents, order_type, subtotal_cents,
-                delivery_fee_cents, delivery_address_json
+                delivery_fee_cents, delivery_address_json,
+                voucher_code, voucher_discount_cents
          FROM orders WHERE id = ?1",
     )
     .bind(order_id)
@@ -791,6 +1077,8 @@ async fn mark_order_paid(
         delivery_address_text,
         delivery_fee_cents: row.8,
         subtotal_cents: row.7,
+        voucher_code: row.10.clone().unwrap_or_default(),
+        voucher_discount_cents: row.11,
         branding: state.branding.get(),
     };
 
@@ -812,6 +1100,21 @@ async fn mark_order_paid(
         apns.notify_roles(&roles, &title, &body, Some(&deep_link));
     }
 
+    // Kitchen printer: now that payment is durable, broadcast the
+    // NewOrder event so the Pi prints the receipt. Best-effort —
+    // failures are logged but don't fail the webhook (Stripe would
+    // otherwise retry and we'd duplicate the print).
+    if let Some(kitchen) = state.kitchen.as_ref() {
+        use rusterando_frontend::pages::push::KitchenSink;
+        if let Err(e) = kitchen.broadcast_new_order(&state.db, order_id).await {
+            tracing::warn!(
+                order_id,
+                error = %e,
+                "kitchen broadcast (card path) failed",
+            );
+        }
+    }
+
     let notifier = state.notifier.clone();
     let order_number_log = summary.order_number.clone();
     tokio::spawn(async move {
@@ -829,11 +1132,13 @@ async fn mark_order_paid(
 /// payment — used in the invoice ("Online bezahlt · Apple Pay") and for
 /// fee reconciliation against Stripe's monthly statement. Returns None if
 /// the API call fails or the shape is unexpected; the webhook still acks.
-async fn lookup_payment_method_detail(intent_id: &str) -> Option<String> {
+async fn lookup_payment_method_detail(intent_id: &str, stripe_secret: &str) -> Option<String> {
     use stripe::{Client, Expandable, PaymentIntent, PaymentIntentId};
 
-    let secret = std::env::var("STRIPE_SECRET_KEY").ok()?;
-    let client = Client::new(secret);
+    if stripe_secret.is_empty() {
+        return None;
+    }
+    let client = Client::new(stripe_secret.to_string());
     let id: PaymentIntentId = intent_id.parse().ok()?;
     let intent = PaymentIntent::retrieve(&client, &id, &["latest_charge.payment_method_details"])
         .await
@@ -933,6 +1238,12 @@ async fn server_fn_handler(
                 as std::sync::Arc<dyn rusterando_frontend::pages::push::BroadcastSink>
         });
 
+    let kitchen_sink: rusterando_frontend::pages::push::KitchenSinkHandle =
+        state.kitchen.as_ref().map(|k| {
+            std::sync::Arc::new(k.clone())
+                as std::sync::Arc<dyn rusterando_frontend::pages::push::KitchenSink>
+        });
+
     leptos_axum::handle_server_fns_with_context(
         {
             let db = state.db.clone();
@@ -941,6 +1252,7 @@ async fn server_fn_handler(
             let apns = state.apns.clone();
             let theme = state.theme.clone();
             let branding = state.branding.clone();
+            let stripe_mode = state.stripe_mode.clone();
             move || {
                 provide_context(db.clone());
                 provide_context(pwd.clone());
@@ -949,6 +1261,8 @@ async fn server_fn_handler(
                 provide_context(sink.clone());
                 provide_context(theme.clone());
                 provide_context(branding.clone());
+                provide_context(kitchen_sink.clone());
+                provide_context(stripe_mode.clone());
             }
         },
         req,

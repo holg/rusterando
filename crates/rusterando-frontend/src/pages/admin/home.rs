@@ -25,6 +25,9 @@ pub async fn load_admin_stats() -> Result<AdminStats, ServerFnError> {
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
+    // Active-orders count zählt ALLE laufenden Bestellungen — Küche
+    // muss auch Test-Bestellungen sehen, sonst übersieht man eine
+    // gerade getestete Order, die noch durchläuft.
     let active: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM orders
          WHERE status IN ('received', 'preparing', 'ready_for_pickup')",
@@ -40,11 +43,15 @@ pub async fn load_admin_stats() -> Result<AdminStats, ServerFnError> {
     let from = format!("{today} 00:00:00");
     let to = format!("{today} 23:59:59");
 
+    // Heutiger Umsatz dagegen NUR Live — sonst sieht der Inhaber einen
+    // künstlich aufgeblähten Tagesumsatz, der aus eigenen Test-Bestellungen
+    // resultiert.
     let today_row: (i64, Option<i64>) = sqlx::query_as(
         "SELECT COUNT(*), COALESCE(SUM(total_cents), 0)
          FROM orders
          WHERE created_at BETWEEN ?1 AND ?2
-           AND status != 'cancelled'",
+           AND status != 'cancelled'
+           AND stripe_mode = 'live'",
     )
     .bind(&from)
     .bind(&to)
@@ -68,9 +75,18 @@ pub fn AdminHomePage() -> impl IntoView {
             <section class="admin-dashboard">
                 <h1>"Übersicht"</h1>
 
-                <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+                // Fallback wraps in a <div> matching the resolved
+                // <div class="stats-row"> shape. Mixing <p> with <div>
+                // makes tachys' walker panic at the Suspense boundary
+                // (failed_to_cast_element) — the runtime expects the
+                // same element tag on both sides.
+                <Suspense fallback=|| view! {
+                    <div class="stats-row loading"><p class="loading">"Lädt…"</p></div>
+                }>
                     {move || stats.get().map(|res| match res {
-                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                        Err(e) => view! {
+                            <div class="stats-row error"><p class="error">{format!("Fehler: {e}")}</p></div>
+                        }.into_any(),
                         Ok(s) => view! { <Stats s/> }.into_any(),
                     })}
                 </Suspense>
@@ -142,6 +158,12 @@ fn Tile(
     badge: Memo<i64>,
 ) -> impl IntoView {
     let is_external = href.starts_with("http") || href.ends_with(".pdf");
+    // The badge <span> is always rendered, visibility flips via class
+    // toggle. Previously we returned `Some(view!{...})` vs `None`,
+    // which gave SSR (resource resolved → Some) and the first hydrate
+    // tick (memo seeded → 0 → None) different DOM shapes. tachys
+    // panicked in `failed_to_cast_element` because it expected a
+    // <span> at the position SSR put one but got nothing.
     view! {
         <a class="admin-tile" href=href
            target=if is_external { "_blank" } else { "_self" }
@@ -149,12 +171,9 @@ fn Tile(
             <span class="icon">{icon}</span>
             <span class="title">
                 {title}
-                {move || {
-                    let n = badge.get();
-                    if n > 0 {
-                        Some(view! { <span class="tile-badge">{n}</span> }.into_any())
-                    } else { None }
-                }}
+                <span class=move || {
+                    if badge.get() > 0 { "tile-badge" } else { "tile-badge hidden" }
+                }>{move || badge.get()}</span>
             </span>
             <span class="sub">{sub}</span>
         </a>

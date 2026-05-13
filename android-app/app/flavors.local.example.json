@@ -1,0 +1,18 @@
+[
+  {
+    "_comment": "Example tenant-branded build. Copy this file to flavors.local.json (gitignored), then list one entry per app you ship. Each entry becomes a Gradle product flavor automatically.",
+    "name": "myshop",
+    "applicationId": "com.yourdomain.myshop",
+    "appName": "My Shop",
+    "startUrl": "https://myshop.example.com/",
+    "associatedDomain": "myshop.example.com"
+  },
+  {
+    "_comment": "Multi-shop neutral build. Empty startUrl means the app boots with no shops configured; the user adds their own via Settings.",
+    "name": "multishop",
+    "applicationId": "com.yourdomain.multishop",
+    "appName": "Multi Shop",
+    "startUrl": "",
+    "associatedDomain": ""
+  }
+]

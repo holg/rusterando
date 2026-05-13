@@ -9,6 +9,7 @@
 //!
 //! Mirrors the [`crate::pages::settings::ThemeHandle`] pattern.
 
+use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "ssr")]
@@ -174,4 +175,22 @@ pub mod ssr {
         }
         b
     }
+}
+
+/// Public server fn — returns the shop's display name.
+///
+/// Used by `SiteHeader` to render the brand wordmark. We expose only
+/// the name (not the full Branding) so it's cheap to fetch and the
+/// resource payload is stable. Called from a `Resource` inside the
+/// header component; SSR populates the resource synchronously, hydrate
+/// reads from the streamed payload — both produce the same DOM.
+#[server(
+    name = GetShopName,
+    prefix = "/api",
+    endpoint = "get_shop_name"
+)]
+pub async fn get_shop_name() -> Result<String, ServerFnError> {
+    let h = use_context::<BrandingHandle>()
+        .ok_or_else(|| ServerFnError::new("BrandingHandle missing from context"))?;
+    Ok(h.get().display_name())
 }

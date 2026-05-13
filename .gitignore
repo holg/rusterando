@@ -10,16 +10,19 @@ tmp/
 package-lock.json
 .DS_Store
 
+# DB-Schema-Setup läuft out-of-band (see crates/rusterando-server/src/main.rs).
+# Wer ein Schema-Snapshot oder seed-SQL lokal pflegen will: data/private/.
+migrations/
+
 # Local-only secrets / scratch space (Apple Developer credentials,
 # APNs auth key, scratch notes — see docs/apple_setup.md). Never commit.
 .hidden/
 *.p8
 AuthKey_*.p8
 
-# iOS app contains tenant-specific Apple Team ID + bundle id
-# (lives in a separate private repo per shop). Public Rusterando
-# will ship a generic examples/ios-shell/ template later.
-ios-app/
+# iOS app: the brand-neutral Rusterando target is tracked. Davids-
+# specific bits (Team ID, applinks, seed plist) are gitignored via
+# ios-app/.gitignore — see ios-app/project.yml + project.local.yml.
 
 # Tauri legacy shell (archived, replaced by native Swift app).
 src-tauri/
@@ -38,6 +41,11 @@ docs/
 # .env.example with real secrets — replaced for the public repo by
 # the placeholder version. Real one stays out.
 .env.production
+# Per-deployment overlays (.env.<profile>) hold real Stripe / SMTP /
+# APNs creds + shop URLs. Each operator keeps their own; never commit.
+.env.davids
+.env.rusterando
+.env.*.local
 
 # Local AASA overrides (per-shop real Apple TEAM_ID + bundle id).
 # Davids' deploy step copies the .davids variant over the placeholder

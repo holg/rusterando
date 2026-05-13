@@ -114,6 +114,27 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     if key == "theme" && !ALLOWED_THEMES.contains(&value.trim()) {
         return Err(ServerFnError::new("Thema muss 'warm' oder 'dark' sein."));
     }
+    if key == "stripe_mode" {
+        // Only the two literal values are accepted. Refuse 'live'
+        // when the matching env vars aren't set so the admin can't
+        // flip into a broken state.
+        let trimmed = value.trim();
+        if !matches!(trimmed, "sandbox" | "live") {
+            return Err(ServerFnError::new(
+                "Stripe-Modus muss 'sandbox' oder 'live' sein.",
+            ));
+        }
+        let mode = crate::stripe::StripeMode::from_setting(trimmed);
+        let keys = crate::stripe::StripeKeys::for_mode(mode);
+        if !keys.is_complete() {
+            return Err(ServerFnError::new(format!(
+                "Schlüssel für '{}' unvollständig — bitte {prefix}STRIPE_PUBLISH_KEY, \
+                 {prefix}STRIPE_SECRET_KEY und {prefix}STRIPE_WEBHOOK_SECRET in .env setzen.",
+                mode.label_de(),
+                prefix = mode.env_prefix(),
+            )));
+        }
+    }
     // Branding numeric fields — friendly error if non-parseable.
     if matches!(key.as_str(), "shop_lat" | "shop_lon" | "shop_tax_rate") && !value.trim().is_empty()
     {
@@ -152,6 +173,14 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     if key.starts_with("shop_") {
         if let Some(h) = use_context::<crate::branding::BrandingHandle>() {
             h.apply_kv(&key, value.trim());
+        }
+    }
+    // Stripe mode flip is write-through too: the next checkout (and
+    // the next webhook validation via the Active legacy route) sees
+    // the new mode without a DB read.
+    if key == "stripe_mode" {
+        if let Some(h) = use_context::<crate::stripe::StripeModeHandle>() {
+            h.set(crate::stripe::StripeMode::from_setting(value.trim()));
         }
     }
     Ok(())

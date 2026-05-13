@@ -1,0 +1,26 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Release-signing secrets — never commit. Back up off-machine.
+keystore.properties
+keystore/
+*.jks
+*.keystore
+
+# Per-developer flavor list — declares the real product flavors
+# loaded by build.gradle.kts at configure time. flavors.local.example.json
+# is the public template; the actual file stays out of git.
+app/flavors.local.json
+
+# Tenant-specific flavor source dirs. The public repo ships the
+# "example" flavor; everything else is per-publisher and gitignored.
+# Add a `!app/src/<flavor>/` line below for any flavor that should
+# stay public.
+app/src/davids/
+app/src/rusterando/

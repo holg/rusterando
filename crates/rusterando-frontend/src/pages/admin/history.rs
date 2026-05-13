@@ -23,6 +23,14 @@ pub struct HistoryRow {
     pub pickup_label: String,
     pub items_summary: String,
     pub total_cents: i64,
+    /// "cash" | "card" — snapshot from place_order.
+    pub payment_method: String,
+    /// "pending" | "paid" | "failed" | "refunded" | "cash_on_pickup".
+    pub payment_status: String,
+    /// "live" | "sandbox" — snapshot at place_order time. Anything
+    /// other than "live" is treated as a test order and excluded
+    /// from Buchhaltung totals by default.
+    pub stripe_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +59,11 @@ pub struct HistoryReport {
     pub grand_revenue_cents: i64,
     pub grand_orders: i64,
     pub cancelled_count: i64,
+    /// Sum of voucher discounts across all non-cancelled orders in the
+    /// range. Shown as a "Gutscheine" deduction row under "Verkaufte
+    /// Artikel" so the brutto-item-sum reconciles with the netto
+    /// `grand_revenue_cents`.
+    pub voucher_discount_total_cents: i64,
 }
 
 #[server(
@@ -59,8 +72,9 @@ pub struct HistoryReport {
     endpoint = "list_admin_history"
 )]
 pub async fn list_admin_history(
-    from: String, // YYYY-MM-DD inclusive
-    to: String,   // YYYY-MM-DD inclusive
+    from: String,      // YYYY-MM-DD inclusive
+    to: String,        // YYYY-MM-DD inclusive
+    include_test: bool, // false = nur stripe_mode='live' (Buchhaltung-Default)
 ) -> Result<HistoryReport, ServerFnError> {
     use sqlx::SqlitePool;
 
@@ -77,18 +91,38 @@ pub async fn list_admin_history(
     let from_ts = format!("{from} 00:00:00");
     let to_ts = format!("{to} 23:59:59");
 
-    let order_rows =
-        sqlx::query_as::<_, (String, String, String, String, String, Option<String>, i64)>(
-            "SELECT id, order_number, status, contact_name, created_at, scheduled_for, total_cents
+    // Filtre Sandbox-Bestellungen per Default raus. Steuerberater-relevante
+    // Summen dürfen NIE durch Test-Daten verfälscht werden. Mit `include_test`
+    // true sieht der Admin trotzdem den Mix — etwa um eine Test-Order
+    // wiederzufinden.
+    let mode_clause = if include_test { "" } else { " AND stripe_mode = 'live'" };
+
+    let order_sql = format!(
+        "SELECT id, order_number, status, contact_name, created_at, scheduled_for,
+                total_cents, payment_status, stripe_mode
          FROM orders
-         WHERE created_at BETWEEN ?1 AND ?2
+         WHERE created_at BETWEEN ?1 AND ?2{mode_clause}
          ORDER BY created_at DESC",
-        )
-        .bind(&from_ts)
-        .bind(&to_ts)
-        .fetch_all(&db)
-        .await
-        .map_err(|e| ServerFnError::new(format!("orders query: {e}")))?;
+    );
+    let order_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            i64,
+            String,
+            String,
+        ),
+    >(&order_sql)
+    .bind(&from_ts)
+    .bind(&to_ts)
+    .fetch_all(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("orders query: {e}")))?;
 
     // Build rows + day totals.
     let mut orders = Vec::with_capacity(order_rows.len());
@@ -97,9 +131,29 @@ pub async fn list_admin_history(
     let mut grand_orders = 0_i64;
     let mut cancelled = 0_i64;
 
-    for (id, order_number, status, contact_name, created_at, scheduled_for, total_cents) in
-        order_rows
+    for (
+        id,
+        order_number,
+        status,
+        contact_name,
+        created_at,
+        scheduled_for,
+        total_cents,
+        payment_status,
+        stripe_mode,
+    ) in order_rows
     {
+        // Derive payment_method from payment_status:
+        //   'cash_on_pickup' → cash (Bar bei Lieferung/Abholung)
+        //   'voucher_paid'   → voucher (komplett über Gutschein)
+        //   alles andere     → card (Stripe-Pfad, paid/pending/failed/…)
+        let payment_method = if payment_status == "cash_on_pickup" {
+            "cash".to_string()
+        } else if payment_status == "voucher_paid" {
+            "voucher".to_string()
+        } else {
+            "card".to_string()
+        };
         let day = created_at.get(..10).unwrap_or("").to_string();
         let entry = days.entry(day.clone()).or_insert(DayTotal {
             date: day.clone(),
@@ -176,26 +230,33 @@ pub async fn list_admin_history(
             pickup_label,
             items_summary,
             total_cents,
+            payment_method,
+            payment_status,
+            stripe_mode,
         });
     }
 
     // Per-item stats across the whole range (excluding cancelled orders).
-    let item_rows = sqlx::query_as::<_, (String, String, i64, i64)>(
+    // Same test-filter as above so Verkaufte-Artikel-Tabelle nicht durch
+    // Sandbox-Bestellungen aufgebläht wird.
+    let items_sql = format!(
         "SELECT oi.name_snapshot, oi.options_json,
                 SUM(oi.quantity)         AS qty,
                 SUM(oi.line_total_cents) AS revenue
          FROM order_items oi
          JOIN orders o ON o.id = oi.order_id
          WHERE o.created_at BETWEEN ?1 AND ?2
-           AND o.status != 'cancelled'
+           AND o.status != 'cancelled'{mode_clause_items}
          GROUP BY oi.name_snapshot, oi.options_json
          ORDER BY qty DESC",
-    )
-    .bind(&from_ts)
-    .bind(&to_ts)
-    .fetch_all(&db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("items query: {e}")))?;
+        mode_clause_items = if include_test { "" } else { " AND o.stripe_mode = 'live'" }
+    );
+    let item_rows = sqlx::query_as::<_, (String, String, i64, i64)>(&items_sql)
+        .bind(&from_ts)
+        .bind(&to_ts)
+        .fetch_all(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("items query: {e}")))?;
 
     let items: Vec<ItemStat> = item_rows
         .into_iter()
@@ -214,6 +275,24 @@ pub async fn list_admin_history(
         })
         .collect();
 
+    // Total voucher discount in the range. Reconciles brutto (Σ items)
+    // with netto (grand_revenue): `Σ items − voucher_discount_total
+    // = grand_revenue` (plus delivery fees, but those don't show
+    // in the items table anyway).
+    let voucher_discount_total_sql = format!(
+        "SELECT COALESCE(SUM(voucher_discount_cents), 0)
+         FROM orders
+         WHERE created_at BETWEEN ?1 AND ?2
+           AND status != 'cancelled'{mode_clause_v}",
+        mode_clause_v = if include_test { "" } else { " AND stripe_mode = 'live'" }
+    );
+    let (voucher_discount_total,): (i64,) = sqlx::query_as(&voucher_discount_total_sql)
+        .bind(&from_ts)
+        .bind(&to_ts)
+        .fetch_one(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("voucher total query: {e}")))?;
+
     Ok(HistoryReport {
         from,
         to,
@@ -223,6 +302,7 @@ pub async fn list_admin_history(
         grand_revenue_cents: grand_revenue,
         grand_orders,
         cancelled_count: cancelled,
+        voucher_discount_total_cents: voucher_discount_total,
     })
 }
 
@@ -246,13 +326,25 @@ fn iso_offset_days(days: i64) -> String {
 pub fn AdminHistoryPage() -> impl IntoView {
     let from = RwSignal::new(iso_offset_days(-7));
     let to = RwSignal::new(today_iso());
+    // Default = nur Live-Bestellungen. Steuerberater-relevant — Sandbox
+    // darf hier nie unbeabsichtigt in Umsatz-Tabellen landen.
+    let include_test = RwSignal::new(false);
 
     let report = Resource::new(
-        move || (from.get(), to.get()),
-        |(from, to)| async move { list_admin_history(from, to).await },
+        move || (from.get(), to.get(), include_test.get()),
+        |(from, to, include_test)| async move {
+            list_admin_history(from, to, include_test).await
+        },
     );
 
-    let csv_href = move || format!("/admin/history.csv?from={}&to={}", from.get(), to.get());
+    let csv_href = move || {
+        format!(
+            "/admin/history.csv?from={}&to={}&include_test={}",
+            from.get(),
+            to.get(),
+            include_test.get(),
+        )
+    };
 
     view! {
         <AdminShell>
@@ -279,8 +371,21 @@ pub fn AdminHistoryPage() -> impl IntoView {
                     <button type="button" on:click=move |_| { from.set(iso_offset_days(-7)); to.set(today_iso()); }>"7 Tage"</button>
                     <button type="button" on:click=move |_| { from.set(iso_offset_days(-30)); to.set(today_iso()); }>"30 Tage"</button>
                 </div>
+                <label class="include-test">
+                    <input type="checkbox"
+                        prop:checked=move || include_test.get()
+                        on:change=move |ev| include_test.set(event_target_checked(&ev))/>
+                    <span>"Sandbox-Bestellungen einbeziehen"</span>
+                </label>
                 <a class="btn ghost" href=csv_href download="bestellungen.csv">"⬇ CSV exportieren"</a>
             </form>
+            <p class="hint muted">
+                {move || if include_test.get() {
+                    "Anzeige inkl. Sandbox/Test-Bestellungen. Steuerberater-Export nicht so versenden."
+                } else {
+                    "Nur echte (Live-)Bestellungen. Standard für Buchhaltung & Steuerberater."
+                }}
+            </p>
 
                 <Suspense fallback=|| view! { <p>"Lädt…"</p> }>
                     {move || report.get().map(|res| match res {
@@ -352,6 +457,9 @@ fn Report(r: HistoryReport) -> impl IntoView {
         {if r.items.is_empty() {
             view! { <p class="empty">"—"</p> }.into_any()
         } else {
+            // Brutto-Items-Sum für die Footer-Zeile.
+            let items_brutto: i64 = r.items.iter().map(|i| i.revenue_cents).sum();
+            let voucher_total = r.voucher_discount_total_cents;
             view! {
                 <table class="hist-table">
                     <thead>
@@ -371,6 +479,20 @@ fn Report(r: HistoryReport) -> impl IntoView {
                                 <td class="amt">{format_eur(i.revenue_cents)}</td>
                             </tr>
                         }).collect_view()}
+                        {(voucher_total > 0).then(|| view! {
+                            <tr class="discount-row">
+                                <td><em>"Gutschein-Rabatt"</em></td>
+                                <td class="muted">"—"</td>
+                                <td></td>
+                                <td class="amt"><strong>{format!("−{}", format_eur(voucher_total))}</strong></td>
+                            </tr>
+                            <tr class="netto-row">
+                                <td><strong>"Netto-Umsatz"</strong></td>
+                                <td class="muted">"(Artikel − Gutscheine)"</td>
+                                <td></td>
+                                <td class="amt"><strong>{format_eur(items_brutto - voucher_total)}</strong></td>
+                            </tr>
+                        })}
                     </tbody>
                 </table>
             }.into_any()
@@ -389,29 +511,60 @@ fn Report(r: HistoryReport) -> impl IntoView {
                             <th>"Kunde"</th>
                             <th>"Status"</th>
                             <th>"Artikel"</th>
+                            <th>"Zahlung"</th>
                             <th>"Summe"</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {r.orders.into_iter().map(|o| view! {
-                            <tr>
-                                <td>
-                                    <a href=format!("/admin/orders/{}", o.id)>{o.order_number}</a>
-                                </td>
-                                <td class="muted">{o.created_at}</td>
-                                <td>{o.contact_name}</td>
-                                <td>
-                                    <span class="status-pill" data-status=o.status.clone()>
-                                        {status_label_de(&o.status)}
-                                    </span>
-                                </td>
-                                <td class="items-cell">{o.items_summary}</td>
-                                <td class="amt"><strong>{format_eur(o.total_cents)}</strong></td>
-                            </tr>
+                        {r.orders.into_iter().map(|o| {
+                            let (pay_label, pay_cls) = payment_pill(&o.payment_method, &o.payment_status);
+                            let is_test = o.stripe_mode != "live";
+                            let row_cls = if is_test { "test-order" } else { "" };
+                            view! {
+                                <tr class=row_cls>
+                                    <td>
+                                        <a href=format!("/admin/orders/{}", o.id)>{o.order_number.clone()}</a>
+                                        {is_test.then(|| view! {
+                                            <span class="test-pill" title="Sandbox/Test-Bestellung">"TEST"</span>
+                                        })}
+                                    </td>
+                                    <td class="muted">{o.created_at}</td>
+                                    <td>{o.contact_name}</td>
+                                    <td>
+                                        <span class="status-pill" data-status=o.status.clone()>
+                                            {status_label_de(&o.status)}
+                                        </span>
+                                    </td>
+                                    <td class="items-cell">{o.items_summary}</td>
+                                    <td>
+                                        <span class=format!("payment-pill {pay_cls}")>{pay_label}</span>
+                                    </td>
+                                    <td class="amt"><strong>{format_eur(o.total_cents)}</strong></td>
+                                </tr>
+                            }
                         }).collect_view()}
                     </tbody>
                 </table>
             }.into_any()
         }}
+    }
+}
+
+/// (Label, css-class) for the Zahlung pill. payment_method is "cash" |
+/// "card" | "voucher"; payment_status carries the actual settlement
+/// state.
+///
+/// Buckets: Bar (cash_on_pickup), Karte ✓/offen/Fehler (Stripe path),
+/// Erstattet (refunded), Gutschein (voucher_paid — order fully
+/// covered, no charge of any kind happened).
+fn payment_pill(method: &str, status: &str) -> (String, &'static str) {
+    match (method, status) {
+        ("cash", _) => ("Bar".to_string(), "cash"),
+        ("voucher", _) => ("Gutschein".to_string(), "voucher"),
+        ("card", "paid") => ("Karte ✓".to_string(), "card-paid"),
+        ("card", "pending") => ("Karte (offen)".to_string(), "card-pending"),
+        ("card", "failed") => ("Karte (Fehler)".to_string(), "card-failed"),
+        ("card", "refunded") => ("Erstattet".to_string(), "card-refunded"),
+        (m, s) => (format!("{m} ({s})"), "card"),
     }
 }

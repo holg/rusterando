@@ -1,15 +1,21 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/kitchen-protocol",
     "crates/rusterando-app",
     "crates/rusterando-frontend",
     "crates/rusterando-server",
     "crates/rusterando-shared",
 ]
-# src-tauri/ is the legacy Tauri WebView shell, archived in favour of the
-# native iOS / Android apps. Keep the source on disk but exclude it from
-# the workspace so it doesn't drag dev-deps into a fresh checkout.
-exclude = ["src-tauri"]
+# Excluded from the workspace:
+#   src-tauri/         legacy Tauri WebView shell, archived in favour of
+#                      the native iOS / Android apps.
+#   crates/rusterando-printer/
+#                      Pi binary — cross-compiles to aarch64-linux-gnu
+#                      with its own dep set (escpos, etc.). Build directly
+#                      via `cargo build -p rusterando-printer
+#                      --manifest-path crates/rusterando-printer/Cargo.toml`.
+exclude = ["src-tauri", "crates/rusterando-printer"]
 
 # Default release profile — fast iteration. Thin LTO + multi-unit codegen
 # combined with bin-side `CARGO_INCREMENTAL=1` (set in
@@ -43,6 +49,14 @@ tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 tower-sessions = { version = "0.14", features = ["memory-store"] }
+
+# Kitchen-printer subsystem wire format + framing. The server uses
+# `LengthDelimitedCodec` over a tokio TCP socket and postcard-encoded
+# `ServerMessage`/`ClientMessage` payloads (see `crates/kitchen-protocol`).
+postcard = { version = "1", features = ["use-std"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+futures = "0.3"
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "migrate"] }
@@ -90,6 +104,7 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 # Internal crates
+kitchen-protocol = { path = "crates/kitchen-protocol" }
 rusterando-app = { path = "crates/rusterando-app" }
 rusterando-frontend = { path = "crates/rusterando-frontend" }
 rusterando-server = { path = "crates/rusterando-server" }

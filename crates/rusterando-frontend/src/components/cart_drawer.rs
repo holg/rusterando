@@ -75,29 +75,34 @@ pub fn use_cart_ctx() -> CartCtx {
 pub fn CartFab() -> impl IntoView {
     let ctx = use_cart_ctx();
 
+    // Resource reads MUST happen inside <Suspense> (Leptos warns
+    // otherwise and the hydration can mismatch). We give the fallback
+    // and the resolved branches IDENTICAL DOM shape — a single
+    // <button class="cart-fab …"> with text content. Visibility is
+    // toggled via `.hidden` CSS class. SSR + hydrate both walk the
+    // same single element so tachys never tries to cast the wrong
+    // tag.
     view! {
-        <Suspense fallback=|| ()>
+        <Suspense fallback=|| view! {
+            <button class="cart-fab hidden" aria-label="Warenkorb öffnen" aria-hidden="true">
+                <span class="icon">"🛒"</span>
+                <span class="count">{0}</span>
+                <span class="total">"0,00 €"</span>
+            </button>
+        }>
             {move || {
-                let cart_opt = ctx.cart.get().and_then(|r| r.ok());
-                let count = cart_opt.as_ref().map(|c| c.item_count).unwrap_or(0);
-                let subtotal = cart_opt
-                    .as_ref()
-                    .map(|c| format_eur(c.subtotal_cents))
-                    .unwrap_or_else(|| "0,00 €".to_string());
-                if count > 0 {
-                    Some(view! {
-                        <button
-                            class="cart-fab"
-                            aria-label="Warenkorb öffnen"
-                            on:click=move |_| ctx.open.set(true)
-                        >
-                            <span class="icon">"🛒"</span>
-                            <span class="count">{count}</span>
-                            <span class="total">{subtotal}</span>
-                        </button>
-                    })
-                } else {
-                    None
+                let cart = ctx.cart.get().and_then(|r| r.ok()).unwrap_or_default();
+                let count = cart.item_count;
+                let subtotal = format_eur(cart.subtotal_cents);
+                let cls = if count > 0 { "cart-fab" } else { "cart-fab hidden" };
+                let aria = if count > 0 { "false" } else { "true" };
+                view! {
+                    <button class=cls aria-label="Warenkorb öffnen" aria-hidden=aria
+                            on:click=move |_| ctx.open.set(true)>
+                        <span class="icon">"🛒"</span>
+                        <span class="count">{count}</span>
+                        <span class="total">{subtotal}</span>
+                    </button>
                 }
             }}
         </Suspense>
@@ -119,6 +124,15 @@ pub fn CartDrawer() -> impl IntoView {
                 <button class="close" aria-label="Schließen" on:click=close>"×"</button>
             </header>
 
+            // <Suspense> wrap for the resource read. The fallback
+            // matches the resolved-empty shape (single <p>), so the
+            // walker doesn't have to cast between different elements.
+            // The drawer body has TWO possible shapes after resolve:
+            // either a <p class="empty"> (cart empty) or a <ul> of
+            // lines. We render the <ul> conditionally — that's fine
+            // because by the time it appears, the resource has
+            // resolved on the client and tachys is past the initial
+            // hydrate walk.
             <div class="drawer-body">
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
                     {move || ctx.cart.get().map(|res| match res {
@@ -132,15 +146,21 @@ pub fn CartDrawer() -> impl IntoView {
             </div>
 
             <footer class="drawer-foot">
-                // Wrap the Resource read in Suspense — without it, SSR
-                // renders against an empty default cart while hydration
-                // sees the streamed cart, and the conditional
-                // `.then(...)` banners produce mismatched DOM that trips
-                // tachys's unreachable!() at hydration.rs:163. The
-                // mismatch was most reproducible when staff session
-                // cookies kept a stable, long-lived cart between visits.
+                // <Suspense> wraps the entire footer block. Fallback +
+                // resolved both emit the EXACT same five elements:
+                // <div class="row"> + <p class="free-delivery"> + <p>
+                // + <a> + <button>. Visibility/text differs but the
+                // DOM tag list is identical, so tachys' walker doesn't
+                // trip on element-cast mismatches.
                 <Suspense fallback=|| view! {
-                    <div class="row"><span>"Zwischensumme"</span><strong>"…"</strong></div>
+                    <div class="row">
+                        <span>"Zwischensumme"</span>
+                        <strong>"…"</strong>
+                    </div>
+                    <p class="free-delivery hidden"></p>
+                    <p class="hint">"Zahlung an der Kasse oder online beim Bestellen."</p>
+                    <a class="btn primary disabled" href="/checkout">"Zur Kasse"</a>
+                    <button class="btn ghost" disabled=true>"Warenkorb leeren"</button>
                 }>
                     {move || {
                         let cart = ctx.cart.get().and_then(|r| r.ok()).unwrap_or_default();
@@ -149,29 +169,27 @@ pub fn CartDrawer() -> impl IntoView {
                         let threshold = cart.free_delivery_threshold_cents;
                         let unlocked = threshold > 0 && cart.subtotal_cents >= threshold;
                         let missing = (threshold - cart.subtotal_cents).max(0);
-                        let banner_unlocked = (threshold > 0 && unlocked).then(|| view! {
-                            <p class="free-delivery ok">"✓ Lieferung kostenlos"</p>
-                        });
-                        let banner_missing = (threshold > 0 && !unlocked && has_items).then(|| view! {
-                            <p class="free-delivery hint">
-                                "Noch " <strong>{format_eur(missing)}</strong>
-                                " bis kostenlose Lieferung."
-                            </p>
-                        });
+                        let (banner_cls, banner_text) = if threshold > 0 && unlocked {
+                            ("free-delivery ok", "✓ Lieferung kostenlos".to_string())
+                        } else if threshold > 0 && !unlocked && has_items {
+                            (
+                                "free-delivery hint",
+                                format!("Noch {} bis kostenlose Lieferung.", format_eur(missing)),
+                            )
+                        } else {
+                            ("free-delivery hidden", String::new())
+                        };
+                        let cta_cls = if has_items { "btn primary" } else { "btn primary disabled" };
                         view! {
                             <div class="row">
                                 <span>"Zwischensumme"</span>
                                 <strong>{total}</strong>
                             </div>
-                            {banner_unlocked}
-                            {banner_missing}
+                            <p class=banner_cls>{banner_text}</p>
                             <p class="hint">"Zahlung an der Kasse oder online beim Bestellen."</p>
-                            <a class="btn primary" class:disabled=move || !has_items
-                               href="/checkout" on:click=close>
-                                "Zur Kasse"
-                            </a>
+                            <a class=cta_cls href="/checkout" on:click=close>"Zur Kasse"</a>
                             <button class="btn ghost"
-                                disabled=move || !has_items
+                                disabled=!has_items
                                 on:click=move |_| { ctx.clear.dispatch(ClearCart {}); }>
                                 "Warenkorb leeren"
                             </button>

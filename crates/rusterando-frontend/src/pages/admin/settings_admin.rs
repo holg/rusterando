@@ -18,6 +18,40 @@ pub fn SettingsAdminPage() -> impl IntoView {
         |_| async move { list_settings().await },
     );
 
+    // Track the key of the most recent save. The action's `input()`
+    // signal carries the last dispatched payload; when the matching
+    // `value()` resolves Ok, we know exactly which setting just
+    // landed and can react to specific ones (e.g. stripe_mode needs
+    // a full page reload to refresh Banner + Chip).
+    let last_input = updater.input();
+    let last_value = updater.value();
+
+    // Hard-reload after a successful stripe_mode flip. The Test/Live
+    // banner and the admin chip are both built on OnceResource which
+    // doesn't refetch, so the only way to make them reflect the new
+    // mode without per-component refresh signals is to reload the
+    // page. Mode flips are rare; a reload is fine UX.
+    //
+    // Wrapped in #[cfg(feature = "hydrate")] because window is a
+    // browser API — SSR has no window object.
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        let key = last_input.get().map(|i| i.key);
+        let ok = matches!(last_value.get(), Some(Ok(_)));
+        if ok && key.as_deref() == Some("stripe_mode") {
+            if let Some(w) = web_sys::window() {
+                let _ = w.location().reload();
+            }
+        }
+    });
+    // Reference the locals on the SSR side to silence the
+    // unused-variable warning the cfg-gated effect would otherwise
+    // produce.
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = (last_input, last_value);
+    }
+
     view! {
         <AdminShell>
             <section class="settings-admin">
@@ -78,6 +112,7 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
     // live euro preview. Recognised by the key suffix.
     let is_cents = key.ends_with("_cents");
     let is_theme = key == "theme";
+    let is_stripe_mode = key == "stripe_mode";
     let preview_eur = Memo::new(move |_| {
         value
             .get()
@@ -102,6 +137,16 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
                 on:change=move |ev| value.set(event_target_value(&ev))>
                 <option value="warm">"warm — beige/rot (Standard)"</option>
                 <option value="dark">"dark — dunkel mit roten Akzenten"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_stripe_mode {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="sandbox">"Sandbox (Test) — keine echten Zahlungen"</option>
+                <option value="live">"Live (Echtbetrieb) — Karten werden belastet"</option>
             </select>
         }
         .into_any()

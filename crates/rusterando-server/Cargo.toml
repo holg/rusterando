@@ -15,9 +15,25 @@ path = "src/main.rs"
 ureq = "2"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+[features]
+default = []
+# Exposes POST /api/kitchen/debug/inject — broadcasts an arbitrary
+# KitchenEvent (JSON body) into the outbox + tokio channel. Useful for
+# smoke-testing the printer chain without going through Stripe. NEVER
+# enable in production builds.
+debug-inject = []
+
 [dependencies]
 rusterando-shared = { workspace = true }
 rusterando-frontend = { workspace = true, features = ["ssr"] }
+
+# Kitchen printer subsystem (see src/kitchen.rs). The Pi binary lives at
+# crates/rusterando-printer/ and depends on the same protocol crate.
+kitchen-protocol = { workspace = true }
+postcard = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
 
 axum = { workspace = true }
 tokio = { workspace = true }
@@ -36,7 +52,12 @@ chrono = { workspace = true }
 async-stripe = { workspace = true }
 reqwest = { workspace = true }
 # APNs HTTP/2 client. Token-based auth (.p8 key) — see APNS_KEY_PATH env.
-apns-h2 = { version = "0.11", default-features = false, features = ["aws-lc-rs", "pem"] }
+# OpenSSL crypto backend instead of aws-lc-rs so cross-compilation
+# uses the already-cross-built openssl in $HOME/opt/openssl_for_cross_*.
+# aws-lc-rs ships its own C+asm crypto via aws-lc-sys, which fails
+# under aarch64-unknown-linux-gnu-gcc on a macOS host without a
+# fully-wired-up sysroot.
+apns-h2 = { version = "0.11", default-features = false, features = ["openssl", "pem"] }
 async-trait = "0.1"
 # Content-hash filename for /api/admin/upload_image so duplicates dedupe.
 sha2 = "0.10"

@@ -18,7 +18,8 @@ use rusterando_shared::models::format_eur;
 use serde::{Deserialize, Serialize};
 
 use crate::pages::order::{
-    status_label_de, FinishTour, StartTour, TourStopDelivered, TourStopView, TourSummary,
+    status_label_de, CancelTour, FinishTour, RemoveTourStop, StartTour, TourStopDelivered,
+    TourStopView, TourSummary,
 };
 
 /// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json)
@@ -298,6 +299,8 @@ pub fn DriverBoardPage() -> impl IntoView {
     let starter = ServerAction::<StartTour>::new();
     let stop_delivered = ServerAction::<TourStopDelivered>::new();
     let tour_finisher = ServerAction::<FinishTour>::new();
+    let stop_remover = ServerAction::<RemoveTourStop>::new();
+    let tour_canceller = ServerAction::<CancelTour>::new();
 
     // Selection set for "Tour starten" — order_ids the driver has ticked.
     let selected: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
@@ -317,6 +320,8 @@ pub fn DriverBoardPage() -> impl IntoView {
                 starter.version().get(),
                 stop_delivered.version().get(),
                 tour_finisher.version().get(),
+                stop_remover.version().get(),
+                tour_canceller.version().get(),
             )
         },
         |_| async move { list_driver_orders().await },
@@ -353,6 +358,8 @@ pub fn DriverBoardPage() -> impl IntoView {
                             starter
                             stop_delivered
                             tour_finisher
+                            stop_remover
+                            tour_canceller
                             selected
                             on_start_tour=Callback::new(on_start_tour)
                             toggle_selected=Callback::new(move |(id, on): (String, bool)| toggle_selected(id, on))
@@ -375,6 +382,8 @@ fn Stacks(
     starter: ServerAction<StartTour>,
     stop_delivered: ServerAction<TourStopDelivered>,
     tour_finisher: ServerAction<FinishTour>,
+    stop_remover: ServerAction<RemoveTourStop>,
+    tour_canceller: ServerAction<CancelTour>,
     selected: RwSignal<Vec<String>>,
     on_start_tour: Callback<()>,
     toggle_selected: Callback<(String, bool)>,
@@ -401,6 +410,8 @@ fn Stacks(
                 tours_sv
                 stop_delivered
                 tour_finisher
+                stop_remover
+                tour_canceller
             />
             <LooseColumn rows_sv=loose_sv advance/>
         </div>
@@ -463,7 +474,7 @@ fn ReadyCard(
     };
 
     view! {
-        <li class="order-card driver-card" class:selected=is_checked>
+        <li class="order-card driver-card compact" class:selected=is_checked>
             <div class="order-head">
                 <label class="select-tour">
                     <input type="checkbox"
@@ -473,25 +484,30 @@ fn ReadyCard(
                         }/>
                     <strong class="order-num">{r.order_number}</strong>
                 </label>
-                <span class="status-pill" data-status=r.status.clone()>
-                    {status_label_de(&r.status)}
+                <span class="address-line">{r.address_line.clone()}</span>
+                <span class="contact-line">
+                    {r.contact_name.clone()} " · "
+                    <a href=tel_url.clone()>{r.contact_phone.clone()}</a>
                 </span>
             </div>
-            <p class="address-big">"📍 " <strong>{r.address_line}</strong></p>
-            <p class="muted">{format!("Liefergebiet: {}", r.zone)}</p>
-            {r.address_notes.map(|n| view! {
-                <p class="muted">{format!("Hinweis: {n}")}</p>
-            })}
-            <p class="contact">
-                <strong>{r.contact_name}</strong> " · "
-                <a href=tel_url>"📞 " {r.contact_phone}</a>
-            </p>
-            <p class="items">{r.items_summary}</p>
-            <p class={if needs_cash { "cash" } else { "muted" }}>{cash_label}</p>
-            <div class="row map-links">
-                <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
-                <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
-            </div>
+            <details class="card-details">
+                <summary>"Details"</summary>
+                <p class="muted">
+                    <span class="status-pill" data-status=r.status.clone()>
+                        {status_label_de(&r.status)}
+                    </span>
+                    " · " {format!("Liefergebiet: {}", r.zone)}
+                </p>
+                {r.address_notes.map(|n| view! {
+                    <p class="muted">{format!("Hinweis: {n}")}</p>
+                })}
+                <p class="items">{r.items_summary}</p>
+                <p class={if needs_cash { "cash" } else { "muted" }}>{cash_label}</p>
+                <div class="row map-links">
+                    <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
+                    <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
+                </div>
+            </details>
         </li>
     }
 }
@@ -501,6 +517,8 @@ fn ToursColumn(
     tours_sv: StoredValue<Vec<TourSummary>>,
     stop_delivered: ServerAction<TourStopDelivered>,
     tour_finisher: ServerAction<FinishTour>,
+    stop_remover: ServerAction<RemoveTourStop>,
+    tour_canceller: ServerAction<CancelTour>,
 ) -> impl IntoView {
     let count = tours_sv.with_value(|v| v.len());
     view! {
@@ -512,7 +530,7 @@ fn ToursColumn(
                 view! {
                     <ul class="tours-list">
                         {tours_sv.with_value(|tours| tours.clone().into_iter().map(|t| view! {
-                            <TourCard t stop_delivered tour_finisher/>
+                            <TourCard t stop_delivered tour_finisher stop_remover tour_canceller/>
                         }).collect_view())}
                     </ul>
                 }.into_any()
@@ -526,9 +544,12 @@ fn TourCard(
     t: TourSummary,
     stop_delivered: ServerAction<TourStopDelivered>,
     tour_finisher: ServerAction<FinishTour>,
+    stop_remover: ServerAction<RemoveTourStop>,
+    tour_canceller: ServerAction<CancelTour>,
 ) -> impl IntoView {
     let id = t.id.clone();
     let id_for_finish = t.id.clone();
+    let id_for_cancel = t.id.clone();
     let optimised_label = match t.optimised_by.as_str() {
         "ors" => "Route optimiert",
         _ => "Reihenfolge nach Eingang",
@@ -548,6 +569,7 @@ fn TourCard(
         .sum();
 
     let all_delivered = t.stops.iter().all(|s| s.delivered_at.is_some());
+    let any_delivered = t.stops.iter().any(|s| s.delivered_at.is_some());
     let stops_sv = StoredValue::new(t.stops);
     let id_for_card = id.clone();
 
@@ -565,7 +587,7 @@ fn TourCard(
             <ol class="tour-stops">
                 {stops_sv.with_value(|stops| stops.clone().into_iter().map(|s| {
                     let tour_id = id.clone();
-                    view! { <TourStopRow s tour_id stop_delivered/> }
+                    view! { <TourStopRow s tour_id stop_delivered stop_remover/> }
                 }).collect_view())}
             </ol>
             <div class="row">
@@ -576,8 +598,37 @@ fn TourCard(
                     }>
                     {if all_delivered { "Tour beenden" } else { "Tour beenden (offene Stops)" }}
                 </button>
+                <button class="btn ghost danger"
+                    on:click=move |_| {
+                        let confirm_msg = if any_delivered {
+                            "Tour abbrechen? Offene Stops gehen zurück nach 'Abholbereit'. Bereits gelieferte bleiben gespeichert."
+                        } else {
+                            "Tour abbrechen? Alle Stops gehen zurück nach 'Abholbereit'."
+                        };
+                        if confirm_dialog(confirm_msg) {
+                            tour_canceller.dispatch(CancelTour { tour_id: id_for_cancel.clone() });
+                        }
+                    }>
+                    "Tour abbrechen"
+                </button>
             </div>
         </li>
+    }
+}
+
+/// Confirm prompt that's a no-op on SSR (returns true) and uses
+/// `window.confirm` in the browser. Kept tiny so it's used inline above.
+fn confirm_dialog(msg: &str) -> bool {
+    #[cfg(feature = "hydrate")]
+    {
+        web_sys::window()
+            .and_then(|w| w.confirm_with_message(msg).ok())
+            .unwrap_or(true)
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        let _ = msg;
+        true
     }
 }
 
@@ -586,18 +637,30 @@ fn TourStopRow(
     s: TourStopView,
     tour_id: String,
     stop_delivered: ServerAction<TourStopDelivered>,
+    stop_remover: ServerAction<RemoveTourStop>,
 ) -> impl IntoView {
     let (apple_url, google_url) = map_links(&s.address_line, s.latitude, s.longitude);
     let tel_url = format!("tel:{}", s.contact_phone);
     let needs_cash = s.payment_status == "cash_on_pickup";
     let delivered = s.delivered_at.is_some();
     let seq = s.sequence;
-    let tid_for_btn = tour_id.clone();
+    let tid_for_done = tour_id.clone();
+    let tid_for_revert = tour_id.clone();
     let on_delivered = move |_| {
         stop_delivered.dispatch(TourStopDelivered {
-            tour_id: tid_for_btn.clone(),
+            tour_id: tid_for_done.clone(),
             sequence: seq,
         });
+    };
+    let on_revert = move |_| {
+        if confirm_dialog(
+            "Diesen Stop aus der Tour nehmen? Bestellung geht zurück nach 'Abholbereit'.",
+        ) {
+            stop_remover.dispatch(RemoveTourStop {
+                tour_id: tid_for_revert.clone(),
+                sequence: seq,
+            });
+        }
     };
     let eta_label = s.eta_seconds.map(|sec| {
         let mins = (sec as f64 / 60.0).round() as i64;
@@ -605,28 +668,34 @@ fn TourStopRow(
     });
 
     view! {
-        <li class=move || if delivered { "tour-stop done" } else { "tour-stop" }>
+        <li class=move || if delivered { "tour-stop done compact" } else { "tour-stop compact" }>
             <div class="tour-stop-head">
                 <span class="seq">{seq + 1}</span>
-                <strong>{s.order_number}</strong>
-                {eta_label.map(|l| view! { <span class="muted">{l}</span> })}
+                <strong>{s.order_number.clone()}</strong>
+                <span class="address-line">{s.address_line.clone()}</span>
+                <span class="contact-line">
+                    {s.contact_name.clone()} " · "
+                    <a href=tel_url.clone()>{s.contact_phone.clone()}</a>
+                </span>
+                {eta_label.clone().map(|l| view! { <span class="muted">{l}</span> })}
                 {delivered.then(|| view! { <span class="status-pill" data-status="delivered">"Geliefert"</span> })}
             </div>
-            <p class="address-big">"📍 " <strong>{s.address_line}</strong></p>
-            <p class="contact">
-                <strong>{s.contact_name}</strong> " · "
-                <a href=tel_url>"📞 " {s.contact_phone}</a>
-            </p>
-            <p class={if needs_cash && !delivered { "cash" } else { "muted" }}>
-                {if needs_cash { format!("BAR: {}", format_eur(s.total_cents)) } else { "Online bezahlt".to_string() }}
-            </p>
-            <div class="row map-links">
-                <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
-                <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
-                {(!delivered).then(|| view! {
-                    <button class="btn primary small" on:click=on_delivered>"Geliefert"</button>
-                })}
-            </div>
+            <details class="card-details">
+                <summary>"Details"</summary>
+                <p class={if needs_cash && !delivered { "cash" } else { "muted" }}>
+                    {if needs_cash { format!("BAR: {}", format_eur(s.total_cents)) } else { "Online bezahlt".to_string() }}
+                </p>
+                <div class="row map-links">
+                    <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
+                    <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
+                    {(!delivered).then(|| view! {
+                        <button class="btn primary small" on:click=on_delivered>"Geliefert"</button>
+                    })}
+                    {(!delivered).then(|| view! {
+                        <button class="btn ghost small" on:click=on_revert>"↩ zurücknehmen"</button>
+                    })}
+                </div>
+            </details>
         </li>
     }
 }
@@ -667,30 +736,35 @@ fn LooseCard(r: DriverOrderRow, advance: ServerAction<DriverAdvance>) -> impl In
     let needs_cash = r.payment_status == "cash_on_pickup";
 
     view! {
-        <li class="order-card driver-card">
+        <li class="order-card driver-card compact">
             <div class="order-head">
                 <strong class="order-num">{r.order_number}</strong>
-                <span class="status-pill" data-status=r.status.clone()>
-                    {status_label_de(&r.status)}
+                <span class="address-line">{r.address_line.clone()}</span>
+                <span class="contact-line">
+                    {r.contact_name.clone()} " · "
+                    <a href=tel_url.clone()>{r.contact_phone.clone()}</a>
                 </span>
             </div>
-            <p class="address-big">"📍 " <strong>{r.address_line}</strong></p>
-            <p class="muted">{format!("Liefergebiet: {}", r.zone)}</p>
-            {r.address_notes.map(|n| view! {
-                <p class="muted">{format!("Hinweis: {n}")}</p>
-            })}
-            <p class="contact">
-                <strong>{r.contact_name}</strong> " · "
-                <a href=tel_url>"📞 " {r.contact_phone}</a>
-            </p>
-            <p class={if needs_cash { "cash" } else { "muted" }}>
-                {if needs_cash { format!("BAR: {}", format_eur(r.total_cents)) } else { "Online bezahlt".to_string() }}
-            </p>
-            <div class="row map-links">
-                <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
-                <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
-                <button class="btn primary" on:click=on_advance>"Geliefert"</button>
-            </div>
+            <details class="card-details">
+                <summary>"Details"</summary>
+                <p class="muted">
+                    <span class="status-pill" data-status=r.status.clone()>
+                        {status_label_de(&r.status)}
+                    </span>
+                    " · " {format!("Liefergebiet: {}", r.zone)}
+                </p>
+                {r.address_notes.map(|n| view! {
+                    <p class="muted">{format!("Hinweis: {n}")}</p>
+                })}
+                <p class={if needs_cash { "cash" } else { "muted" }}>
+                    {if needs_cash { format!("BAR: {}", format_eur(r.total_cents)) } else { "Online bezahlt".to_string() }}
+                </p>
+                <div class="row map-links">
+                    <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
+                    <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
+                    <button class="btn primary" on:click=on_advance>"Geliefert"</button>
+                </div>
+            </details>
         </li>
     }
 }

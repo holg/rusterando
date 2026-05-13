@@ -21,13 +21,32 @@ use typst::{Library, LibraryExt, World};
 // Embedded template
 // ---------------------------------------------------------------------------
 
-const TEMPLATE_SRC: &str = include_str!("../../../templates/menu.typ");
+/// Factory-default template. Used when the admin hasn't supplied an
+/// override via app_settings.pdf_template_source. Kept as the safety
+/// net for the "Reset auf Werks-Template" button.
+pub const TEMPLATE_SRC: &str = include_str!("../../../templates/menu.typ");
 const TEMPLATE_VPATH: &str = "/menu.typ";
 
 // Image assets the template can `image("/img/...")` for. Bytes are embedded
 // at compile time so the running binary needs no filesystem access.
 const ASSET_LADENFRONT: &[u8] = include_bytes!("../../../public/img/ladenfront.jpg");
 const ASSET_LADENFRONT_VPATH: &str = "/img/ladenfront.jpg";
+
+/// Virtual paths the template uses for admin-uploaded ad slots. The
+/// template can reference these unconditionally; we serve a 1×1
+/// transparent PNG if the slot is empty so `#image(...)` doesn't err.
+const ASSET_AD_COVER_VPATH: &str = "/img/ad-cover.png";
+const ASSET_AD_CENTER_VPATH: &str = "/img/ad-center.png";
+const ASSET_AD_BACK_VPATH: &str = "/img/ad-back.png";
+/// 1×1 transparent PNG. Returned for empty ad slots so the template
+/// can reference the vpath unconditionally without crashing.
+const BLANK_PNG: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+    0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
 
 /// Path the template's `image()` call uses to fetch the QR. Bytes are built
 /// per-payload from the live `site_url`, served by `MenuWorld::file()`.
@@ -163,17 +182,30 @@ struct MenuWorld {
     /// SVG bytes for the QR code that points at `payload.site_url`. Generated
     /// once per request — Typst caches the resulting `Image`.
     qr_svg: Vec<u8>,
+    /// Admin-uploaded cover bytes. `None` falls back to the bundled
+    /// `ASSET_LADENFRONT`.
+    cover_override: Option<Vec<u8>>,
+    /// Admin-uploaded ad bytes per slot.
+    ad_cover: Option<Vec<u8>>,
+    ad_center: Option<Vec<u8>>,
+    ad_back: Option<Vec<u8>>,
 }
 
 impl MenuWorld {
-    fn new(payload: &MenuPdfPayload) -> anyhow::Result<Self> {
+    fn new(payload: &MenuPdfPayload, overrides: &PdfOverrides) -> anyhow::Result<Self> {
         let json = serde_json::to_string(payload)?;
         let mut inputs = Dict::new();
         inputs.insert("data".into(), typst::foundations::Value::Str(json.into()));
         let library = Library::builder().with_inputs(inputs).build();
 
+        let template_source = overrides
+            .template_source
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(TEMPLATE_SRC);
+
         let main_id = FileId::new(None, VirtualPath::new(TEMPLATE_VPATH));
-        let main_source = Source::new(main_id, TEMPLATE_SRC.to_string());
+        let main_source = Source::new(main_id, template_source.to_string());
 
         let qr_svg = render_qr_svg(&payload.site_url);
 
@@ -182,8 +214,24 @@ impl MenuWorld {
             main_id,
             main_source,
             qr_svg,
+            cover_override: overrides.cover_image.clone(),
+            ad_cover: overrides.ad_cover_image.clone(),
+            ad_center: overrides.ad_center_image.clone(),
+            ad_back: overrides.ad_back_image.clone(),
         })
     }
+}
+
+/// Admin-supplied overrides resolved out of `app_settings` + the
+/// uploads directory before render time. Empty fields fall back to
+/// the binary-embedded factory defaults.
+#[derive(Debug, Clone, Default)]
+pub struct PdfOverrides {
+    pub template_source: Option<String>,
+    pub cover_image: Option<Vec<u8>>,
+    pub ad_cover_image: Option<Vec<u8>>,
+    pub ad_center_image: Option<Vec<u8>>,
+    pub ad_back_image: Option<Vec<u8>>,
 }
 
 /// Build a QR SVG that points at `url`. Same shape as the homepage QR but
@@ -228,7 +276,25 @@ impl World for MenuWorld {
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         let path = id.vpath().as_rooted_path();
         match path.to_str() {
-            Some(p) if p == ASSET_LADENFRONT_VPATH => Ok(Bytes::new(ASSET_LADENFRONT.to_vec())),
+            Some(p) if p == ASSET_LADENFRONT_VPATH => {
+                // Admin override beats the bundled factory image.
+                let bytes = self
+                    .cover_override
+                    .clone()
+                    .unwrap_or_else(|| ASSET_LADENFRONT.to_vec());
+                Ok(Bytes::new(bytes))
+            }
+            Some(p) if p == ASSET_AD_COVER_VPATH => Ok(Bytes::new(
+                self.ad_cover.clone().unwrap_or_else(|| BLANK_PNG.to_vec()),
+            )),
+            Some(p) if p == ASSET_AD_CENTER_VPATH => Ok(Bytes::new(
+                self.ad_center
+                    .clone()
+                    .unwrap_or_else(|| BLANK_PNG.to_vec()),
+            )),
+            Some(p) if p == ASSET_AD_BACK_VPATH => Ok(Bytes::new(
+                self.ad_back.clone().unwrap_or_else(|| BLANK_PNG.to_vec()),
+            )),
             Some(p) if p == ASSET_QR_VPATH => Ok(Bytes::new(self.qr_svg.clone())),
             _ => Err(FileError::NotFound(id.vpath().as_rootless_path().into())),
         }
@@ -250,8 +316,11 @@ impl World for MenuWorld {
 
 /// Render the supplied menu payload to PDF bytes. Returns a (hopefully short)
 /// human-readable error string on failure.
-pub fn render_menu_pdf(payload: &MenuPdfPayload) -> anyhow::Result<Vec<u8>> {
-    let world = MenuWorld::new(payload)?;
+pub fn render_menu_pdf(
+    payload: &MenuPdfPayload,
+    overrides: &PdfOverrides,
+) -> anyhow::Result<Vec<u8>> {
+    let world = MenuWorld::new(payload, overrides)?;
     tracing::debug!(
         "pdf: compiling, fonts={}, categories={}, items={}",
         resources().fonts.len(),
@@ -421,35 +490,115 @@ pub async fn load_menu_payload(
     } else {
         format!("Tel. {}", shop_branding.shop_phone)
     };
+
+    // Pull the editable text fields out of app_settings. Newline-split
+    // for the list fields so the admin's <textarea> shape lands 1:1
+    // in the PDF.
+    let tagline = read_setting(db, "pdf_tagline").await.unwrap_or_default();
+    let hours_lines = read_setting_lines(db, "pdf_hours")
+        .await
+        .unwrap_or_else(default_hours_lines);
+    let extras_pizza_lines = read_setting_lines(db, "pdf_extras_pizza")
+        .await
+        .unwrap_or_else(default_extras_pizza_lines);
+    let extras_pasta_lines = read_setting_lines(db, "pdf_extras_pasta")
+        .await
+        .unwrap_or_else(default_extras_pasta_lines);
+
     Ok(MenuPdfPayload {
         branding: Branding {
             name: shop_branding.display_name(),
-            tagline: String::new(),
+            tagline,
             address: shop_branding.full_address(),
             phone: phone_line,
-            hours_lines: vec![
-                "Mo, Di, Do, So: 11:30–14:30 · 17:00–22:00".into(),
-                "Fr, Sa: 16:00–22:00".into(),
-                "Mi Ruhetag".into(),
-            ],
+            hours_lines,
             delivery_lines,
-            extras_pizza_lines: vec![
-                "Krabben 1 €".into(),
-                "Lachs 2 €".into(),
-                "Kräuterbutter 0,60 €".into(),
-                "sonstige Extras 0,70 €".into(),
-            ],
-            extras_pasta_lines: vec![
-                "Krabben 1 €".into(),
-                "Lachs 2 €".into(),
-                "sonstige Extras 0,70 €".into(),
-            ],
+            extras_pizza_lines,
+            extras_pasta_lines,
         },
         categories,
         allergens,
         additives,
         site_url,
     })
+}
+
+fn default_hours_lines() -> Vec<String> {
+    vec![
+        "Mo, Di, Do, So: 11:30–14:30 · 17:00–22:00".into(),
+        "Fr, Sa: 16:00–22:00".into(),
+        "Mi Ruhetag".into(),
+    ]
+}
+fn default_extras_pizza_lines() -> Vec<String> {
+    vec![
+        "Krabben 1 €".into(),
+        "Lachs 2 €".into(),
+        "Kräuterbutter 0,60 €".into(),
+        "sonstige Extras 0,70 €".into(),
+    ]
+}
+fn default_extras_pasta_lines() -> Vec<String> {
+    vec![
+        "Krabben 1 €".into(),
+        "Lachs 2 €".into(),
+        "sonstige Extras 0,70 €".into(),
+    ]
+}
+
+/// Look up a single app_settings value. Returns `Some` only if the row
+/// exists AND the value is non-empty after trimming — empty strings
+/// fall back to defaults at the call site.
+async fn read_setting(db: &SqlitePool, key: &str) -> Option<String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT value FROM app_settings WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+    row.map(|(v,)| v).filter(|v| !v.trim().is_empty())
+}
+async fn read_setting_lines(db: &SqlitePool, key: &str) -> Option<Vec<String>> {
+    read_setting(db, key).await.map(|s| {
+        s.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
+    })
+}
+
+/// Load template source + admin-uploaded image bytes referenced by
+/// `app_settings`. Falls back to bundled defaults silently when a
+/// setting is missing or the upload file is unreadable.
+pub async fn load_pdf_overrides(db: &SqlitePool) -> PdfOverrides {
+    let template_source = read_setting(db, "pdf_template_source").await;
+    let cover_image = read_image_setting(db, "pdf_cover_image").await;
+    let ad_cover_image = read_image_setting(db, "pdf_ad_cover_image").await;
+    let ad_center_image = read_image_setting(db, "pdf_ad_center_image").await;
+    let ad_back_image = read_image_setting(db, "pdf_ad_back_image").await;
+    PdfOverrides {
+        template_source,
+        cover_image,
+        ad_cover_image,
+        ad_center_image,
+        ad_back_image,
+    }
+}
+
+/// Resolve a `/img/uploads/<hash>.<ext>` setting to its on-disk bytes.
+/// `None` if the setting is empty, the path is malformed, or the file
+/// has been deleted from the uploads directory.
+async fn read_image_setting(db: &SqlitePool, key: &str) -> Option<Vec<u8>> {
+    let value = read_setting(db, key).await?;
+    let trimmed = value.trim().trim_start_matches('/');
+    // Only honour our own uploads directory. Anything else is rejected
+    // so a malicious admin can't read arbitrary files via this setting.
+    let rel = trimmed.strip_prefix("img/uploads/")?;
+    if rel.contains('/') || rel.contains('\\') {
+        return None;
+    }
+    let path = std::path::Path::new("data/uploads").join(rel);
+    std::fs::read(&path).ok()
 }
 
 /// Convenience: load + render in one go. Compile runs on a blocking pool so
@@ -460,5 +609,6 @@ pub async fn build_menu_pdf(
     shop_branding: &rusterando_frontend::branding::Branding,
 ) -> anyhow::Result<Vec<u8>> {
     let payload = load_menu_payload(db, site_url, shop_branding).await?;
-    tokio::task::spawn_blocking(move || render_menu_pdf(&payload)).await?
+    let overrides = load_pdf_overrides(db).await;
+    tokio::task::spawn_blocking(move || render_menu_pdf(&payload, &overrides)).await?
 }

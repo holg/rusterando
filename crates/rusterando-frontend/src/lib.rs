@@ -4,6 +4,7 @@ pub mod app;
 pub mod branding;
 pub mod components;
 pub mod pages;
+pub mod stripe;
 pub mod utils;
 
 /// Explicitly register all `#[server]` items so they survive linking from a
@@ -11,6 +12,8 @@ pub mod utils;
 /// frontend is built as a cdylib+rlib and consumed by the server binary.
 #[cfg(feature = "ssr")]
 pub fn register_server_fns() {
+    leptos::server_fn::axum::register_explicit::<branding::GetShopName>();
+    leptos::server_fn::axum::register_explicit::<stripe::GetStripeMode>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListMenu>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListAdminMenu>();
     leptos::server_fn::axum::register_explicit::<pages::admin::login::AdminLogin>();
@@ -34,11 +37,30 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::order::GetTour>();
     leptos::server_fn::axum::register_explicit::<pages::order::TourStopDelivered>();
     leptos::server_fn::axum::register_explicit::<pages::order::FinishTour>();
+    leptos::server_fn::axum::register_explicit::<pages::order::RemoveTourStop>();
+    leptos::server_fn::axum::register_explicit::<pages::order::CancelTour>();
     leptos::server_fn::axum::register_explicit::<pages::admin::orders::ListAdminOrders>();
     leptos::server_fn::axum::register_explicit::<pages::admin::orders::UpdateOrderStatus>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::orders::ReprintOrder>();
     leptos::server_fn::axum::register_explicit::<pages::admin::orders::GetAdminOrder>();
     leptos::server_fn::axum::register_explicit::<pages::admin::home::LoadAdminStats>();
     leptos::server_fn::axum::register_explicit::<pages::admin::history::ListAdminHistory>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::customers::ListAdminCustomers>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::customers::GetAdminCustomer>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::customers::UpdateAdminCustomer>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::customers::SetCustomerBlacklist>();
+    leptos::server_fn::axum::register_explicit::<pages::vouchers::ValidateVoucher>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::vouchers::ListAdminVouchers>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::vouchers::CreateVoucher>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::vouchers::UpdateVoucher>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::vouchers::ToggleVoucher>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::vouchers::DeleteVoucher>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::zones::ListAdminZones>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::zones::CreateZone>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::zones::UpdateZone>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::zones::DeleteZone>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::SavePdfTemplate>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::GetPdfDefaults>();
     leptos::server_fn::axum::register_explicit::<pages::session::SessionLogout>();
     leptos::server_fn::axum::register_explicit::<pages::session::CurrentRole>();
     leptos::server_fn::axum::register_explicit::<pages::session::RequireRoleOrRedirect>();

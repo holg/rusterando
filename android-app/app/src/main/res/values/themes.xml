@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        Base theme. Material3, edge-to-edge so the WebView extends under
+        the system bars. The header background bleeds into the status
+        bar area as on the website.
+    -->
+    <style name="Theme.Rusterando" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">#C61D2E</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+</resources>

@@ -5,7 +5,9 @@ use leptos_router::{ParamSegment, StaticSegment};
 
 use crate::components::cart_drawer::{provide_cart_ctx, CartDrawer, CartFab};
 use crate::components::site_header::SiteHeader;
+use crate::components::test_mode_banner::TestModeBanner;
 use crate::pages::admin::broadcast::BroadcastAdminPage;
+use crate::pages::admin::customers::{AdminCustomerDetailPage, AdminCustomersPage};
 use crate::pages::admin::extras_admin::ExtrasAdminPage;
 use crate::pages::admin::history::AdminHistoryPage;
 use crate::pages::admin::home::AdminHomePage;
@@ -14,6 +16,9 @@ use crate::pages::admin::login::AdminLoginPage;
 use crate::pages::admin::menu_admin::AdminMenuPage;
 use crate::pages::admin::orders::{AdminOrderDetailPage, AdminOrdersPage};
 use crate::pages::admin::settings_admin::SettingsAdminPage;
+use crate::pages::admin::vouchers::VouchersAdminPage;
+use crate::pages::admin::pdf::PdfAdminPage;
+use crate::pages::admin::zones::ZonesAdminPage;
 use crate::pages::driver::board::DriverBoardPage;
 use crate::pages::driver::login::DriverLoginPage;
 use crate::pages::home::Home;
@@ -132,19 +137,28 @@ pub fn App() -> impl IntoView {
     provide_meta_context();
     provide_cart_ctx();
 
-    // <title> from BrandingHandle so each shop gets its own. Falls back
-    // to "Rusterando" when no shop name is configured (fresh install).
-    #[cfg(feature = "ssr")]
-    let title_text = use_context::<crate::branding::BrandingHandle>()
-        .map(|h| h.get().display_name())
-        .unwrap_or_else(|| "Rusterando".to_string());
-    #[cfg(not(feature = "ssr"))]
-    let title_text = "Rusterando".to_string();
+    // <title> driven by a server-fn-backed Resource so SSR and hydrate
+    // render the same value. A direct context read would diverge: SSR
+    // sees the BrandingHandle and writes the real shop name, hydrate
+    // has no handle and would fall back to a literal — leptos_meta's
+    // Title then overwrites the SSR title with whatever hydrate passed,
+    // leaking the build-time fallback into the browser tab.
+    let shop_name = OnceResource::new(crate::branding::get_shop_name());
+    let title_text = move || {
+        shop_name
+            .get()
+            .and_then(|res| res.ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Mein Restaurant".to_string())
+    };
 
     view! {
         <Title text=title_text/>
 
         <Router>
+            // Sandbox-only banner. Renders nothing in live mode so the
+            // public site looks identical to a production build.
+            <TestModeBanner/>
             <SiteHeader/>
             <main>
                 <Routes fallback=|| "Seite nicht gefunden.">
@@ -162,6 +176,11 @@ pub fn App() -> impl IntoView {
                     <Route path=(StaticSegment("admin"), StaticSegment("orders")) view=AdminOrdersPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("orders"), ParamSegment("id")) view=AdminOrderDetailPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("history")) view=AdminHistoryPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("customers")) view=AdminCustomersPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("customers"), ParamSegment("id")) view=AdminCustomerDetailPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("vouchers")) view=VouchersAdminPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("zones")) view=ZonesAdminPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("pdf")) view=PdfAdminPage/>
                     <Route path=StaticSegment("kitchen") view=KitchenBoardPage/>
                     <Route path=(StaticSegment("kitchen"), StaticSegment("login")) view=KitchenLoginPage/>
                     <Route path=StaticSegment("driver") view=DriverBoardPage/>

@@ -26,39 +26,77 @@
 set -e
 
 # =============================================================================
-# Parse `-e <name>` (env profile) before anything else, then load the
-# matching .env file. Defaults to `.env` for back-compat.
+# Parse `-e <name>` (env profile) before anything else.
+#
+# Single profile  : -e davids        → load .env.davids
+# Multi profile   : -e davids,demo   → build once, deploy to each in order.
+#                   The first profile drives the cargo-leptos build (its
+#                   LEPTOS_OUTPUT_NAME wins, since that bakes into the JS
+#                   loader filenames). Subsequent profiles reuse those
+#                   artifacts and overwrite their own LEPTOS_OUTPUT_NAME at
+#                   runtime so the server points the HTML shell at the
+#                   files we just uploaded.
+# Defaults to `.env` for back-compat.
 # =============================================================================
-ENV_PROFILE=""
+ENV_PROFILES_RAW=""
 if [[ "${1:-}" == "-e" || "${1:-}" == "--env" ]]; then
     if [[ -z "${2:-}" ]]; then
-        echo "✗ -e requires a profile name (e.g. -e davids)" >&2
+        echo "✗ -e requires a profile name (e.g. -e davids or -e davids,demo)" >&2
         exit 1
     fi
-    ENV_PROFILE="$2"
+    ENV_PROFILES_RAW="$2"
     shift 2
 fi
 
-ENV_FILE=".env"
-[[ -n "$ENV_PROFILE" ]] && ENV_FILE=".env.$ENV_PROFILE"
+# Split on comma into an array so the rest of the script can iterate.
+IFS=',' read -ra ENV_PROFILES <<< "$ENV_PROFILES_RAW"
+# Normalise: empty array → one anonymous "" entry (loads bare .env).
+[[ ${#ENV_PROFILES[@]} -eq 0 ]] && ENV_PROFILES=("")
 
-if [ -f "$ENV_FILE" ]; then
-    set -a
-    # shellcheck disable=SC1090
-    . "$ENV_FILE"
-    set +a
-elif [[ -n "$ENV_PROFILE" ]]; then
-    echo "✗ env profile '$ENV_PROFILE' selected but $ENV_FILE not found" >&2
-    exit 1
-fi
-echo "Using env file: $ENV_FILE"
+# load_env_profile <profile> — sources the matching .env.<profile> (or
+# .env when empty), exporting variables for the rest of the script.
+# Idempotent across calls; later profiles fully overwrite earlier ones
+# because every `.env.*` declares the same keys.
+load_env_profile() {
+    local profile="$1"
+    ENV_PROFILE="$profile"
+    if [[ -n "$profile" ]]; then
+        ENV_FILE=".env.$profile"
+    else
+        ENV_FILE=".env"
+    fi
+
+    if [[ -f "$ENV_FILE" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "$ENV_FILE"
+        set +a
+    elif [[ -n "$profile" ]]; then
+        echo "✗ env profile '$profile' selected but $ENV_FILE not found" >&2
+        exit 1
+    fi
+    echo "Using env file: $ENV_FILE"
+
+    # Recompute the per-profile derived globals every time. These were
+    # set at the top of the script for a single .env load; the multi-
+    # profile flow needs them refreshed when the profile changes.
+    SSH_HOST="${SSH_HOST:?SSH_HOST not set in $ENV_FILE}"
+    APP_NAME="${APP_NAME:-${BIN_NAME:-rusterando-server}}"
+    REMOTE_BASE="${DEPLOY_REMOTE_BASE:-${REMOTE_BASE:-/var/www/example.com}}"
+    REMOTE_BIN_DIR="$REMOTE_BASE"
+    REMOTE_HTML_DIR="$REMOTE_BASE/html"
+    REMOTE_DATA_DIR="$REMOTE_BASE/data"
+    REMOTE_BACKUP_DIR="$REMOTE_BASE/backups"
+}
+
+# Initial load: pick the first profile so all the configuration that
+# follows (paths, build flags) reflects something concrete.
+load_env_profile "${ENV_PROFILES[0]}"
 
 # =============================================================================
-# Configuration (with sensible upstream defaults for fresh checkouts)
+# Configuration (build-time globals; per-profile values come from
+# load_env_profile and are recomputed per profile in the multi-profile flow).
 # =============================================================================
-SSH_HOST="${SSH_HOST:?SSH_HOST not set in .env}"
-APP_NAME="${APP_NAME:-${BIN_NAME:-rusterando-server}}"
-REMOTE_BASE="${DEPLOY_REMOTE_BASE:-${REMOTE_BASE:-/var/www/example.com}}"
 TARGET_TRIPLE="${TARGET_TRIPLE:-x86_64-unknown-linux-gnu}"
 
 # Cargo's [[bin]] is hard-coded to "rusterando-server" in upstream; the
@@ -75,11 +113,11 @@ BUILD_PROFILE="release-prod"
 LOCAL_BUILD_DIR="target/$TARGET_TRIPLE/$BUILD_PROFILE"
 LOCAL_SITE_DIR="target/site"
 
-# Remote paths
-REMOTE_BIN_DIR="$REMOTE_BASE"
-REMOTE_HTML_DIR="$REMOTE_BASE/html"
-REMOTE_DATA_DIR="$REMOTE_BASE/data"
-REMOTE_BACKUP_DIR="$REMOTE_BASE/backups"
+# When -e contains a comma, the build runs once with the first profile's
+# LEPTOS_OUTPUT_NAME baked in. Stash it so subsequent profiles can detect
+# they're piggy-backing on shared assets and override their own runtime
+# LEPTOS_OUTPUT_NAME to point at the files we actually uploaded.
+SHARED_BUILD_OUTPUT_NAME="${LEPTOS_OUTPUT_NAME:-rusterando}"
 
 # =============================================================================
 # Usage
@@ -92,6 +130,13 @@ Options:
     -e, --env <name>   Load .env.<name> instead of .env. Used to run
                        multiple deployments from the same checkout
                        (e.g. -e davids vs -e demo on the same VPS).
+
+                       Comma-separated multi-profile (e.g.
+                       -e davids,demo) builds ONCE with the first
+                       profile's LEPTOS_OUTPUT_NAME, then deploys the
+                       same artifacts to every listed profile in order.
+                       Each profile gets its own .env, DB, port, and
+                       systemd unit; the JS/WASM bundle is shared.
 
 Commands:
     build         Build the release binary for Linux (x86)
@@ -116,6 +161,7 @@ Examples:
     $0 full                       # Default deployment (.env)
     $0 -e davids full             # Davids deployment (.env.davids)
     $0 -e demo full               # Demo deployment (.env.demo, port 3002)
+    $0 -e davids,demo full        # Build once, deploy both (shared assets)
     $0 -e davids backup           # Manual backup of Davids
     $0 -e davids restore          # Restore a Davids backup
     $0 restore                   # Restore a previous version
@@ -213,11 +259,57 @@ SIZE=\$(du -h "\$BACKUP_DIR/\${BACKUP_NAME}.zip" | cut -f1)
 echo "✓ Backup created: \${BACKUP_NAME}.zip (\$SIZE)"
 
 cd "\$BACKUP_DIR"
-BACKUP_COUNT=\$(ls -1 \${BACKUP_PREFIX}_*.zip 2>/dev/null | wc -l)
-if [ "\$BACKUP_COUNT" -gt 10 ]; then
-    REMOVE_COUNT=\$((BACKUP_COUNT - 10))
-    ls -1t \${BACKUP_PREFIX}_*.zip | tail -n "\$REMOVE_COUNT" | xargs rm -f
-    echo "Cleaned up \$REMOVE_COUNT old backup(s), keeping last 10"
+
+# Retention: keep the 10 most-recent backups + one survivor per calendar
+# month for everything older. Filename shape is
+#   <prefix>_YYYYMMDD_HHMMSS.zip
+# so the monthly bucket key is positions 1-6 of the trailing timestamp.
+# Survivor = the youngest backup in each bucket (still useful for
+# restoring "the state of October" even after 100 deploys).
+KEEP_RECENT=10
+ALL=\$(ls -1t \${BACKUP_PREFIX}_*.zip 2>/dev/null || true)
+if [ -z "\$ALL" ]; then
+    exit 0
+fi
+
+# Split into "young (auto-keep)" and "old (apply monthly thinning)".
+RECENT=\$(printf '%s\n' "\$ALL" | head -n \$KEEP_RECENT)
+OLDER=\$(printf '%s\n' "\$ALL" | tail -n +\$((KEEP_RECENT + 1)) || true)
+
+REMOVED=0
+KEPT_MONTHLY=0
+if [ -n "\$OLDER" ]; then
+    SEEN_BUCKETS=""
+    # Iterate old → new so the first one we see in each bucket is the
+    # YOUNGEST of that month (because ls -1t is newest-first, and we
+    # walk in that order via for-loop on the unsplit RECENT/OLDER).
+    for file in \$OLDER; do
+        # Extract YYYYMM from <prefix>_YYYYMMDD_HHMMSS.zip
+        STAMP=\$(echo "\$file" | sed -E "s/^\${BACKUP_PREFIX}_([0-9]{8})_[0-9]{6}\.zip\$/\1/")
+        BUCKET=\$(echo "\$STAMP" | cut -c1-6)
+        if [ -z "\$BUCKET" ] || [ "\$BUCKET" = "\$STAMP" ]; then
+            # Malformed filename — keep it untouched to be safe.
+            continue
+        fi
+        # Already kept one for this month? Then this one is older and
+        # may be deleted.
+        case " \$SEEN_BUCKETS " in
+            *" \$BUCKET "*)
+                rm -f "\$file"
+                REMOVED=\$((REMOVED + 1))
+                ;;
+            *)
+                SEEN_BUCKETS="\$SEEN_BUCKETS \$BUCKET"
+                KEPT_MONTHLY=\$((KEPT_MONTHLY + 1))
+                ;;
+        esac
+    done
+fi
+
+if [ "\$REMOVED" -gt 0 ]; then
+    echo "Retention: kept \$KEEP_RECENT recent + \$KEPT_MONTHLY monthly survivors, removed \$REMOVED redundant"
+else
+    echo "Retention: \$(echo "\$ALL" | wc -l | tr -d ' ') backups total, nothing to prune"
 fi
 REMOTE_EOF
 }
@@ -409,10 +501,32 @@ cmd_upload() {
     # server (systemd's EnvironmentFile= reads from a fixed path per
     # deployment). On first deploy this seeds the file; on subsequent
     # deploys it overwrites — your local copy is the source of truth.
+    #
+    # Multi-profile note: when the build was driven by a different
+    # profile (SHARED_BUILD_OUTPUT_NAME differs from this profile's
+    # LEPTOS_OUTPUT_NAME), we rewrite the LEPTOS_OUTPUT_NAME= line on
+    # the wire so the server points at the JS loader filenames that
+    # actually exist on disk. Without this, EnvironmentFile= would
+    # override the systemd-unit Environment= line and leave the server
+    # 404-ing on its asset URLs.
     if [[ -f "$ENV_FILE" ]]; then
         echo "Uploading $ENV_FILE as $REMOTE_BIN_DIR/.env..."
-        scp -q "$ENV_FILE" "$SSH_HOST:$REMOTE_BIN_DIR/.env"
+        local upload_env="$ENV_FILE"
+        if [[ "${LEPTOS_OUTPUT_NAME:-}" != "$SHARED_BUILD_OUTPUT_NAME" ]]; then
+            upload_env="$(mktemp)"
+            # Strip any LEPTOS_OUTPUT_NAME line, then append the
+            # build-driven one. sed in-place would handle both cases
+            # (present + missing) less cleanly than this two-step.
+            grep -v '^LEPTOS_OUTPUT_NAME=' "$ENV_FILE" > "$upload_env"
+            echo "LEPTOS_OUTPUT_NAME=$SHARED_BUILD_OUTPUT_NAME" >> "$upload_env"
+            echo "  → rewriting LEPTOS_OUTPUT_NAME to '$SHARED_BUILD_OUTPUT_NAME' (shared build)"
+        fi
+        scp -q "$upload_env" "$SSH_HOST:$REMOTE_BIN_DIR/.env"
         ssh_cmd "sudo chmod 600 $REMOTE_BIN_DIR/.env"
+        # Clean up the rewritten temp file (if any).
+        if [[ "$upload_env" != "$ENV_FILE" ]]; then
+            rm -f "$upload_env"
+        fi
     fi
 
     # Fix permissions
@@ -428,7 +542,16 @@ cmd_setup() {
     # file loaded via EnvironmentFile= below — we don't hard-code it
     # here so a single .env edit (LEPTOS_OUTPUT_NAME=foo) is enough for
     # any future rename without rewriting this unit file.
-    LEPTOS_OUTPUT_NAME_FOR_UNIT="${LEPTOS_OUTPUT_NAME:-rusterando}"
+    #
+    # In the multi-profile flow, the build phase produces files named
+    # after the FIRST profile's LEPTOS_OUTPUT_NAME (the shared build).
+    # The .env on the server keeps each profile's preferred name as
+    # documentation, but the systemd unit env line below pins it to
+    # SHARED_BUILD_OUTPUT_NAME so the running server resolves the JS
+    # loader to the file we actually uploaded. Single-profile flow:
+    # SHARED_BUILD_OUTPUT_NAME == this profile's LEPTOS_OUTPUT_NAME, so
+    # the override is a no-op.
+    LEPTOS_OUTPUT_NAME_FOR_UNIT="${SHARED_BUILD_OUTPUT_NAME:-${LEPTOS_OUTPUT_NAME:-rusterando}}"
     cat <<EOF | ssh_cmd "sudo tee /etc/systemd/system/$APP_NAME.service > /dev/null"
 [Unit]
 Description=$APP_NAME web server
@@ -552,8 +675,45 @@ cmd_apply_seeds() {
 }
 
 cmd_full() {
+    # Single profile: classic build + deploy.
+    if [[ ${#ENV_PROFILES[@]} -le 1 ]]; then
+        cmd_build
+        cmd_deploy
+        return
+    fi
+
+    # Multi profile: build once with the FIRST profile's settings
+    # (already loaded), then re-source each subsequent profile and run
+    # only the deploy phase. cmd_deploy doesn't rebuild — it just
+    # backups + uploads + restarts + applies seeds.
     cmd_build
-    cmd_deploy
+    for profile in "${ENV_PROFILES[@]}"; do
+        echo ""
+        echo "================================================================"
+        echo "  Deploying profile: ${profile:-<default>}"
+        echo "================================================================"
+        load_env_profile "$profile"
+        cmd_deploy
+    done
+}
+
+# When the user passes a multi-profile -e (e.g. davids,demo) but a
+# command other than `full`, fan it out across each profile in order.
+# Build is excluded because it has no per-profile semantics.
+run_for_each_profile() {
+    local cmd_fn="$1"
+    if [[ ${#ENV_PROFILES[@]} -le 1 ]]; then
+        "$cmd_fn"
+        return
+    fi
+    for profile in "${ENV_PROFILES[@]}"; do
+        echo ""
+        echo "================================================================"
+        echo "  Profile: ${profile:-<default>}"
+        echo "================================================================"
+        load_env_profile "$profile"
+        "$cmd_fn"
+    done
 }
 
 cmd_restart() {
@@ -581,16 +741,16 @@ COMMAND="${1:-}"
 
 case "$COMMAND" in
     build)        cmd_build ;;
-    deploy)       cmd_deploy ;;
+    deploy)       run_for_each_profile cmd_deploy ;;
     full)         cmd_full ;;
-    upload)       cmd_upload ;;
-    setup)        cmd_setup ;;
-    restart)      cmd_restart ;;
-    apply-seeds)  cmd_apply_seeds ;;
+    upload)       run_for_each_profile cmd_upload ;;
+    setup)        run_for_each_profile cmd_setup ;;
+    restart)      run_for_each_profile cmd_restart ;;
+    apply-seeds)  run_for_each_profile cmd_apply_seeds ;;
     logs)         cmd_logs ;;
-    status)       cmd_status ;;
-    backup)       cmd_backup ;;
-    backups)      cmd_backups ;;
+    status)       run_for_each_profile cmd_status ;;
+    backup)       run_for_each_profile cmd_backup ;;
+    backups)      run_for_each_profile cmd_backups ;;
     restore)      cmd_restore ;;
     *)            usage ;;
 esac

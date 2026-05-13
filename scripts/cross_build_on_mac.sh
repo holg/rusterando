@@ -146,30 +146,73 @@ if [[ "$HOST_UNAME" == "Darwin" ]]; then
       ;;
 
     aarch64-unknown-linux-gnu)
-      if ! command -v aarch64-unknown-linux-gnu-gcc >/dev/null 2>&1; then
-        echo "Error: aarch64-unknown-linux-gnu-gcc not found in PATH!" >&2
-        echo "Please install with:" >&2
-        echo "  brew tap messense/macos-cross-toolchains" >&2
-        echo "  brew install aarch64-unknown-linux-gnu" >&2
-        exit 1
-      fi
+  if ! command -v aarch64-unknown-linux-gnu-gcc >/dev/null 2>&1; then
+    echo "Error: aarch64-unknown-linux-gnu-gcc not found in PATH!" >&2
+    echo "Please install with:" >&2
+    echo "  brew tap messense/macos-cross-toolchains" >&2
+    echo "  brew install aarch64-unknown-linux-gnu" >&2
+    exit 1
+  fi
 
-      # Disable sccache and mold for cross-compilation
-      export SCCACHE_DISABLE="1"
-      export RUSTC_WRAPPER=""
+  AARCH64_OPENSSL_SYSROOT="$HOME/opt/openssl_for_cross_aarch64"
+  AARCH64_SQLITE_SYSROOT="$HOME/opt/sqlite_for_cross_aarch64"
 
-      export CC="aarch64-unknown-linux-gnu-gcc"
-      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-unknown-linux-gnu-gcc"
+  if [ ! -d "$AARCH64_OPENSSL_SYSROOT/lib" ] || [ ! -d "$AARCH64_OPENSSL_SYSROOT/include" ]; then
+    echo "Error: aarch64 OpenSSL sysroot not found at $AARCH64_OPENSSL_SYSROOT" >&2
+    echo "Extract it from your aarch64 Linux VM (libssl-dev installed) into that path." >&2
+    exit 1
+  fi
 
-      # Prevent macOS-specific flags from being passed to the Linux compiler
-      unset MACOSX_DEPLOYMENT_TARGET
-      export CFLAGS_aarch64_unknown_linux_gnu=""
-      export CXXFLAGS_aarch64_unknown_linux_gnu=""
-      export TARGET_ARCH="aarch64"
+  # Disable sccache and mold for cross-compilation
+  export SCCACHE_DISABLE="1"
+  export RUSTC_WRAPPER=""
 
-      # Match Linux build optimization settings and strip symbols
-      export RUSTFLAGS="-C opt-level=3 -C lto=fat -C codegen-units=1 -C strip=symbols"
-      ;;
+  # Target-specific CC/AR (prevents macOS flags from leaking)
+  export CC_aarch64_unknown_linux_gnu="aarch64-unknown-linux-gnu-gcc"
+  export AR_aarch64_unknown_linux_gnu="aarch64-unknown-linux-gnu-ar"
+  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="aarch64-unknown-linux-gnu-gcc"
+  unset CC
+
+  # OpenSSL
+  export OPENSSL_DIR="$AARCH64_OPENSSL_SYSROOT"
+  export OPENSSL_LIB_DIR="$AARCH64_OPENSSL_SYSROOT/lib"
+  export OPENSSL_INCLUDE_DIR="$AARCH64_OPENSSL_SYSROOT/include"
+  export OPENSSL_STATIC=1
+  export PKG_CONFIG_ALLOW_CROSS=1
+  export PKG_CONFIG_PATH="$AARCH64_OPENSSL_SYSROOT/lib/pkgconfig"
+  export PKG_CONFIG_SYSROOT_DIR="$AARCH64_OPENSSL_SYSROOT"
+
+  # SQLite
+  export SQLITE3_LIB_DIR="$AARCH64_SQLITE_SYSROOT/lib"
+  export SQLITE3_INCLUDE_DIR="$AARCH64_SQLITE_SYSROOT/include"
+
+  # Prevent macOS-specific flags from being passed to the Linux compiler
+  unset MACOSX_DEPLOYMENT_TARGET
+  export CFLAGS_aarch64_unknown_linux_gnu=""
+  export CXXFLAGS_aarch64_unknown_linux_gnu=""
+  export TARGET_ARCH="aarch64"
+
+  # Match Linux build optimization settings
+  export RUSTFLAGS="-C opt-level=3 -C lto=fat -C codegen-units=1 -C strip=symbols"
+
+  # C23-symbol shim: our aarch64 OpenSSL sysroot was built on a host
+  # with glibc ≥ 2.38 and pulls in `__isoc23_strtol` etc. The brew
+  # cross-toolchain ships glibc 2.17 (CentOS 7 era) which only has
+  # plain `strtol`. We build a tiny shim object that defines the
+  # missing symbols as wrappers around the older ones and link it
+  # into the final binary. CARGO_TARGET_…_RUSTFLAGS only applies to
+  # the aarch64 target, not the wasm lib, and survives the
+  # `unset RUSTFLAGS` further down. Drop once libcrypto.a is rebuilt
+  # on a glibc-≤-2.37 host.
+  ISOC23_SHIM_OBJ="$(pwd)/target/cross-shims/isoc23_shim.aarch64.o"
+  mkdir -p "$(dirname "$ISOC23_SHIM_OBJ")"
+  if [[ ! -f "$ISOC23_SHIM_OBJ" \
+        || "scripts/cross-shims/isoc23_shim.c" -nt "$ISOC23_SHIM_OBJ" ]]; then
+    aarch64-unknown-linux-gnu-gcc -c -O2 -fPIC \
+      -o "$ISOC23_SHIM_OBJ" scripts/cross-shims/isoc23_shim.c
+  fi
+  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-C link-arg=$ISOC23_SHIM_OBJ"
+  ;;
 
     x86_64-pc-windows-gnu)
       if ! command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
@@ -395,12 +438,50 @@ LEPTOS_BIN_TARGET_TRIPLE=$TARGET_TRIPLE \
     -v
 
 # Check if the build was successful
-if [ $? -eq 0 ]; then
-  echo "Build completed successfully!"
+LEPTOS_RC=$?
+if [ $LEPTOS_RC -eq 0 ]; then
+  echo "Server build completed successfully!"
   BINARY_PATH="target/$TARGET_TRIPLE/$PROFILE/davidspizzeria-server"
   if [ -f "$BINARY_PATH" ]; then
-    echo "Binary size: $(du -h "$BINARY_PATH" | cut -f1)"
+    echo "Server binary size: $(du -h "$BINARY_PATH" | cut -f1)"
   fi
+
+  # Cross-build the Pi binary (rusterando-printer) for aarch64 targets.
+  # The crate is excluded from the main workspace (see top-level
+  # Cargo.toml) so it needs its own `cargo build` invocation. It
+  # inherits the same cross-toolchain envs (CC_…, AR_…, LINKER, the
+  # C23 shim via CARGO_TARGET_AARCH64_…_RUSTFLAGS) that the aarch64
+  # branch above set up.
+  #
+  # Only fires for aarch64 targets — the Pi is the only consumer.
+  # Skipped silently when the crate dir is missing so older checkouts
+  # without the kitchen-printer subsystem still build.
+  PI_MANIFEST="crates/rusterando-printer/Cargo.toml"
+  case "$TARGET_TRIPLE" in
+    aarch64-unknown-linux-gnu)
+      if [[ -f "$PI_MANIFEST" ]]; then
+        echo ""
+        echo "=== Cross-building rusterando-printer (Pi binary) ==="
+        cargo build --release \
+          --target "$TARGET_TRIPLE" \
+          --manifest-path "$PI_MANIFEST"
+        PI_RC=$?
+        if [ $PI_RC -eq 0 ]; then
+          PI_BINARY="crates/rusterando-printer/target/$TARGET_TRIPLE/release/rusterando-printer"
+          if [[ -f "$PI_BINARY" ]]; then
+            echo "Pi binary size: $(du -h "$PI_BINARY" | cut -f1)"
+            echo "Pi binary path: $PI_BINARY"
+          fi
+        else
+          echo "rusterando-printer build failed (rc=$PI_RC)."
+          exit 1
+        fi
+      fi
+      ;;
+  esac
+
+  echo ""
+  echo "Build completed successfully!"
 else
   echo "Build failed. Please check the error messages above."
   exit 1

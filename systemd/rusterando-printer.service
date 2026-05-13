@@ -1,0 +1,39 @@
+[Unit]
+Description=Rusterando kitchen printer client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=holger
+Group=lp
+
+# The Pi binary built by `cargo build -p rusterando-printer
+# --target aarch64-unknown-linux-gnu --release`. Installed with
+# `sudo install -m 755 rusterando-printer /usr/local/bin/`.
+ExecStart=/usr/local/bin/rusterando-printer
+EnvironmentFile=/etc/rusterando-printer/printer.env
+
+Restart=always
+RestartSec=5
+
+# Persistent state directory: idempotency cache lives in
+# /var/lib/rusterando-printer/idempotency.json so we never double-print
+# a receipt across a service restart or Pi reboot. systemd creates
+# the dir if missing.
+StateDirectory=rusterando-printer
+StateDirectoryMode=0750
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/rusterando-printer
+# /dev/usb/lp0 is owned by root:lp 0660; supplementary group `lp`
+# (above) is enough for write access. DeviceAllow constrains the
+# cgroup so even a compromised binary can't talk to other devices.
+DeviceAllow=/dev/usb/lp0 rw
+
+[Install]
+WantedBy=multi-user.target

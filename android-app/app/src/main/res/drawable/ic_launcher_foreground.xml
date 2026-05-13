@@ -1,0 +1,16 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!--
+        Placeholder mark: an "R" disc. Each shop will overlay its own
+        icon in res/mipmap-*dpi/ on top of this default at release time.
+    -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,54m-30,0a30,30 0 1,0 60,0a30,30 0 1,0 -60,0z" />
+    <path
+        android:fillColor="#C61D2E"
+        android:pathData="M42,38h18a10,10 0 0,1 0,20h-6l10,12h-8l-10,-12h-4v12h-7zM49,44v9h11a4.5,4.5 0 0,0 0,-9z" />
+</vector>

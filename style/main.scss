@@ -747,6 +747,9 @@ main { display: block; width: 100%; }
 }
 
 // ----- Floating cart FAB + drawer -----
+.cart-fab.hidden,
+.drawer-body p.hidden,
+.drawer-foot .free-delivery.hidden { display: none; }
 .cart-fab {
   position: fixed;
   bottom: 1.2rem;
@@ -1454,6 +1457,7 @@ main { display: block; width: 100%; }
       font-size: 0.8rem;
       font-weight: 700;
     }
+    .tile-badge.hidden { display: none; }
     .sub { color: var(--muted); font-size: 0.85rem; }
 
     &:hover {
@@ -2063,6 +2067,81 @@ button.add-item {
   gap: 0.4rem;
 }
 
+.btn.danger {
+  border-color: #b94a48;
+  color: #b94a48;
+
+  &:hover { background: #fdecea; }
+}
+
+// Driver board "compact" mode: every card collapses to a one-line
+// header (order-num + address + contact). Details (items, cash, map
+// links, action buttons) live inside <details class="card-details">
+// so the driver can scan a long queue without drowning in info.
+//
+// A dashed divider sits between adjacent cards as a hard visual break,
+// which the driver explicitly asked for.
+.order-card.driver-card.compact,
+.tour-stop.compact {
+  padding: 0.5rem 0.7rem;
+  border-bottom: 1px dashed #b58900;
+  border-radius: 0;
+  background: transparent;
+
+  &:last-child { border-bottom: none; }
+
+  .order-head,
+  .tour-stop-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    row-gap: 0.2rem;
+    margin: 0;
+
+    .order-num,
+    strong { font-size: 1rem; }
+
+    .address-line {
+      flex: 1 1 100%;
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+
+    .contact-line {
+      flex: 1 1 100%;
+      font-size: 0.85rem;
+      color: var(--muted, #666);
+
+      a { color: inherit; text-decoration: underline; }
+    }
+  }
+
+  .card-details {
+    margin-top: 0.4rem;
+
+    summary {
+      cursor: pointer;
+      color: var(--muted, #666);
+      font-size: 0.85rem;
+      padding: 0.1rem 0;
+      list-style: revert;
+    }
+
+    > p { margin: 0.3rem 0; font-size: 0.9rem; }
+    .row { margin-top: 0.4rem; }
+  }
+}
+
+// Tour stop in compact mode keeps the seq pill but the rest follows
+// the same one-line header pattern as driver cards above.
+.tour-stop.compact {
+  background: #fafafa;
+  border-bottom: 1px dashed #b58900;
+
+  .tour-stop-head .seq { /* inherits the existing .seq pill rules */ }
+}
+
 // ---------- Pizza extras picker (menu page) ----------
 .extras-picker {
   margin: 0.4rem 0 0.6rem;
@@ -2509,4 +2588,603 @@ button.add-item {
   a { color: inherit; text-decoration: underline; }
   a:hover { color: var(--primary); }
   .sep { margin: 0 .5rem; }
+}
+
+// ---------- Stripe sandbox/live indicators ----------
+//
+// Customer-facing top-bar appears only when stripe_mode = 'sandbox'.
+// Renders nothing in live mode (component returns an empty fragment)
+// so production layout is unchanged.
+.test-mode-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: repeating-linear-gradient(
+    45deg,
+    #ffd84d 0 12px,
+    #fde07f 12px 24px
+  );
+  color: #2a1d00;
+  font-weight: 700;
+  font-size: .9rem;
+  text-align: center;
+  padding: .35rem 1rem;
+  border-bottom: 2px solid #b58900;
+  display: flex;
+  gap: .8rem;
+  align-items: center;
+  justify-content: center;
+  letter-spacing: .02em;
+
+  .label {
+    font-size: .95rem;
+    text-transform: uppercase;
+  }
+
+  .hint {
+    font-weight: 500;
+    color: #5a3d00;
+    font-size: .85rem;
+  }
+
+  @media (max-width: 500px) {
+    flex-direction: column;
+    gap: 0;
+    padding: .3rem .5rem;
+    .hint { font-size: .75rem; }
+  }
+}
+
+// Compact chip in the admin shell toolbar. Always visible so an
+// admin can't miss which Stripe mode they're operating in.
+//   .admin-mode-chip.live    — green, Echtbetrieb
+//   .admin-mode-chip.sandbox — amber, Test
+.admin-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .2rem .55rem;
+  border-radius: 999px;
+  font-size: .8rem;
+  font-weight: 700;
+  text-decoration: none;
+  letter-spacing: .03em;
+  border: 1px solid transparent;
+  cursor: pointer;
+  user-select: none;
+
+  .dot {
+    width: .6rem;
+    height: .6rem;
+    border-radius: 50%;
+    flex: 0 0 auto;
+  }
+
+  .label { font-size: .8rem; }
+  .hint { font-size: .7rem; font-weight: 500; opacity: .8; }
+
+  &.live {
+    background: #e6f6ec;
+    color: #15703a;
+    border-color: #98d5a6;
+    .dot { background: #15703a; }
+  }
+  &.sandbox {
+    background: #fff7d6;
+    color: #7a5a00;
+    border-color: #d9b94a;
+    .dot { background: #b58900; }
+  }
+  &:hover { filter: brightness(0.97); }
+}
+
+// ---------------------------------------------------------------------------
+// /admin/customers
+// ---------------------------------------------------------------------------
+
+.admin-customers {
+  .filter-bar {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    margin: 0.6rem 0 1rem;
+
+    input[type="search"] {
+      flex: 0 1 22rem;
+      padding: 0.5rem 0.7rem;
+      border: 1px solid var(--border, #d6cfc4);
+      border-radius: 6px;
+      font: inherit;
+    }
+    .muted { color: #777; font-size: 0.85rem; }
+  }
+}
+
+.admin-customers-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+
+  th, td {
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--border, #e7e1d5);
+    vertical-align: top;
+    text-align: left;
+  }
+  th {
+    background: rgba(0, 0, 0, 0.03);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  th.sortable { cursor: pointer; user-select: none; }
+  th.sortable:hover { background: rgba(0, 0, 0, 0.06); }
+
+  tr.blacklisted {
+    background: rgba(220, 53, 69, 0.06);
+    td:first-child { border-left: 3px solid #c8332e; }
+  }
+
+  td.actions {
+    white-space: nowrap;
+    .btn { margin-right: 0.3rem; }
+  }
+
+  .empty { color: #777; text-align: center; padding: 1.4rem; }
+}
+
+.pill.blacklist-pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #c8332e;
+  color: #fff;
+  margin-left: 0.3rem;
+}
+
+.admin-customer-detail {
+  .customer-head {
+    margin-bottom: 1.2rem;
+    h1 { margin: 0 0 0.3rem; }
+    .contacts {
+      display: flex;
+      gap: 1rem;
+      margin: 0.2rem 0 0.4rem;
+      a { color: var(--accent, #c8332e); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+    }
+    .stats { color: #555; margin: 0.2rem 0 0.4rem; font-size: 0.92rem; }
+    .warning {
+      background: #fff3cd;
+      border: 1px solid #f0d97f;
+      color: #6b4f00;
+      padding: 0.5rem 0.7rem;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      margin-top: 0.5rem;
+    }
+  }
+
+  .card {
+    background: #fff;
+    border: 1px solid var(--border, #e7e1d5);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    margin-bottom: 1rem;
+
+    h2 {
+      margin: 0 0 0.7rem;
+      font-size: 1.05rem;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 0.7rem;
+      span { display: block; font-size: 0.82rem; color: #555; margin-bottom: 0.2rem; }
+      input[type="text"], input[type="email"], textarea {
+        width: 100%;
+        padding: 0.45rem 0.6rem;
+        border: 1px solid var(--border, #d6cfc4);
+        border-radius: 5px;
+        font: inherit;
+      }
+      textarea { min-height: 4rem; resize: vertical; }
+    }
+
+    .actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.7rem;
+    }
+  }
+
+  .address-list, .order-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    li {
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--border, #efe9dc);
+      &:last-child { border-bottom: none; }
+    }
+    .muted { color: #777; font-size: 0.85rem; }
+    .stats {
+      font-size: 0.82rem;
+      color: #555;
+      margin-left: 0.3rem;
+    }
+  }
+
+  .order-list {
+    a { color: var(--accent, #c8332e); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .status {
+      font-size: 0.75rem;
+      padding: 0.05rem 0.4rem;
+      border-radius: 8px;
+      background: rgba(0,0,0,0.06);
+      margin-right: 0.3rem;
+    }
+  }
+
+  .btn.danger {
+    background: #c8332e;
+    color: #fff;
+    border-color: #a82a26;
+    &:hover { filter: brightness(0.95); }
+  }
+  .btn.muted {
+    background: #6c757d;
+    color: #fff;
+    border-color: #5a6268;
+    &:hover { filter: brightness(0.95); }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Voucher input on /checkout
+// ---------------------------------------------------------------------------
+
+.voucher-fieldset {
+  input[type="text"] {
+    width: 100%;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--border, #d6cfc4);
+    border-radius: 6px;
+    font: inherit;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .ok { color: #1b7a3a; margin: 0.4rem 0 0; }
+  .warn { color: #b86c00; margin: 0.4rem 0 0; }
+  .hint.muted { color: #777; margin: 0.4rem 0 0; font-size: 0.85rem; }
+}
+
+// ---------------------------------------------------------------------------
+// /admin/vouchers
+// ---------------------------------------------------------------------------
+
+.admin-vouchers {
+  .create-voucher {
+    background: #fff;
+    border: 1px solid var(--border, #e7e1d5);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    margin: 1rem 0;
+
+    summary {
+      cursor: pointer;
+      padding: 0.2rem 0;
+      user-select: none;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.7rem 1rem;
+      margin-top: 0.8rem;
+
+      label {
+        display: block;
+        font-size: 0.88rem;
+        span { display: block; font-size: 0.82rem; color: #555; margin-bottom: 0.2rem; }
+        input[type="text"], input[type="number"], select {
+          width: 100%;
+          padding: 0.4rem 0.55rem;
+          border: 1px solid var(--border, #d6cfc4);
+          border-radius: 5px;
+          font: inherit;
+        }
+      }
+      label.wide { grid-column: 1 / -1; }
+      label.checkbox {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        input { width: auto; margin: 0; }
+        span { display: inline; margin: 0; color: inherit; font-size: 0.88rem; }
+      }
+    }
+
+    .actions {
+      display: flex;
+      gap: 0.7rem;
+      align-items: center;
+      margin-top: 0.8rem;
+      .ok { color: #1b7a3a; }
+    }
+  }
+}
+
+// Inline edit-panel under a voucher row. Re-uses the create-card grid
+// shape so admins find the same controls in the same spots.
+.admin-vouchers-table tr.edit-row > td {
+  background: #fbf8ef;
+  border-top: 1px dashed var(--border, #d6cfc4);
+  padding: 0;
+}
+.voucher-edit-panel {
+  padding: 0.9rem 1rem;
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.6rem 1rem;
+    label { font-size: 0.88rem; }
+    label span { display: block; font-size: 0.82rem; color: #555; margin-bottom: 0.2rem; }
+    label input, label select {
+      width: 100%;
+      padding: 0.4rem 0.55rem;
+      border: 1px solid var(--border, #d6cfc4);
+      border-radius: 5px;
+      font: inherit;
+    }
+    label.wide { grid-column: 1 / -1; }
+    label.checkbox {
+      display: flex; gap: 0.5rem; align-items: center;
+      input { width: auto; margin: 0; }
+      span { display: inline; margin: 0; }
+    }
+  }
+  .actions {
+    display: flex; gap: 0.5rem; align-items: center; margin-top: 0.7rem;
+    .error { color: #b00020; font-size: 0.88rem; }
+  }
+}
+
+.admin-vouchers-table,
+.admin-zones-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+  margin-top: 0.5rem;
+
+  th, td {
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid var(--border, #e7e1d5);
+    vertical-align: top;
+    text-align: left;
+  }
+  th {
+    background: rgba(0, 0, 0, 0.03);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+  tr.inactive { opacity: 0.55; }
+  td.actions {
+    white-space: nowrap;
+    .btn { margin-right: 0.3rem; }
+  }
+  .muted { color: #777; font-size: 0.85rem; }
+}
+
+.admin-zones-table {
+  .cell-input {
+    width: 100%;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border, #d6cfc4);
+    border-radius: 5px;
+    font: inherit;
+  }
+  .cell-input.small { max-width: 6rem; text-align: right; }
+}
+
+// ---------------------------------------------------------------------------
+// /admin/pdf editor
+// ---------------------------------------------------------------------------
+
+.admin-pdf {
+  .admin-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.8rem;
+  }
+  .field-actions {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+    margin-top: 0.35rem;
+  }
+  .btn.small.ghost {
+    background: transparent;
+    color: #555;
+    border: 1px solid var(--border, #d6cfc4);
+    &:hover { background: rgba(0, 0, 0, 0.04); }
+  }
+  .card {
+    background: #fff;
+    border: 1px solid var(--border, #e7e1d5);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    margin: 1rem 0;
+    h2 { margin: 0 0 0.7rem; font-size: 1.05rem; }
+    label {
+      display: block;
+      margin-bottom: 0.9rem;
+      span { display: block; font-size: 0.82rem; color: #555; margin-bottom: 0.2rem; }
+      input[type="text"], textarea {
+        width: 100%;
+        padding: 0.45rem 0.6rem;
+        border: 1px solid var(--border, #d6cfc4);
+        border-radius: 5px;
+        font: inherit;
+        font-family: inherit;
+      }
+      textarea { resize: vertical; min-height: 4rem; }
+      button { margin-top: 0.35rem; }
+    }
+  }
+
+  .image-slot {
+    border-top: 1px dashed var(--border, #e7e1d5);
+    padding-top: 0.8rem;
+    margin-top: 0.6rem;
+    &:first-of-type { border-top: none; padding-top: 0; margin-top: 0; }
+
+    .image-slot-label {
+      display: block;
+      margin-bottom: 0.4rem;
+      span { display: block; font-size: 0.88rem; font-weight: 600; margin-bottom: 0.2rem; }
+      input[type="file"] { font-size: 0.85rem; }
+    }
+    .muted { color: #777; font-size: 0.82rem; margin: 0.2rem 0; word-break: break-all; }
+    img.preview {
+      max-width: 160px;
+      max-height: 100px;
+      border: 1px solid var(--border, #d6cfc4);
+      border-radius: 5px;
+      margin: 0.4rem 0;
+    }
+    .actions {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+      .error { color: #b00020; font-size: 0.85rem; }
+    }
+  }
+
+  .template-card {
+    .template-editor {
+      width: 100%;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.85rem;
+      line-height: 1.4;
+      tab-size: 2;
+      padding: 0.8rem;
+      border: 1px solid var(--border, #d6cfc4);
+      border-radius: 6px;
+      background: #fbfaf7;
+      resize: vertical;
+      min-height: 22rem;
+    }
+    .actions {
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+      margin-top: 0.8rem;
+      flex-wrap: wrap;
+      .status {
+        font-size: 0.88rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    }
+  }
+}
+
+// TEST-Pill: prominent amber badge for Sandbox-Bestellungen so staff
+// (and the admin reading Buchhaltung) can't confuse a test order with
+// a real one. Live-Bestellungen bleiben pillenlos — kein visual noise
+// auf dem echten Tagesgeschäft.
+.test-pill {
+  display: inline-block;
+  padding: 0.08rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  background: #fff3cd;
+  color: #6b4f00;
+  border: 1px solid #f0d97f;
+  margin-left: 0.4rem;
+  white-space: nowrap;
+}
+
+// Subtle row tint so the eye picks up test rows in a long Buchhaltung
+// list before reading the pill.
+.hist-table tr.discount-row td { color: #b00020; }
+.hist-table tr.netto-row td {
+  border-top: 2px solid var(--border, #d6cfc4);
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.hist-table tr.test-order,
+.admin-customers-table tr.test-order {
+  background: rgba(255, 243, 205, 0.35);
+}
+.order-card.test-order {
+  border-left: 4px solid #d9b94a;
+  background: rgba(255, 243, 205, 0.18);
+}
+
+// Buchhaltung filter checkbox
+.admin-history .filter .include-test {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+  font-size: 0.88rem;
+  input { margin: 0; }
+}
+.admin-history > .hint.muted {
+  margin-top: -0.4rem;
+  font-size: 0.85rem;
+  color: #777;
+}
+
+// Payment pill on /admin/history. Color encodes the settlement state
+// so the admin can scan a long list for unpaid card orders or refunds.
+.payment-pill {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: rgba(0, 0, 0, 0.06);
+  color: #333;
+
+  &.cash          { background: #e7e1d5; color: #6b4f00; }
+  &.card-paid     { background: #d4edda; color: #155724; }
+  &.card-pending  { background: #fff3cd; color: #6b4f00; }
+  &.card-failed   { background: #f8d7da; color: #842029; }
+  &.card-refunded { background: #d1ecf1; color: #0c5460; }
+  &.voucher       { background: #e2d9f3; color: #4b2e83; }
+}
+
+.create-zone {
+  background: #fff;
+  border: 1px solid var(--border, #e7e1d5);
+  border-radius: 8px;
+  padding: 1rem 1.1rem;
+  margin: 1rem 0;
+
+  summary { cursor: pointer; user-select: none; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 0.7rem 1rem;
+    margin-top: 0.8rem;
+
+    label { font-size: 0.88rem; }
+    label span { display: block; font-size: 0.82rem; color: #555; margin-bottom: 0.2rem; }
+    input { width: 100%; padding: 0.4rem 0.55rem; border: 1px solid var(--border, #d6cfc4); border-radius: 5px; font: inherit; }
+  }
+
+  .actions { display: flex; gap: 0.7rem; align-items: center; margin-top: 0.8rem; }
+  .actions .ok { color: #1b7a3a; }
 }

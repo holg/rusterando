@@ -25,6 +25,10 @@ pub struct AdminOrderRow {
     pub created_at: String,
     pub total_cents: i64,
     pub items_summary: String, // "2× Pizza Margherita (22 cm), 1× Coca Cola"
+    /// "live" | "sandbox". Anything ≠ "live" → render as TEST order
+    /// in the kitchen board so staff sees at a glance that this
+    /// isn't a real customer.
+    pub stripe_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -60,10 +64,11 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
             String,
             String,
             Option<String>,
+            String,
         ),
     >(
         "SELECT id, order_number, status, contact_name, contact_phone, scheduled_for, created_at,
-                total_cents, payment_status, order_type, delivery_address_json
+                total_cents, payment_status, order_type, delivery_address_json, stripe_mode
          FROM orders
          WHERE status IN ('received', 'preparing', 'ready_for_pickup', 'pending_payment')
          ORDER BY created_at ASC",
@@ -88,6 +93,7 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
         payment_status,
         order_type,
         addr_json,
+        stripe_mode,
     ) in rows
     {
         // Items summary in one query per order — fine for a kitchen with <100 active orders.
@@ -174,6 +180,7 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
             created_at: created,
             total_cents: total,
             items_summary,
+            stripe_mode,
         };
 
         match status.as_str() {
@@ -230,6 +237,41 @@ pub async fn update_order_status(id: String, status: String) -> Result<(), Serve
         .await
         .map_err(|e| ServerFnError::new(format!("update status: {e}")))?;
 
+    Ok(())
+}
+
+/// Reprint an order's kitchen receipt. Fires a `KitchenEvent::Reprint`
+/// into the outbox so the Pi prints the same receipt as the original
+/// with a "REPRINT" banner on top. Useful after paper jams, dropped
+/// receipts, or to hand a duplicate to a delivery driver who lost theirs.
+///
+/// No-op (Ok(())) on printerless deploys — KitchenSinkHandle is None
+/// in context. The button stays visible because the admin UI doesn't
+/// know about deploy config, but the server-side guard keeps it safe.
+#[server(
+    name = ReprintOrder,
+    prefix = "/api",
+    endpoint = "reprint_order"
+)]
+pub async fn reprint_order(id: String) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    crate::pages::admin::require_admin().await?;
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let Some(kitchen) = use_context::<crate::pages::push::KitchenSinkHandle>().flatten() else {
+        // Printerless deploy. Don't error — the admin doesn't need to
+        // know the kitchen subsystem is disabled; the button is
+        // harmless and we just nothing-happens.
+        return Ok(());
+    };
+
+    kitchen
+        .broadcast_reprint(&db, &id)
+        .await
+        .map_err(|e| ServerFnError::new(format!("kitchen reprint failed: {e}")))?;
     Ok(())
 }
 
@@ -317,6 +359,7 @@ fn OrderCard(
 ) -> impl IntoView {
     let id_for_advance = r.id.clone();
     let id_for_cancel = r.id.clone();
+    let id_for_reprint = r.id.clone();
     let detail_href = format!("/admin/orders/{}", r.id);
     let next = next_status.to_string();
     let on_advance = move |_| {
@@ -331,6 +374,15 @@ fn OrderCard(
             status: "cancelled".into(),
         });
     };
+    // Reprint has its own ServerAction so its `pending()` doesn't
+    // interfere with status updates' versioning. No need to refetch
+    // the orders list after — the row's data is unchanged.
+    let reprinter = ServerAction::<ReprintOrder>::new();
+    let on_reprint = move |_| {
+        reprinter.dispatch(ReprintOrder {
+            id: id_for_reprint.clone(),
+        });
+    };
 
     let payment_label = crate::pages::order::payment_status_label_de(&r.payment_status);
     let payment_attr = r.payment_status.clone();
@@ -340,10 +392,15 @@ fn OrderCard(
     } else {
         "🏪 ABHOLUNG"
     };
+    let is_test = r.stripe_mode != "live";
+    let card_cls = if is_test { "order-card test-order" } else { "order-card" };
     view! {
-        <li class="order-card">
+        <li class=card_cls>
             <div class="order-head">
                 <a class="order-num" href=detail_href>{r.order_number}</a>
+                {is_test.then(|| view! {
+                    <span class="test-pill" title="Sandbox/Test-Bestellung">"TEST"</span>
+                })}
                 <span class="status-pill" data-order-type=r.order_type.clone()>{order_type_chip}</span>
                 <span class="status-pill" data-status=r.status.clone()>
                     {status_label_de(&r.status)}
@@ -357,6 +414,10 @@ fn OrderCard(
             <p class="total">{format_eur(r.total_cents)}</p>
             <div class="row">
                 <button class="btn primary" on:click=on_advance>{next_label}</button>
+                <button class="btn ghost" on:click=on_reprint
+                    disabled=move || reprinter.pending().get()>
+                    "🖨 Erneut drucken"
+                </button>
                 <button class="btn ghost" on:click=on_cancel>"Stornieren"</button>
             </div>
         </li>

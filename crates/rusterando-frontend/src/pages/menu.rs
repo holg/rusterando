@@ -57,11 +57,16 @@ pub async fn list_menu() -> Result<MenuPayload, ServerFnError> {
     .map(|(code, name_de)| LegendEntry { code, name_de })
     .collect();
 
+    let shop_phone = use_context::<crate::branding::BrandingHandle>()
+        .map(|h| h.get().shop_phone)
+        .unwrap_or_default();
+
     Ok(MenuPayload {
         categories,
         items,
         allergens,
         additives,
+        shop_phone,
     })
 }
 
@@ -116,11 +121,19 @@ pub async fn list_admin_menu() -> Result<MenuPayload, ServerFnError> {
     .map(|(code, name_de)| LegendEntry { code, name_de })
     .collect();
 
+    // Admin payload doesn't render the public phone hint, but the field
+    // is shared with the public payload so we populate it from
+    // BrandingHandle to keep both branches in sync.
+    let shop_phone = use_context::<crate::branding::BrandingHandle>()
+        .map(|h| h.get().shop_phone)
+        .unwrap_or_default();
+
     Ok(MenuPayload {
         categories,
         items,
         allergens,
         additives,
+        shop_phone,
     })
 }
 
@@ -228,6 +241,7 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
         items,
         allergens,
         additives,
+        shop_phone: phone,
     } = payload;
 
     // Provide the resolved extras catalog to every Card via context. The
@@ -238,16 +252,6 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
 
     let cats_for_tabs = categories.clone();
     let cats_for_sections = categories.clone();
-
-    // Pull shop phone from BrandingHandle (SSR context) so the "call us"
-    // line on the menu reflects the configured shop, not a hardcoded
-    // number. Empty when the admin hasn't set one yet.
-    #[cfg(feature = "ssr")]
-    let phone = use_context::<crate::branding::BrandingHandle>()
-        .map(|h| h.get().shop_phone)
-        .unwrap_or_default();
-    #[cfg(not(feature = "ssr"))]
-    let phone = String::new();
 
     view! {
         <div class="menu">
@@ -372,17 +376,37 @@ fn Card(it: MenuItem) -> impl IntoView {
     let extras_catalog: StoredValue<Vec<PizzaExtra>> =
         use_context().unwrap_or_else(|| StoredValue::new(Vec::new()));
 
+    // Per-item flat-pricing rule (mirrors `add_to_cart` in cart.rs):
+    //   * `included` extras are free.
+    //   * Beyond that, every additional extra costs `flat_override`
+    //     when set; otherwise we fall back to the catalog price.
+    let included = it.included_extras_count.max(0) as usize;
+    let flat_override = it.flat_extra_price_cents;
+
     // Live sum of ticked extras so the size buttons show the real price the
     // customer is about to pay (base + extras) instead of just the base.
+    // Honours selection order so the "first N free" rule matches the server.
     let extras_sum_cents = Memo::new(move |_| -> i64 {
         let picked = selected_extras.get();
         if picked.is_empty() {
             return 0;
         }
         extras_catalog.with_value(|cat| {
-            cat.iter()
-                .filter(|e| picked.iter().any(|p| p == &e.id))
-                .map(|e| e.price_cents)
+            picked
+                .iter()
+                .enumerate()
+                .map(|(idx, id)| {
+                    if idx < included {
+                        0
+                    } else if let Some(flat) = flat_override {
+                        flat
+                    } else {
+                        cat.iter()
+                            .find(|e| &e.id == id)
+                            .map(|e| e.price_cents)
+                            .unwrap_or(0)
+                    }
+                })
                 .sum()
         })
     });
@@ -446,7 +470,12 @@ fn Card(it: MenuItem) -> impl IntoView {
                 })}
             </div>
             {allows_extras.then(|| view! {
-                <ExtrasPicker selected=selected_extras catalog=extras_catalog/>
+                <ExtrasPicker
+                    selected=selected_extras
+                    catalog=extras_catalog
+                    included=included
+                    flat_override=flat_override
+                />
             })}
             <div class="add-row">
                 {if has_large {
@@ -491,6 +520,11 @@ fn split_codes(s: &str) -> Vec<String> {
 fn ExtrasPicker(
     selected: RwSignal<Vec<String>>,
     catalog: StoredValue<Vec<PizzaExtra>>,
+    /// First `included` ticks are free for this item.
+    included: usize,
+    /// When `Some`, every tick beyond `included` costs this flat rate
+    /// (catalog prices are ignored). `None` keeps catalog pricing.
+    flat_override: Option<i64>,
 ) -> impl IntoView {
     // Render statically (no enclosing `move ||`) so SSR and hydrate produce
     // an identical DOM tree. The catalog is captured by value once per
@@ -500,22 +534,57 @@ fn ExtrasPicker(
     if list.is_empty() {
         return ().into_any();
     }
+    let hint = match (included, flat_override) {
+        (0, None) => None,
+        (0, Some(flat)) => Some(format!("Jede Zutat {}.", format_eur(flat))),
+        (n, None) => Some(format!("Die ersten {n} Zutaten sind inklusive.")),
+        (n, Some(flat)) => Some(format!(
+            "Die ersten {n} Zutaten sind inklusive, jede weitere {}.",
+            format_eur(flat)
+        )),
+    };
     view! {
         <details class="extras-picker">
             <summary>"Extras hinzufügen"</summary>
+            {hint.map(|h| view! { <p class="extras-hint">{h}</p> })}
             <ul class="extras-list">
                 {list.into_iter().map(|ex| {
                     let id = ex.id.clone();
                     let id_for_check = id.clone();
                     let id_for_track = id.clone();
+                    let id_for_price = id.clone();
                     let is_checked = Memo::new(move |_| {
                         selected.with(|v| v.contains(&id_for_track))
                     });
                     let label = ex.label.clone();
-                    let price_label = if ex.price_cents == 0 {
-                        "gratis".to_string()
-                    } else {
-                        format!("+{}", format_eur(ex.price_cents))
+                    let catalog_price = ex.price_cents;
+                    // Reactive per-row price label: depends on whether this
+                    // extra is selected and at what position in the
+                    // selection list. Mirrors the server-side rule in
+                    // `add_to_cart`.
+                    let price_label = move || {
+                        let pos = selected.with(|v| {
+                            v.iter().position(|x| x == &id_for_price)
+                        });
+                        let effective = match pos {
+                            Some(idx) if idx < included => 0,
+                            Some(_) => flat_override.unwrap_or(catalog_price),
+                            None => {
+                                // Not selected yet — show what it WOULD
+                                // cost as the next tick.
+                                let already = selected.with(|v| v.len());
+                                if already < included {
+                                    0
+                                } else {
+                                    flat_override.unwrap_or(catalog_price)
+                                }
+                            }
+                        };
+                        if effective == 0 {
+                            "gratis".to_string()
+                        } else {
+                            format!("+{}", format_eur(effective))
+                        }
                     };
                     view! {
                         <li>

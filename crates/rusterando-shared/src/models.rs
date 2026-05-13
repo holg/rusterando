@@ -56,6 +56,11 @@ pub struct MenuPayload {
     pub items: Vec<MenuItem>,
     pub allergens: Vec<LegendEntry>,
     pub additives: Vec<LegendEntry>,
+    /// Shop phone for the "Telefonisch bestellen" hint on the menu page.
+    /// Baked into the payload (rather than read from `BrandingHandle` in
+    /// the component) so SSR and hydrate render the same DOM.
+    #[serde(default)]
+    pub shop_phone: String,
 }
 
 /// Which size was chosen for a pizza when adding to the cart. `Single` for

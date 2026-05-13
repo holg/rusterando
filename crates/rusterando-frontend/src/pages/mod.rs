@@ -10,3 +10,4 @@ pub mod order;
 pub mod push;
 pub mod session;
 pub mod settings;
+pub mod vouchers;

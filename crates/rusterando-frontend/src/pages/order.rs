@@ -256,6 +256,11 @@ pub mod notify {
         pub delivery_address_text: String,
         pub delivery_fee_cents: i64,
         pub subtotal_cents: i64,
+        /// Code typed by the customer, e.g. "WILLKOMMEN10". Empty when
+        /// no voucher was applied.
+        pub voucher_code: String,
+        /// Cents shaved off; 0 when no voucher.
+        pub voucher_discount_cents: i64,
         /// Snapshot of the shop's contact data at order time. Captured
         /// here so the email-sender (which runs in a detached tokio
         /// task with no Leptos context) can render shop name / phone /
@@ -462,15 +467,24 @@ pub mod notify {
                 s.push_str(&format!("        + {} ({p})\n", ex.label));
             }
         }
-        if o.delivery_fee_cents > 0 {
+        if o.delivery_fee_cents > 0 || o.voucher_discount_cents > 0 {
             s.push_str(&format!(
                 "\nZwischensumme: {}\n",
                 format_eur(o.subtotal_cents)
             ));
-            s.push_str(&format!(
-                "Lieferzuschlag: {}\n",
-                format_eur(o.delivery_fee_cents)
-            ));
+            if o.delivery_fee_cents > 0 {
+                s.push_str(&format!(
+                    "Lieferzuschlag: {}\n",
+                    format_eur(o.delivery_fee_cents)
+                ));
+            }
+            if o.voucher_discount_cents > 0 {
+                s.push_str(&format!(
+                    "Gutschein {}: -{}\n",
+                    o.voucher_code,
+                    format_eur(o.voucher_discount_cents)
+                ));
+            }
         }
         s.push_str(&format!("\nGesamt: {}\n", format_eur(o.total_cents)));
         let payment_line = match (o.payment_method.as_str(), is_delivery) {
@@ -571,7 +585,7 @@ type TourStopRow = (
 );
 
 #[cfg(feature = "ssr")]
-mod ssr {
+pub mod ssr {
     use super::*;
     use chrono::{Datelike, Local, NaiveTime, TimeZone, Timelike};
 
@@ -688,12 +702,18 @@ mod ssr {
     /// client_secret). The customer's browser uses the client_secret to mount
     /// the Payment Element; the intent id is stored on our order row so the
     /// webhook can resolve back to it (in addition to metadata.order_id).
+    ///
+    /// `stripe_secret` is the mode-specific key resolved by the caller
+    /// from `StripeModeHandle::active_keys()`. We don't read env here
+    /// so the same function works for both sandbox and live without
+    /// branching internally.
     pub async fn create_payment_intent(
         order_id: &str,
         order_number: &str,
         total_cents: i64,
         receipt_email: &str,
         shop_name: &str,
+        stripe_secret: &str,
     ) -> Result<(String, String), leptos::prelude::ServerFnError> {
         use leptos::prelude::ServerFnError;
         use std::collections::HashMap;
@@ -702,9 +722,12 @@ mod ssr {
             PaymentIntent,
         };
 
-        let secret = std::env::var("STRIPE_SECRET_KEY")
-            .map_err(|_| ServerFnError::new("STRIPE_SECRET_KEY not set"))?;
-        let client = Client::new(secret);
+        if stripe_secret.is_empty() {
+            return Err(ServerFnError::new(
+                "Stripe Secret Key fehlt — bitte S_STRIPE_SECRET_KEY / L_STRIPE_SECRET_KEY in .env setzen",
+            ));
+        }
+        let client = Client::new(stripe_secret.to_string());
 
         let mut params = CreatePaymentIntent::new(total_cents, Currency::EUR);
         params.automatic_payment_methods = Some(CreatePaymentIntentAutomaticPaymentMethods {
@@ -915,18 +938,32 @@ mod ssr {
     // -- Phase 2: geocoding + classification --------------------------------
 
     /// Pizzeria coordinates — used for the sanity-radius check in
-    /// classify_zone(). Override via PIZZERIA_LAT / PIZZERIA_LON env if the
-    /// real bakery sits elsewhere.
+    /// classify_zone(). Resolution order:
+    ///   1. PIZZERIA_LAT / PIZZERIA_LON env vars (legacy override).
+    ///   2. BrandingHandle.shop_lat / shop_lon (admin-set, in-DB).
+    ///   3. (0.0, 0.0) — sentinel meaning "shop hasn't set coords yet".
+    ///      classify_zone treats this as "skip the radius check" so
+    ///      fresh installs without a configured address still let
+    ///      orders through.
     pub fn pizzeria_coords() -> (f64, f64) {
-        let lat = std::env::var("PIZZERIA_LAT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(51.7701);
-        let lon = std::env::var("PIZZERIA_LON")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(7.4419);
-        (lat, lon)
+        if let (Ok(lat), Ok(lon)) = (
+            std::env::var("PIZZERIA_LAT").map(|s| s.parse::<f64>()),
+            std::env::var("PIZZERIA_LON").map(|s| s.parse::<f64>()),
+        ) {
+            if let (Ok(lat), Ok(lon)) = (lat, lon) {
+                if lat != 0.0 || lon != 0.0 {
+                    return (lat, lon);
+                }
+            }
+        }
+        if let Some(b) =
+            leptos::prelude::use_context::<crate::branding::BrandingHandle>().map(|h| h.get())
+        {
+            if b.shop_lat != 0.0 || b.shop_lon != 0.0 {
+                return (b.shop_lat, b.shop_lon);
+            }
+        }
+        (0.0, 0.0)
     }
 
     /// 30 km is a generous radius around the pizzeria — anything farther is
@@ -954,7 +991,13 @@ mod ssr {
         city: Option<&str>,
         expected_city: &str,
     ) -> Option<&'static str> {
-        if haversine_km(pizzeria_coords(), (lat, lon)) > SANITY_RADIUS_KM {
+        // Skip the sanity-radius check when the shop hasn't set its
+        // own coordinates yet (fresh install / demo deploy). Same
+        // fail-open posture as the expected_city check below — better
+        // to let an order through than block every customer until
+        // /admin/branding is filled in.
+        let shop = pizzeria_coords();
+        if shop != (0.0, 0.0) && haversine_km(shop, (lat, lon)) > SANITY_RADIUS_KM {
             return None;
         }
         let city = city.unwrap_or("");
@@ -1460,6 +1503,7 @@ pub async fn place_order(
     postcode: Option<String>,
     city: Option<String>,
     address_notes: Option<String>,
+    voucher_code: Option<String>,
 ) -> Result<PlacedOrder, ServerFnError> {
     use crate::pages::cart::ssr::{current_cart_id, load_cart};
     use crate::pages::order::notify::{NotifierHandle, OrderItemSummary, OrderSummary};
@@ -1491,6 +1535,23 @@ pub async fn place_order(
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
     let notifier = use_context::<NotifierHandle>()
         .ok_or_else(|| ServerFnError::new("notifier missing from context"))?;
+
+    if payment_method == "cash" {
+        let phone_norm = ssr::normalize_phone(&phone);
+        let blocked: Option<(String,)> = sqlx::query_as(
+            "SELECT blacklisted_at FROM customers \
+             WHERE phone = ? AND blacklisted_at IS NOT NULL LIMIT 1",
+        )
+        .bind(&phone_norm)
+        .fetch_optional(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("blacklist check: {e}")))?;
+        if blocked.is_some() {
+            return Err(ServerFnError::new(
+                "Bar-Bestellungen sind für diese Nummer derzeit nicht möglich. Bitte wählen Sie Online-Zahlung oder kontaktieren Sie uns.",
+            ));
+        }
+    }
 
     let cart = load_cart(&db, &cart_id).await?;
     if cart.lines.is_empty() {
@@ -1599,11 +1660,69 @@ pub async fn place_order(
         .map_err(|e| ServerFnError::new(format!("order number: {e}")))?;
     let pickup_label = ssr::pickup_label(scheduled_for.as_ref());
 
+    // Compute the voucher discount PRE-flight so we can:
+    //   (a) decide initial_status/payment_status with the real total
+    //   (b) INSERT INTO orders with the post-voucher total in one shot
+    //   (c) skip Stripe entirely when voucher covers everything
+    //
+    // We use `evaluate` (read-only) here. The full `redeem` (which
+    // writes the voucher_redemptions row) runs inside the txn after
+    // the order INSERT — it re-validates against committed state so
+    // caps still hold under concurrent submits.
+    let phone_norm_preview = ssr::normalize_phone(&phone);
+    let voucher_preview_discount: i64 = if let Some(raw_code) = voucher_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let code_norm = crate::pages::vouchers::normalise_code(raw_code);
+        match crate::pages::vouchers::ssr::load_active_voucher(&db, &code_norm).await {
+            Ok(v) => {
+                let preview = crate::pages::vouchers::ssr::evaluate(
+                    &db,
+                    &v,
+                    &phone_norm_preview,
+                    subtotal,
+                    delivery_fee,
+                )
+                .await?;
+                if preview.applies {
+                    preview.discount_cents
+                } else {
+                    // The voucher exists but doesn't apply (rule
+                    // failure). Surface the reason so the customer
+                    // sees why it was rejected, mirroring what the
+                    // live validator already shows on the checkout
+                    // form.
+                    return Err(ServerFnError::new(preview.reason_de));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        0
+    };
+    let total_after_voucher = (total - voucher_preview_discount).max(0);
+
     // Cash orders are immediately "received" in the kitchen queue. Card orders
     // start as "pending_payment" and only move to "received" after the webhook
     // confirms payment. payment_status mirrors that distinction.
-    let (initial_status, initial_payment_status) = if payment_method == "card" {
+    //
+    // Special case: a voucher that drops total_cents to 0 (e.g. fixed-25€
+    // voucher on a 24€ cart, or 100% percent) means there's nothing for the
+    // customer to pay. We treat that like a cash-on-pickup order — straight
+    // to the kitchen, no Stripe Intent. Without this branch the customer
+    // would face a Stripe Payment Element with a €0 amount, which is invalid.
+    let total_after_voucher_is_zero = total_after_voucher == 0;
+    let (initial_status, initial_payment_status) = if payment_method == "card"
+        && !total_after_voucher_is_zero
+    {
         ("pending_payment", "pending")
+    } else if total_after_voucher_is_zero && voucher_preview_discount > 0 {
+        // Order is effectively free — fully covered by voucher. Mark as
+        // "received" so the kitchen sees it; payment_status='voucher_paid'
+        // distinguishes it from cash-on-pickup for the Buchhaltung.
+        ("received", "voucher_paid")
     } else {
         ("received", "cash_on_pickup")
     };
@@ -1675,7 +1794,7 @@ pub async fn place_order(
     .bind(scheduled_for.map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string()))
     .bind(subtotal)
     .bind(delivery_fee)
-    .bind(total)
+    .bind(total_after_voucher)  // post-voucher total — Stripe-branch sees correct amount
     .bind(initial_payment_status)
     .bind(&customer_id)
     .bind(address_id.as_deref())
@@ -1683,6 +1802,54 @@ pub async fn place_order(
     .await
     .map_err(|e| ServerFnError::new(format!("insert order: {e}")))?;
     let _ = delivery_zone_name; // reserved for the email body when we wire that branch later
+
+    // Voucher redeem. Total + status are already correct from the
+    // pre-flight evaluate; this call only re-validates inside the txn
+    // (caps need to read committed state under concurrent submits) and
+    // writes the voucher_redemptions row + snapshot columns onto the
+    // order. The discount it returns SHOULD equal what we computed
+    // pre-INSERT; we assert that to catch any divergence.
+    let mut voucher_discount: i64 = 0;
+    let mut voucher_meta: Option<(String, String)> = None; // (id, code)
+    if let Some(raw_code) = voucher_code.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let (vid, vcode, discount) = crate::pages::vouchers::ssr::redeem(
+            &mut tx,
+            raw_code,
+            &phone_norm,
+            subtotal,
+            delivery_fee,
+            &order_id,
+        )
+        .await?;
+        if discount != voucher_preview_discount {
+            // Pre-flight evaluate said X, in-txn redeem said Y. Means
+            // a concurrent redemption hit a cap between the two reads.
+            // Reject conservatively — the customer will retry.
+            return Err(ServerFnError::new(
+                "Gutschein-Stand hat sich gerade geändert — bitte Bestellung erneut absenden.",
+            ));
+        }
+        voucher_discount = discount;
+        voucher_meta = Some((vid, vcode));
+    }
+    if voucher_discount > 0 {
+        let (vid, vcode) = voucher_meta.as_ref().expect("set with discount").clone();
+        // Snapshot only the voucher columns — total_cents was already
+        // written with the post-voucher value in the INSERT above.
+        sqlx::query(
+            "UPDATE orders SET voucher_id = ?2, voucher_code = ?3,
+                               voucher_discount_cents = ?4
+             WHERE id = ?1",
+        )
+        .bind(&order_id)
+        .bind(&vid)
+        .bind(&vcode)
+        .bind(voucher_discount)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("apply voucher: {e}")))?;
+    }
+    let total = total_after_voucher;
 
     for line in &cart.lines {
         let line_id = uuid::Uuid::new_v4().to_string();
@@ -1792,28 +1959,57 @@ pub async fn place_order(
         delivery_address_text,
         delivery_fee_cents: delivery_fee,
         subtotal_cents: subtotal,
+        voucher_code: voucher_meta
+            .as_ref()
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default(),
+        voucher_discount_cents: voucher_discount,
         branding: branding_snapshot.clone(),
     };
 
-    if payment_method == "card" {
-        // Create the Stripe PaymentIntent. We attach order_id as metadata so
-        // the webhook can resolve it back to our row.
+    if payment_method == "card" && !total_after_voucher_is_zero {
+        // Resolve the active Stripe key set RIGHT BEFORE creating
+        // the intent and snapshot the mode onto the order row. A
+        // mid-checkout admin flip won't strand this order: the
+        // webhook handler matches by the row's snapshot, not the
+        // current active mode.
+        let stripe_keys = use_context::<crate::stripe::StripeModeHandle>()
+            .map(|h| h.active_keys())
+            .ok_or_else(|| ServerFnError::new("StripeModeHandle missing from context"))?;
+        if !stripe_keys.is_complete() {
+            return Err(ServerFnError::new(format!(
+                "Stripe-Schlüssel für Modus '{}' unvollständig — \
+                 bitte {prefix}STRIPE_PUBLISH_KEY, {prefix}STRIPE_SECRET_KEY \
+                 und {prefix}STRIPE_WEBHOOK_SECRET in .env setzen.",
+                stripe_keys.mode.label_de(),
+                prefix = stripe_keys.mode.env_prefix(),
+            )));
+        }
+
         let shop_name = branding_snapshot.display_name();
-        let intent_id_and_secret =
-            ssr::create_payment_intent(&order_id, &order_number, total, &email, &shop_name).await?;
-        let (intent_id, client_secret) = intent_id_and_secret;
+        let (intent_id, client_secret) = ssr::create_payment_intent(
+            &order_id,
+            &order_number,
+            total,
+            &email,
+            &shop_name,
+            &stripe_keys.secret_key,
+        )
+        .await?;
 
-        // Store the intent id so refunds and webhooks have an explicit target.
-        sqlx::query("UPDATE orders SET stripe_payment_intent_id = ?1 WHERE id = ?2")
-            .bind(&intent_id)
-            .bind(&order_id)
-            .execute(&db)
-            .await
-            .map_err(|e| ServerFnError::new(format!("save intent id: {e}")))?;
-
-        let pk = std::env::var("STRIPE_PUBLISHABLE_KEY")
-            .or_else(|_| std::env::var("STRIPE_PUBLISH_KEY"))
-            .map_err(|_| ServerFnError::new("STRIPE_PUBLISHABLE_KEY not set"))?;
+        // Persist the intent id AND the mode it was minted in. The
+        // mode snapshot is the durable record — the webhook handler
+        // uses it to pick the right signing secret, even after the
+        // admin flips the active mode.
+        sqlx::query(
+            "UPDATE orders SET stripe_payment_intent_id = ?1, stripe_mode = ?2 WHERE id = ?3",
+        )
+        .bind(&intent_id)
+        .bind(stripe_keys.mode.as_setting())
+        .bind(&order_id)
+        .execute(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("save intent id: {e}")))?;
 
         // Email is deferred — we only confirm by email once payment succeeds
         // (in the webhook). Returning client_secret tells the browser to
@@ -1822,7 +2018,7 @@ pub async fn place_order(
             id: order_id,
             order_number,
             stripe_client_secret: Some(client_secret),
-            stripe_publishable_key: Some(pk),
+            stripe_publishable_key: Some(stripe_keys.publish_key),
         });
     }
 
@@ -1842,6 +2038,23 @@ pub async fn place_order(
             roles.push("driver");
         }
         sink.notify_roles(&roles, &push_title, &push_body, Some(&summary.public_url));
+    }
+
+    // Cash path: also fire the kitchen-printer broadcast so the Pi
+    // prints the receipt. Card orders get their broadcast from the
+    // Stripe webhook AFTER payment succeeds (see stripe_webhook_handler
+    // in main.rs) — we don't want to print a receipt for an order
+    // that may end up declined.
+    //
+    // Trait-erased handle so this crate doesn't need to depend on
+    // rusterando-server / kitchen-protocol directly (the server crate
+    // provides the impl + DB→DTO translation; we just pass the order
+    // id). `use_context::<Option<_>>` returns None on printerless
+    // deploys; flatten short-circuits cleanly.
+    if let Some(k) = use_context::<crate::pages::push::KitchenSinkHandle>().flatten() {
+        if let Err(e) = k.broadcast_new_order(&db, &order_id).await {
+            log::warn!("[order {order_number}] kitchen broadcast failed: {e}");
+        }
     }
 
     let order_number_for_log = summary.order_number.clone();
@@ -2596,6 +2809,181 @@ pub async fn tour_stop_delivered(
     get_tour(tour_id).await
 }
 
+/// Pull a single stop out of an active tour and put the order back in
+/// `ready_for_pickup` so the driver can re-bundle later. Used when a
+/// second driver shows up and they decide to split the load differently.
+///
+/// Already-delivered stops are rejected — the order has left the building.
+/// If this was the last live stop on the tour, we auto-finish the tour
+/// so it disappears from active lists.
+#[server(
+    name = RemoveTourStop,
+    prefix = "/api",
+    endpoint = "remove_tour_stop"
+)]
+pub async fn remove_tour_stop(tour_id: String, sequence: i64) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    let role = crate::pages::session::ssr::current_role().await;
+    if !matches!(
+        role,
+        Some(crate::pages::session::Role::Driver) | Some(crate::pages::session::Role::Admin)
+    ) {
+        return Err(ServerFnError::new("Nicht autorisiert."));
+    }
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let stop: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT order_id, delivered_at FROM delivery_tour_stops
+         WHERE tour_id = ?1 AND sequence = ?2",
+    )
+    .bind(&tour_id)
+    .bind(sequence)
+    .fetch_optional(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("lookup stop: {e}")))?;
+
+    let Some((order_id, delivered_at)) = stop else {
+        return Err(ServerFnError::new("Stop nicht gefunden."));
+    };
+    if delivered_at.is_some() {
+        return Err(ServerFnError::new(
+            "Bereits geliefert — kann nicht zurückgenommen werden.",
+        ));
+    }
+
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("begin tx: {e}")))?;
+
+    sqlx::query("DELETE FROM delivery_tour_stops WHERE tour_id = ?1 AND sequence = ?2")
+        .bind(&tour_id)
+        .bind(sequence)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("delete stop: {e}")))?;
+
+    sqlx::query(
+        "UPDATE orders
+         SET tour_id = NULL,
+             status = 'ready_for_pickup',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?1",
+    )
+    .bind(&order_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ServerFnError::new(format!("revert order: {e}")))?;
+
+    // If no live stops remain on the tour, auto-finish it. A tour with
+    // only delivered stops is effectively done; one with zero stops
+    // total is empty and should disappear too.
+    let live: Option<(i64,)> = sqlx::query_as(
+        "SELECT COUNT(*) FROM delivery_tour_stops
+         WHERE tour_id = ?1 AND delivered_at IS NULL",
+    )
+    .bind(&tour_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| ServerFnError::new(format!("count live stops: {e}")))?;
+
+    if live.map(|(n,)| n).unwrap_or(0) == 0 {
+        sqlx::query(
+            "UPDATE delivery_tours SET finished_at = CURRENT_TIMESTAMP
+             WHERE id = ?1 AND finished_at IS NULL",
+        )
+        .bind(&tour_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("auto-finish tour: {e}")))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("commit: {e}")))?;
+
+    Ok(())
+}
+
+/// Cancel an entire active tour: every undelivered stop's order goes
+/// back to `ready_for_pickup`, stop rows are deleted, the tour is
+/// marked finished. Already-delivered stops stay attached as historical
+/// record (the tour is finished, not erased).
+#[server(
+    name = CancelTour,
+    prefix = "/api",
+    endpoint = "cancel_tour"
+)]
+pub async fn cancel_tour(tour_id: String) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    let role = crate::pages::session::ssr::current_role().await;
+    if !matches!(
+        role,
+        Some(crate::pages::session::Role::Driver) | Some(crate::pages::session::Role::Admin)
+    ) {
+        return Err(ServerFnError::new("Nicht autorisiert."));
+    }
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| ServerFnError::new(format!("begin tx: {e}")))?;
+
+    let live_orders: Vec<(String,)> = sqlx::query_as(
+        "SELECT order_id FROM delivery_tour_stops
+         WHERE tour_id = ?1 AND delivered_at IS NULL",
+    )
+    .bind(&tour_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| ServerFnError::new(format!("list live: {e}")))?;
+
+    for (order_id,) in &live_orders {
+        sqlx::query(
+            "UPDATE orders
+             SET tour_id = NULL,
+                 status = 'ready_for_pickup',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+        )
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServerFnError::new(format!("revert order: {e}")))?;
+    }
+
+    sqlx::query(
+        "DELETE FROM delivery_tour_stops
+         WHERE tour_id = ?1 AND delivered_at IS NULL",
+    )
+    .bind(&tour_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ServerFnError::new(format!("delete live stops: {e}")))?;
+
+    sqlx::query(
+        "UPDATE delivery_tours SET finished_at = CURRENT_TIMESTAMP
+         WHERE id = ?1 AND finished_at IS NULL",
+    )
+    .bind(&tour_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ServerFnError::new(format!("finish tour: {e}")))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| ServerFnError::new(format!("commit: {e}")))?;
+
+    Ok(())
+}
+
 /// Mark the whole tour finished. Driver calls this after delivering all
 /// stops; we stamp finished_at so the tour disappears from "active" lists.
 #[server(
@@ -3072,6 +3460,26 @@ fn Form(
     // hydration once branding had non-empty values.
     let city_sig = RwSignal::new(default_city_from_ctx);
     let address_notes_sig = RwSignal::new(String::new());
+    // Pick up ?code=… from the URL via the reactive query map. Reads
+    // sync on both SSR and hydrate so the input ships pre-filled —
+    // no flash, no DOM mismatch. Subsequent CSR navigations to the
+    // checkout (e.g. from an admin clicking "code-Link") also pick
+    // up the new value automatically.
+    let query = leptos_router::hooks::use_query_map();
+    let initial_voucher = query
+        .read_untracked()
+        .get("code")
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let voucher_sig = RwSignal::new(initial_voucher);
+    // Latest voucher preview from the server. Drives the summary
+    // discount line, the small green/red status next to the input,
+    // and feeds total_after_voucher.
+    let voucher_preview: RwSignal<Option<crate::pages::vouchers::VoucherPreview>> =
+        RwSignal::new(None);
+    // Latest validator error message, kept separate so we don't lose
+    // the previous preview when a typo lands a "Code unbekannt" reply.
+    let voucher_error: RwSignal<Option<String>> = RwSignal::new(None);
 
     // Saved-address chips for known customers (most-recent first; the most
     // recent is auto-applied, the rest become clickable chips).
@@ -3172,18 +3580,66 @@ fn Form(
         });
     });
 
-    // Apply validator results.
-    Effect::new(move |_| {
-        if let Some(Ok(v)) = validator.value().get() {
-            // Mirror the resolved zone into the hidden field so the existing
-            // place_order form payload stays compatible (server still ignores
-            // it, but old clients & SSR no-JS submission keep working).
+    // Apply validator results. Surface server errors as a failed
+    // AddressValidation so the submit button switches from the mute
+    // "Adresse prüfen" placeholder to a real reason — otherwise the
+    // customer just sees a permanently-greyed button with no idea why.
+    Effect::new(move |_| match validator.value().get() {
+        Some(Ok(v)) => {
             if let Some(zid) = v.zone_id.clone() {
                 delivery_zone_id.set(zid);
             }
             validation.set(Some(v));
         }
+        Some(Err(e)) => {
+            validation.set(Some(AddressValidation {
+                ok: false,
+                reason: Some(format!("Adressprüfung fehlgeschlagen: {e}")),
+                ..Default::default()
+            }));
+        }
+        None => {}
     });
+
+    // Voucher live-validation: re-runs whenever the code, phone,
+    // or cart totals change. The reactive deps are gathered explicitly
+    // so we don't refire on every unrelated signal in the form.
+    let voucher_validator = ServerAction::<crate::pages::vouchers::ValidateVoucher>::new();
+    Effect::new(move |_| {
+        let code = voucher_sig.get();
+        let phone = phone_sig.get();
+        let sub = subtotal_cents;
+        let fee = fee_cents.get();
+        if code.trim().is_empty() {
+            voucher_preview.set(None);
+            voucher_error.set(None);
+            return;
+        }
+        voucher_validator.dispatch(crate::pages::vouchers::ValidateVoucher {
+            code,
+            phone,
+            subtotal_cents: sub,
+            delivery_fee_cents: fee,
+        });
+    });
+    Effect::new(move |_| match voucher_validator.value().get() {
+        Some(Ok(p)) => {
+            voucher_error.set(None);
+            voucher_preview.set(Some(p));
+        }
+        Some(Err(e)) => {
+            voucher_preview.set(None);
+            voucher_error.set(Some(format!("{e}")));
+        }
+        None => {}
+    });
+    let voucher_discount = Memo::new(move |_| {
+        voucher_preview
+            .with(|p| p.as_ref().filter(|p| p.applies).map(|p| p.discount_cents))
+            .unwrap_or(0)
+    });
+    let total_after_voucher =
+        Memo::new(move |_| (total_cents.get() - voucher_discount.get()).max(0));
 
     // Convenience signals used in the template + submit gating.
     let address_valid = Memo::new(move |_| {
@@ -3211,7 +3667,20 @@ fn Form(
                 {move || (is_delivery.get() && free_delivery.get()).then(|| view! {
                     <p class="ok">"✓ Kostenlose Lieferung"</p>
                 })}
-                <p class="big">{move || format_eur(total_cents.get())}</p>
+                {move || (voucher_discount.get() > 0).then(|| {
+                    let label = voucher_preview
+                        .with(|p| p.as_ref().and_then(|p| p.label.clone())
+                            .unwrap_or_else(|| "Gutschein".to_string()));
+                    let code = voucher_preview
+                        .with(|p| p.as_ref().map(|p| p.code.clone()).unwrap_or_default());
+                    view! {
+                        <p class="ok">
+                            "✓ "{label}" ("{code}"): -"
+                            <strong>{format_eur(voucher_discount.get())}</strong>
+                        </p>
+                    }
+                })}
+                <p class="big">{move || format_eur(total_after_voucher.get())}</p>
                 {move || (is_delivery.get() && !free_delivery.get() && missing_to_free.get() > 0).then(|| view! {
                     <p class="hint">
                         "Noch " <strong>{move || format_eur(missing_to_free.get())}</strong>
@@ -3312,7 +3781,7 @@ fn Form(
                         <label>
                             <span>"Straße"</span>
                             <input type="text" name="street" autocomplete="address-line1"
-                                   placeholder="z.B. Wolfsberger Str."
+                                   placeholder="z.B. Musterstraße"
                                    prop:value=move || street_sig.get()
                                    on:input=move |ev| street_sig.set(event_target_value(&ev))/>
                         </label>
@@ -3326,7 +3795,7 @@ fn Form(
                         <label>
                             <span>"PLZ"</span>
                             <input type="text" name="postcode" autocomplete="postal-code"
-                                   placeholder="59348" inputmode="numeric"
+                                   placeholder="12345" inputmode="numeric"
                                    prop:value=move || postcode_sig.get()
                                    on:input=move |ev| postcode_sig.set(event_target_value(&ev))/>
                         </label>
@@ -3445,6 +3914,24 @@ fn Form(
                     </label>
                 </fieldset>
 
+                <fieldset class="voucher-fieldset">
+                    <legend>"Gutschein-Code (optional)"</legend>
+                    <input type="text" name="voucher_code" autocomplete="off"
+                           placeholder="z.B. WILLKOMMEN10"
+                           prop:value=move || voucher_sig.get()
+                           on:input=move |ev| voucher_sig.set(event_target_value(&ev))/>
+                    {move || {
+                        if let Some(p) = voucher_preview.get() {
+                            let cls = if p.applies { "ok" } else { "warn" };
+                            view! { <p class=cls>{p.reason_de}</p> }.into_any()
+                        } else if let Some(e) = voucher_error.get() {
+                            view! { <p class="warn">{e}</p> }.into_any()
+                        } else {
+                            view! { <p class="hint muted">"Code eingeben — Rabatt wird sofort geprüft."</p> }.into_any()
+                        }
+                    }}
+                </fieldset>
+
                 <button type="submit" class="btn primary"
                         disabled=move || pending.get() || below_min.get()
                                        || validating.get() || !address_valid.get()>
@@ -3459,6 +3946,11 @@ fn Form(
                         }
                         else if below_min.get() {
                             format!("Mindestbestellwert {} fehlt", format_eur(missing_to_min.get()))
+                        }
+                        else if payment_method.get() == "card" && total_after_voucher.get() == 0 {
+                            // Voucher covers everything — nothing to pay,
+                            // no Stripe step. Match what place_order does.
+                            "Bestellung aufgeben".to_string()
                         }
                         else if payment_method.get() == "card" { "Weiter zur Zahlung".to_string() }
                         else { "Bestellung aufgeben".to_string() }

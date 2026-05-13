@@ -50,7 +50,10 @@
   let euros = calc.div-euclid(cents, 100)
   let rest = calc.rem-euclid(cents, 100)
   let pad = if rest < 10 { "0" } else { "" }
-  str(euros) + "," + pad + str(rest) + " €"
+  // Non-breaking space (\u{00A0}) between amount and € so two-digit
+  // prices like "10,00 €" never wrap onto two lines inside the narrow
+  // price column.
+  str(euros) + "," + pad + str(rest) + "\u{00A0}€"
 }
 
 #let csv-codes(s) = {
@@ -205,11 +208,11 @@
   if has-large {
     cells.push(align(right, text(size: 7pt, weight: "bold")[#large]))
     block(spacing: 0.4em, grid(
-      columns: (1fr, 9mm, 9mm), gutter: 1mm, ..cells
+      columns: (1fr, 12mm, 12mm), gutter: 1mm, ..cells
     ))
   } else {
     block(spacing: 0.4em, grid(
-      columns: (1fr, 9mm), gutter: 1mm, ..cells
+      columns: (1fr, 12mm), gutter: 1mm, ..cells
     ))
   }
 }
@@ -234,7 +237,7 @@
     let small-label = first-with-large.at("size_small_label", default: "")
     let large-label = first-with-large.at("size_large_label", default: "")
     grid(
-      columns: (1fr, 9mm, 9mm),
+      columns: (1fr, 12mm, 12mm),
       gutter: 1mm,
       [],
       align(right, text(size: 5.5pt, fill: col-muted)[#small-label]),
@@ -257,6 +260,70 @@
     #v(0.5mm)
     #for it in cat.items {
       item-row(it, has-large)
+    }
+  ]
+}
+
+// ----- Extras card ---------------------------------------------------------
+//
+// Free-text lines from app_settings (one extra per line, e.g.
+// "Krabben 1 €" or "Lachs 2,50 €"). We split each line on the last
+// space and treat the trailing chunk as the price column if it looks
+// like one; otherwise the whole line is the name and the price column
+// stays empty. Matches the visual language of `category-card` so the
+// extras blocks slot into the bottom of the menu grid.
+
+#let extras-card(title, lines) = {
+  // Filter out blank lines from sloppy textarea editing.
+  let cleaned = lines.map(l => l.trim()).filter(l => l.len() > 0)
+  if cleaned.len() == 0 { return [] }
+
+  let parse-line(line) = {
+    // Find the last space; if the trailing token contains "€" or is
+    // a bare number, peel it off as the price column.
+    let i = line.position(c => false) // placeholder; Typst lacks rfind
+    let chars = line.clusters()
+    let last-space = none
+    for (idx, c) in chars.enumerate() {
+      if c == " " { last-space = idx }
+    }
+    if last-space == none {
+      return (line, "")
+    }
+    let head = chars.slice(0, last-space).join("")
+    let tail = chars.slice(last-space + 1).join("")
+    // Treat as price if it has a € or starts with a digit.
+    let looks-like-price = (
+      tail.contains("€")
+        or (tail.len() > 0 and "0123456789".contains(tail.first()))
+    )
+    if looks-like-price {
+      // Non-breaking space inside the price so "10,00 €" doesn't wrap.
+      (head.trim(), tail.replace(" ", "\u{00A0}"))
+    } else {
+      (line, "")
+    }
+  }
+
+  block(
+    fill: col-pink,
+    stroke: 0.5pt + col-pink-2,
+    radius: 2pt,
+    inset: 4mm,
+    breakable: true,
+    width: 100%,
+    spacing: 2mm,
+  )[
+    #text(size: 11pt, weight: "bold", fill: col-red, style: "italic")[#title]
+    #v(1mm)
+    #for raw in cleaned {
+      let (name, price) = parse-line(raw)
+      block(spacing: 0.4em, grid(
+        columns: (1fr, 14mm),
+        gutter: 1mm,
+        text(size: 7pt)[#name],
+        align(right, text(size: 7pt, weight: "bold")[#price]),
+      ))
     }
   ]
 }
@@ -291,6 +358,19 @@
     #columns(4, gutter: 4mm)[
       #for cat in data.categories {
         category-card(cat)
+        v(2mm)
+      }
+      // Extras come last — they're admin-edited free-text lists in
+      // app_settings, separate from the menu_items table. Empty lists
+      // produce no card.
+      #let extras-pizza = data.branding.at("extras_pizza_lines", default: ())
+      #let extras-pasta = data.branding.at("extras_pasta_lines", default: ())
+      #if extras-pizza.len() > 0 {
+        extras-card("Pizza-Extras", extras-pizza)
+        v(2mm)
+      }
+      #if extras-pasta.len() > 0 {
+        extras-card("Pasta-Extras", extras-pasta)
         v(2mm)
       }
       #v(4mm)

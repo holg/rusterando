@@ -1,0 +1,62 @@
+# Example overlay. Copy to `project.local.yml` (gitignored) and edit
+# in your Apple Team ID + the targets you actually ship.
+#
+# Each target stanza below is one app: bundle id, display name,
+# applinks domain, and ShopStore seed are all per-target. You can
+# have as many as you want — a tenant-branded app, your own
+# multi-shop publisher app, demo builds for other shops.
+#
+# Files referenced from a target stanza (Info-<Target>.plist,
+# <Target>.entitlements) are also gitignored. The .gitignore in
+# this directory excludes Info-*.plist and *.entitlements except
+# for the *-Example.* placeholders that ship in the public repo.
+#
+# Run:
+#   xcodegen
+#
+# project.yml has `include: project.local.yml` so xcodegen merges
+# this file automatically when present.
+
+settings:
+  base:
+    # Your Apple Team ID. Find it at developer.apple.com → Membership.
+    DEVELOPMENT_TEAM: AAAAAAAAAA
+
+targets:
+  # Example: a tenant-branded app with a pre-configured shop on
+  # first launch. Replace every placeholder. Create the matching
+  # Info-MyShop.plist and MyShop.entitlements alongside this file
+  # (both gitignored).
+  MyShop:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources/Assets.xcassets
+      - path: Resources/LaunchScreen.storyboard
+    settings:
+      base:
+        PRODUCT_NAME: "My Shop"
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourdomain.myshop
+    info:
+      path: Info-MyShop.plist
+      properties:
+        CFBundleDisplayName: "My Shop"
+        UIBackgroundModes:
+          - remote-notification
+        # ShopStore reads these on first launch and creates one
+        # pre-configured shop. Omit both to ship an empty list
+        # (user adds shops via Settings — good for multi-shop drivers).
+        SeedShopName: "My Shop"
+        SeedShopURL: "https://myshop.example.com"
+    entitlements:
+      path: MyShop.entitlements
+      properties:
+        aps-environment: development
+        com.apple.developer.applesignin:
+          - Default
+        # App Links — requires the matching assetlinks.json /
+        # apple-app-site-association on your domain.
+        com.apple.developer.associated-domains:
+          - applinks:myshop.example.com
+          - webcredentials:myshop.example.com

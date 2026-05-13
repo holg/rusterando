@@ -1,4 +1,5 @@
 pub mod broadcast;
+pub mod customers;
 pub mod extras_admin;
 pub mod history;
 pub mod home;
@@ -6,8 +7,11 @@ pub mod home_admin;
 pub mod login;
 pub mod menu_admin;
 pub mod orders;
+pub mod pdf;
 pub mod settings_admin;
 pub mod shell;
+pub mod vouchers;
+pub mod zones;
 
 /// Server-side helper to verify the admin cookie. Returns Ok(()) when allowed.
 #[cfg(feature = "ssr")]

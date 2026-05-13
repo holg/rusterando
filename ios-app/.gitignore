@@ -1,0 +1,34 @@
+# Generated Xcode project — regenerate locally with `xcodegen`.
+*.xcodeproj/
+*.xcworkspace/
+
+# Local build artifacts.
+build/
+DerivedData/
+*.ipa
+*.dSYM.zip
+
+# Local overlay holding your Apple Team ID + all tenant-specific
+# targets (Davids, your-publisher Rusterando, anything else you
+# ship). project.local.example.yml is the public template.
+project.local.yml
+
+# Tenant-specific plist + entitlements files. The *-Example variants
+# are placeholder values for the public example target in project.yml
+# and stay tracked. Anything else (Info-Davids, DavidsPizzeria.*,
+# Info-RusterandoPublic, etc.) is per-developer signing config and
+# must not be committed.
+Info-*.plist
+!Info-Example.plist
+*.entitlements
+!Rusterando-Example.entitlements
+
+# Stale single-target plist from the pre-multi-target layout.
+Info.plist
+
+# Per-developer signing config Xcode sometimes writes.
+*.xcuserstate
+xcuserdata/
+
+# macOS metadata.
+.DS_Store

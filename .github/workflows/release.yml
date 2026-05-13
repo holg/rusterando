@@ -1,0 +1,276 @@
+# Rusterando — tagged release builds.
+#
+# Fires on a `v*` tag push (or manual workflow_dispatch from the UI)
+# and produces GitHub Release artifacts:
+#
+#   rusterando-server-x86_64-unknown-linux-gnu.tar.gz
+#       │
+#       ├── rusterando-server          server binary (release-prod, fat LTO)
+#       └── site/                      WASM + JS + CSS bundle (cargo-leptos)
+#   rusterando-server-aarch64-unknown-linux-gnu.tar.gz
+#       └── ... same shape, cross-built for ARM Linux
+#   rusterando-printer-x86_64-unknown-linux-gnu.tar.gz
+#       ├── rusterando-printer         Pi/desktop kitchen printer client
+#       └── systemd/rusterando-printer.service
+#   rusterando-printer-aarch64-unknown-linux-gnu.tar.gz
+#       └── ... same, cross-built for Raspberry Pi etc.
+#
+# The release notes auto-link these. INSTALLATION.md ships in the
+# repo root with the manual deployment runbook for each artifact.
+#
+# Mac + Windows builds are scoped out of this first cut; revisit when
+# we have working USB-printer paths on those OSes.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to build (defaults to current HEAD)"
+        required: false
+        default: ""
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+permissions:
+  # Required for softprops/action-gh-release to attach binaries to
+  # the GitHub Release page. Read on contents is the default; we
+  # only need `write` to create / upload to the release.
+  contents: write
+
+jobs:
+  # =============================================================
+  # Server (cargo-leptos: bin + WASM site bundle)
+  # =============================================================
+  build-server:
+    name: Build server (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust stable + WASM + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,${{ matrix.target }}
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      # Native OpenSSL for the x86 build; cross-aarch64 needs the
+      # arm64-flavoured library via dpkg multi-arch.
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Enable arm64 dpkg + install cross OpenSSL
+        if: matrix.cross
+        run: |
+          sudo dpkg --add-architecture arm64
+          # The Ubuntu 24.04 archive only carries arm64 in the `ports`
+          # mirror, not the default amd64 mirrors. Restrict the
+          # main repos to amd64 and add a separate arm64 sources file
+          # pointing at ports.ubuntu.com so apt-get update doesn't
+          # 404 on the missing arm64 metadata.
+          sudo sed -i 's|^deb |deb [arch=amd64] |g' /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<'EOF'
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main universe
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y \
+              gcc-aarch64-linux-gnu \
+              libssl-dev:arm64
+          # Tell openssl-sys where to look. PKG_CONFIG_* envs survive
+          # into the cargo invocation below.
+          echo "PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> $GITHUB_ENV
+
+      - name: Install cargo-leptos
+        # Pinned version so a future cargo-leptos release can't break
+        # us mid-tag. Bump deliberately together with leptos itself.
+        run: cargo install --locked cargo-leptos@0.2.51 || cargo install --locked cargo-leptos
+
+      - name: Build server (cargo-leptos, release-prod)
+        env:
+          LEPTOS_BIN_TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          cargo leptos build --release -v
+          ls -lh target/${{ matrix.target }}/release-prod/rusterando-server
+          ls -lh target/site
+
+      - name: Pack tarball
+        run: |
+          mkdir -p dist/rusterando-server-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release-prod/rusterando-server \
+             dist/rusterando-server-${{ matrix.target }}/
+          # cargo-leptos writes the WASM bundle at target/site; we
+          # ship it verbatim so the deploy is `tar -xzf` + run.
+          cp -R target/site dist/rusterando-server-${{ matrix.target }}/site
+          # hash.txt is what the running server reads to resolve
+          # /pkg/<name>.<hash>.{js,wasm} URLs. Without it the server
+          # 404s every asset.
+          if [ -f target/${{ matrix.target }}/release-prod/hash.txt ]; then
+            cp target/${{ matrix.target }}/release-prod/hash.txt \
+               dist/rusterando-server-${{ matrix.target }}/
+          fi
+          cp INSTALLATION.md dist/rusterando-server-${{ matrix.target }}/ 2>/dev/null || true
+          tar -C dist -czf \
+              rusterando-server-${{ matrix.target }}.tar.gz \
+              rusterando-server-${{ matrix.target }}
+          ls -lh rusterando-server-${{ matrix.target }}.tar.gz
+
+      - name: Upload server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rusterando-server-${{ matrix.target }}
+          path: rusterando-server-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # =============================================================
+  # Pi / desktop printer client
+  # =============================================================
+  build-printer:
+    name: Build printer (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            cross: true
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install Rust stable + target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cargo cache (printer)
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Separate key from the server jobs — the printer crate is
+          # excluded from the workspace and resolves a different
+          # Cargo.lock.
+          shared-key: release-printer-${{ matrix.target }}
+          workspaces: crates/rusterando-printer
+
+      - name: Install cross toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> $GITHUB_ENV
+
+      - name: Build printer
+        run: |
+          cargo build --release \
+              --target ${{ matrix.target }} \
+              --manifest-path crates/rusterando-printer/Cargo.toml
+          file crates/rusterando-printer/target/${{ matrix.target }}/release/rusterando-printer
+
+      - name: Pack tarball
+        run: |
+          mkdir -p dist/rusterando-printer-${{ matrix.target }}
+          cp crates/rusterando-printer/target/${{ matrix.target }}/release/rusterando-printer \
+             dist/rusterando-printer-${{ matrix.target }}/
+          # Bundled systemd unit so the user can `sudo install -m 0644
+          # systemd/* /etc/systemd/system/` straight from the archive.
+          mkdir -p dist/rusterando-printer-${{ matrix.target }}/systemd
+          cp systemd/rusterando-printer.service \
+             dist/rusterando-printer-${{ matrix.target }}/systemd/
+          cp docs/kitchen-printer.md \
+             dist/rusterando-printer-${{ matrix.target }}/ 2>/dev/null || true
+          tar -C dist -czf \
+              rusterando-printer-${{ matrix.target }}.tar.gz \
+              rusterando-printer-${{ matrix.target }}
+          ls -lh rusterando-printer-${{ matrix.target }}.tar.gz
+
+      - name: Upload printer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rusterando-printer-${{ matrix.target }}
+          path: rusterando-printer-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  # =============================================================
+  # Aggregate all four tarballs into a single GitHub Release.
+  # =============================================================
+  release:
+    name: Create GitHub Release
+    needs: [build-server, build-printer]
+    runs-on: ubuntu-24.04
+    # Skip on workflow_dispatch unless a ref was specified; release
+    # creation needs a tag and we don't want a manual dispatch from
+    # the UI to clobber an existing tag.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Show artifacts
+        run: ls -lh artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Auto-generate the changelog section from PRs / commits
+          # since the previous tag. Fine default; can be overridden
+          # later with a hand-crafted CHANGELOG.md if you want.
+          generate_release_notes: true
+          files: |
+            artifacts/rusterando-server-*.tar.gz
+            artifacts/rusterando-printer-*.tar.gz
+          body: |
+            ## Installing
+
+            See [INSTALLATION.md](INSTALLATION.md) for the full
+            deployment runbook. Quick reference:
+
+            | Target | Server | Printer |
+            |---|---|---|
+            | x86_64 Linux | `rusterando-server-x86_64-unknown-linux-gnu.tar.gz` | `rusterando-printer-x86_64-unknown-linux-gnu.tar.gz` |
+            | aarch64 Linux (Pi, ARM VPS) | `rusterando-server-aarch64-unknown-linux-gnu.tar.gz` | `rusterando-printer-aarch64-unknown-linux-gnu.tar.gz` |
+
+            Each tarball is self-contained. The server bundle ships
+            the binary + `site/` (WASM/JS/CSS) so a fresh deploy is
+            `tar -xzf` + edit `.env` + start the systemd unit.
