@@ -91,12 +91,27 @@ jobs:
         if: matrix.cross
         run: |
           sudo dpkg --add-architecture arm64
-          # The Ubuntu 24.04 archive only carries arm64 in the `ports`
-          # mirror, not the default amd64 mirrors. Restrict the
-          # main repos to amd64 and add a separate arm64 sources file
-          # pointing at ports.ubuntu.com so apt-get update doesn't
-          # 404 on the missing arm64 metadata.
-          sudo sed -i 's|^deb |deb [arch=amd64] |g' /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          # Ubuntu 24.04 (noble) ships sources in deb822 format
+          # (`/etc/apt/sources.list.d/ubuntu.sources`), not the legacy
+          # one-line-per-repo `sources.list`. The default amd64
+          # mirrors don't carry arm64 packages; without restricting
+          # them to amd64, `apt-get update` would 404 fetching arm64
+          # metadata against archive.ubuntu.com.
+          #
+          # The deb822 fix: append `Architectures: amd64` to every
+          # stanza in ubuntu.sources (if it isn't already pinned).
+          # The legacy fix: keep the sed (still works on any older
+          # one-line entries that might exist).
+          if [ -f /etc/apt/sources.list.d/ubuntu.sources ] \
+             && ! grep -q '^Architectures:' /etc/apt/sources.list.d/ubuntu.sources; then
+              # Insert `Architectures: amd64` under each `Types:` header.
+              sudo sed -i '/^Types: /a Architectures: amd64' \
+                  /etc/apt/sources.list.d/ubuntu.sources
+          fi
+          sudo sed -i 's|^deb |deb [arch=amd64] |g' \
+              /etc/apt/sources.list 2>/dev/null || true
+          # Add an arm64-only sources file pointing at ports.ubuntu.com,
+          # which IS where arm64 packages live for noble.
           sudo tee /etc/apt/sources.list.d/arm64.list >/dev/null <<'EOF'
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe
