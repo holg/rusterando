@@ -9,6 +9,7 @@ pub mod menu_admin;
 pub mod options_admin;
 pub mod orders;
 pub mod pdf;
+pub mod pricing;
 pub mod settings_admin;
 pub mod shell;
 pub mod vouchers;

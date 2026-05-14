@@ -84,6 +84,7 @@ pub fn AdminShell(children: Children) -> impl IntoView {
                     <a href="/admin/orders">"Bestellungen"</a>
                     <a href="/admin/menu">"Speisekarte"</a>
                     <a href="/admin/extras">"Extras"</a>
+                    <a href="/admin/pricing">"Preis-Prüfung"</a>
                     <a href="/admin/home">"Startseite"</a>
                     <a href="/admin/broadcast">"Push"</a>
                     <a href="/admin/settings">"Einstellungen"</a>
