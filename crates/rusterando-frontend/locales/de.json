@@ -1,0 +1,76 @@
+{
+  "common": {
+    "loading": "Lädt…",
+    "error": "Fehler",
+    "save": "Speichern",
+    "cancel": "Abbrechen",
+    "delete": "Löschen",
+    "edit": "Bearbeiten",
+    "back": "Zurück",
+    "next": "Weiter",
+    "yes": "Ja",
+    "no": "Nein",
+    "free": "gratis"
+  },
+  "header": {
+    "menu": "Speisekarte",
+    "cart": "Warenkorb",
+    "checkout": "Kasse",
+    "imprint": "Impressum",
+    "privacy": "Datenschutz"
+  },
+  "menu": {
+    "title": "Speisekarte",
+    "category_all": "Alle",
+    "add_to_cart": "In den Warenkorb",
+    "size_label": "Größe",
+    "extras_title": "Extras",
+    "options_required_hint": "Bitte {min}–{max} auswählen."
+  },
+  "cart": {
+    "title": "Warenkorb",
+    "empty": "Dein Warenkorb ist leer.",
+    "subtotal": "Zwischensumme",
+    "delivery_fee": "Liefergebühr",
+    "voucher_discount": "Gutschein-Rabatt",
+    "total": "Gesamt",
+    "proceed": "Zur Kasse"
+  },
+  "voucher": {
+    "enter_code": "Bitte Code eingeben",
+    "label_placeholder": "Gutschein-Code",
+    "apply": "Einlösen",
+    "applied": "{label} − {amount} Rabatt",
+    "unknown": "Code unbekannt oder deaktiviert.",
+    "expired": "Code ist abgelaufen.",
+    "not_yet_valid": "Code ist noch nicht gültig.",
+    "min_subtotal": "Mindestbestellwert {amount}.",
+    "used_up": "Code ist ausgeschöpft.",
+    "already_redeemed": "Code wurde bereits eingelöst.",
+    "first_order_only": "Nur für Erstbesteller.",
+    "wrong_phone": "Code gilt nicht für diese Nummer.",
+    "no_discount": "Kein Rabatt anwendbar."
+  },
+  "checkout": {
+    "title": "Kasse",
+    "name": "Name",
+    "phone": "Telefon",
+    "address": "Adresse",
+    "delivery": "Lieferung",
+    "pickup": "Abholung",
+    "pay_card": "Karte (Stripe)",
+    "pay_cash": "Bar bei Lieferung",
+    "place_order": "Bestellung absenden",
+    "voucher_changed": "Gutschein-Stand hat sich gerade geändert — bitte Bestellung erneut absenden."
+  },
+  "order_confirm": {
+    "title": "Bestellung eingegangen",
+    "order_number": "Bestellnummer",
+    "estimated_pickup": "Voraussichtlich fertig",
+    "estimated_delivery": "Voraussichtliche Lieferung"
+  },
+  "errors": {
+    "page_not_found": "Seite nicht gefunden.",
+    "not_logged_in": "nicht angemeldet"
+  }
+}

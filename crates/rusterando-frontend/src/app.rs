@@ -161,7 +161,7 @@ pub fn App() -> impl IntoView {
             <TestModeBanner/>
             <SiteHeader/>
             <main>
-                <Routes fallback=|| "Seite nicht gefunden.">
+                <Routes fallback=|| crate::t!("errors.page_not_found")>
                     <Route path=StaticSegment("") view=Home/>
                     <Route path=StaticSegment("menu") view=MenuPage/>
                     <Route path=StaticSegment("checkout") view=CheckoutPage/>

@@ -1,0 +1,76 @@
+{
+  "common": {
+    "loading": "Loading…",
+    "error": "Error",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "back": "Back",
+    "next": "Next",
+    "yes": "Yes",
+    "no": "No",
+    "free": "free"
+  },
+  "header": {
+    "menu": "Menu",
+    "cart": "Cart",
+    "checkout": "Checkout",
+    "imprint": "Imprint",
+    "privacy": "Privacy"
+  },
+  "menu": {
+    "title": "Menu",
+    "category_all": "All",
+    "add_to_cart": "Add to cart",
+    "size_label": "Size",
+    "extras_title": "Extras",
+    "options_required_hint": "Please select {min}–{max}."
+  },
+  "cart": {
+    "title": "Cart",
+    "empty": "Your cart is empty.",
+    "subtotal": "Subtotal",
+    "delivery_fee": "Delivery fee",
+    "voucher_discount": "Voucher discount",
+    "total": "Total",
+    "proceed": "Proceed to checkout"
+  },
+  "voucher": {
+    "enter_code": "Please enter a code",
+    "label_placeholder": "Voucher code",
+    "apply": "Redeem",
+    "applied": "{label} − {amount} off",
+    "unknown": "Unknown or deactivated code.",
+    "expired": "Code has expired.",
+    "not_yet_valid": "Code is not yet valid.",
+    "min_subtotal": "Minimum order value {amount}.",
+    "used_up": "Code has been fully redeemed.",
+    "already_redeemed": "Code has already been used.",
+    "first_order_only": "First-order customers only.",
+    "wrong_phone": "Code does not apply to this number.",
+    "no_discount": "No discount applicable."
+  },
+  "checkout": {
+    "title": "Checkout",
+    "name": "Name",
+    "phone": "Phone",
+    "address": "Address",
+    "delivery": "Delivery",
+    "pickup": "Pickup",
+    "pay_card": "Card (Stripe)",
+    "pay_cash": "Cash on delivery",
+    "place_order": "Place order",
+    "voucher_changed": "Voucher status changed — please resubmit your order."
+  },
+  "order_confirm": {
+    "title": "Order received",
+    "order_number": "Order number",
+    "estimated_pickup": "Ready around",
+    "estimated_delivery": "Estimated delivery"
+  },
+  "errors": {
+    "page_not_found": "Page not found.",
+    "not_logged_in": "not signed in"
+  }
+}

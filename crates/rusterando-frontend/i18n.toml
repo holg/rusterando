@@ -1,0 +1,22 @@
+# leptos_i18n configuration. Only consulted when the crate is built
+# with `--features i18n`. The default Davids build sees a plain
+# include_str!("locales/de.json") via the de_only shim.
+#
+# Routing model (when feature is on):
+#   /menu          -> default locale (no prefix, canonical)
+#   /en/menu       -> English (prefix is the locale code)
+#   /it/menu       -> Italian
+#   /de/menu       -> 302 redirect to /menu (default has no prefix)
+#   /xx/menu       -> 404 if xx isn't in `locales`
+#
+# Locale resolution priority on first visit:
+#   1. URL prefix /<lang>/...  (most specific wins)
+#   2. dp_lang cookie          (sticks across visits)
+#   3. Accept-Language header  (browser hint)
+#   4. default below
+
+default = "de"
+locales = ["de", "en", "it", "fr", "es", "pt", "ru", "cn"]
+locales-dir = "locales"
+namespaces = []
+cookie_name = "dp_lang"

@@ -3,6 +3,7 @@
 pub mod app;
 pub mod branding;
 pub mod components;
+pub mod i18n;
 pub mod pages;
 pub mod stripe;
 pub mod utils;
