@@ -816,11 +816,16 @@ main { display: block; width: 100%; }
     border-bottom: 1px solid var(--border);
     h2 { margin: 0; flex: 1; color: var(--primary); }
     .close {
-      background: transparent;
-      color: var(--text);
-      font-size: 1.6rem;
-      width: 2rem;
-      height: 2rem;
+      // Mobile-friendly: 44×44 hit target (Apple HIG minimum), high-
+      // contrast circle so the customer can find the exit on a busy
+      // phone screen. The drawer auto-opens after Add-to-cart, so
+      // missing this button means feeling trapped.
+      background: var(--primary);
+      color: white;
+      font-size: 1.5rem;
+      width: 2.75rem;
+      height: 2.75rem;
+      border-radius: 999px;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -828,8 +833,13 @@ main { display: block; width: 100%; }
       cursor: pointer;
       line-height: 1;
       padding: 0;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+      transition: background 120ms, transform 120ms;
     }
-    .close:hover { color: var(--primary); background: transparent; }
+    .close:hover, .close:active {
+      background: var(--primary-dark);
+      transform: scale(1.05);
+    }
   }
   .drawer-body {
     flex: 1;
@@ -907,13 +917,19 @@ main { display: block; width: 100%; }
     span { padding: 0 0.6rem; font-variant-numeric: tabular-nums; min-width: 1.3rem; text-align: center; }
   }
   .line-total { font-variant-numeric: tabular-nums; }
-  .remove {
-    background: transparent;
-    border: none;
-    color: var(--muted);
-    cursor: pointer;
-    padding: 0.1rem 0.3rem;
-    &:hover { color: var(--error); background: transparent; }
+  .line-buttons {
+    display: flex;
+    gap: 0.4rem;
+    .edit, .remove {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      padding: 0.25rem 0.4rem;
+      font-size: 1rem;
+      line-height: 1;
+    }
+    .edit { color: var(--muted); &:hover, &:active { color: var(--primary); } }
+    .remove { color: var(--muted); &:hover, &:active { color: var(--error); } }
   }
 }
 
@@ -2239,6 +2255,34 @@ button.add-item {
   font-size: 0.8rem;
   color: var(--text);
   li { padding: 0.05rem 0; }
+}
+
+// ---------- Admin pricing-admin page ----------
+.pricing-admin {
+  max-width: 70rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+  .pricing-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0 1.5rem;
+    th, td { padding: 0.45rem 0.6rem; text-align: left; vertical-align: top; }
+    th { border-bottom: 2px solid var(--border); font-size: 0.85rem; }
+    tr.row-bad { background: #fff4e0; }
+    .diff { font-variant-numeric: tabular-nums; }
+    .muted { color: var(--muted); }
+    .muted.small { font-size: 0.8rem; }
+  }
+  details.unmatched {
+    margin-top: 1.2rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    summary { cursor: pointer; color: var(--muted); }
+    ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+  }
+  .ok { color: var(--success); font-weight: 600; }
 }
 
 // ---------- Admin extras-admin page ----------

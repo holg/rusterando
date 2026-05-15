@@ -249,6 +249,39 @@ fn Line(line: CartLine) -> impl IntoView {
         }
     };
 
+    // "Bearbeiten" — remove this line and navigate back to the menu
+    // item so the customer can re-pick extras. We pass the previous
+    // extras through the URL hash so the menu page can pre-fill the
+    // checkboxes; that's lighter than threading state through a
+    // signal and survives a full page reload.
+    let edit = {
+        let id = id.clone();
+        let menu_item_id = line.menu_item_id.clone();
+        let extras_ids: Vec<String> = line.extras.iter().map(|e| e.id.clone()).collect();
+        move |_| {
+            ctx.update.dispatch(UpdateCartLine {
+                line_id: id.clone(),
+                quantity: 0,
+            });
+            ctx.open.set(false);
+            let hash = if extras_ids.is_empty() {
+                format!("#{}", menu_item_id)
+            } else {
+                format!("#{}?extras={}", menu_item_id, extras_ids.join(","))
+            };
+            // window.location.assign — full navigation so the menu
+            // page mounts fresh and reads the hash on init.
+            #[cfg(feature = "hydrate")]
+            if let Some(win) = web_sys::window() {
+                let _ = win.location().set_href(&format!("/menu{hash}"));
+            }
+            #[cfg(not(feature = "hydrate"))]
+            {
+                let _ = &hash; // silence unused on SSR
+            }
+        }
+    };
+
     let extras_render = (!line.extras.is_empty()).then(|| {
         let items = line.extras.clone();
         view! {
@@ -287,7 +320,10 @@ fn Line(line: CartLine) -> impl IntoView {
                     <button on:click=inc aria-label="mehr">"+"</button>
                 </div>
                 <strong class="line-total">{format_eur(line.line_total_cents)}</strong>
-                <button class="remove" on:click=remove aria-label="entfernen">"🗑"</button>
+                <div class="line-buttons">
+                    <button class="edit" on:click=edit aria-label="Extras bearbeiten" title="Extras bearbeiten">"✎"</button>
+                    <button class="remove" on:click=remove aria-label="entfernen">"🗑"</button>
+                </div>
             </div>
         </li>
     }

@@ -432,6 +432,43 @@ fn Card(it: MenuItem) -> impl IntoView {
     let extras_catalog: StoredValue<Vec<PizzaExtra>> =
         use_context().unwrap_or_else(|| StoredValue::new(Vec::new()));
 
+    // Pre-fill extras when the URL hash names this item, e.g.
+    // /menu#mi-007?extras=ex-pilze,ex-zwiebeln. Used by the cart
+    // drawer's "Bearbeiten" button: remove the line, navigate here
+    // with the prior extras encoded, the customer adjusts and re-adds.
+    // Hydrate-only — SSR has no Location.
+    #[cfg(feature = "hydrate")]
+    {
+        let item_id_clone = item_id.clone();
+        Effect::new(move |_| {
+            if let Some(win) = web_sys::window() {
+                if let Ok(hash) = win.location().hash() {
+                    // hash looks like "#mi-007?extras=a,b" (or just "#mi-007")
+                    let stripped = hash.trim_start_matches('#');
+                    let (anchor, query) = match stripped.split_once('?') {
+                        Some((a, q)) => (a, Some(q)),
+                        None => (stripped, None),
+                    };
+                    if anchor == item_id_clone {
+                        if let Some(q) = query {
+                            // Parse "extras=a,b,c"
+                            if let Some(rest) = q.strip_prefix("extras=") {
+                                let ids: Vec<String> = rest
+                                    .split(',')
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.to_string())
+                                    .collect();
+                                if !ids.is_empty() {
+                                    selected_extras.set(ids);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Required-choice option groups (e.g. salad dressing). Tracked as
     // a parallel signal `(group_id → Vec<option_id>)` so a single
     // dressing pick is a 1-element Vec, and "pick up to 2 sides"
@@ -551,8 +588,9 @@ fn Card(it: MenuItem) -> impl IntoView {
         }
     };
 
+    let card_id = item_id.clone();
     view! {
-        <article class:card=true class:unavailable=unavailable>
+        <article id=card_id class:card=true class:unavailable=unavailable>
             <div class="card-head">
                 {number.map(|n| view! { <span class="num">{n}</span> })}
                 <h3>{it.name.clone()}</h3>

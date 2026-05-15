@@ -16,6 +16,7 @@ use crate::pages::admin::login::AdminLoginPage;
 use crate::pages::admin::menu_admin::AdminMenuPage;
 use crate::pages::admin::orders::{AdminOrderDetailPage, AdminOrdersPage};
 use crate::pages::admin::pdf::PdfAdminPage;
+use crate::pages::admin::pricing::PricingAdminPage;
 use crate::pages::admin::settings_admin::SettingsAdminPage;
 use crate::pages::admin::vouchers::VouchersAdminPage;
 use crate::pages::admin::zones::ZonesAdminPage;
@@ -181,6 +182,7 @@ pub fn App() -> impl IntoView {
                     <Route path=(StaticSegment("admin"), StaticSegment("vouchers")) view=VouchersAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("zones")) view=ZonesAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("pdf")) view=PdfAdminPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("pricing")) view=PricingAdminPage/>
                     <Route path=StaticSegment("kitchen") view=KitchenBoardPage/>
                     <Route path=(StaticSegment("kitchen"), StaticSegment("login")) view=KitchenLoginPage/>
                     <Route path=StaticSegment("driver") view=DriverBoardPage/>
