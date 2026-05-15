@@ -60,9 +60,14 @@ pub struct PricingIssue {
     /// named pizza on that size; that's the bug.
     pub inversion_small_cents: i64,
     pub inversion_large_cents: Option<i64>,
-    /// The smallest new extra price (in cents) that would put the
-    /// combo at least 50 ct above the named pizza on both sizes.
-    pub suggested_extra_price_cents: i64,
+    /// What the named pizza's small price would have to become so that
+    /// the combo (Margherita + extra) is at least 50 ct cheaper. This is
+    /// the actionable suggestion: raise the named pizza's small to this
+    /// value. None means small is already fine.
+    pub suggested_named_small_cents: Option<i64>,
+    /// Same idea for the large size. None means large is already fine
+    /// (or the named pizza has no large variant).
+    pub suggested_named_large_cents: Option<i64>,
 }
 
 impl PricingIssue {
@@ -167,14 +172,15 @@ fn analyze(
             if !small_bad && !large_bad {
                 continue;
             }
-            // Suggested extra price: max delta across sizes + 50 ct margin.
-            let mut suggested = (p.3 - base.3) + 50;
-            if let (Some(pl), Some(bl)) = (p.4, base.4) {
-                let large_suggested = (pl - bl) + 50;
-                if large_suggested > suggested {
-                    suggested = large_suggested;
-                }
-            }
+            // Suggested named-pizza prices: enough so combo is at least
+            // 50 ct cheaper than named. We only suggest a bump for the
+            // size(s) that are actually inverted — no point telling the
+            // admin to raise a price that's already healthy.
+            let suggested_small = small_bad.then_some(combo_small + 50);
+            let suggested_large = match (large_bad, combo_large) {
+                (true, Some(cl)) => Some(cl + 50),
+                _ => None,
+            };
             issues.push(PricingIssue {
                 extra_label: elabel.clone(),
                 extra_id: eid.clone(),
@@ -190,7 +196,8 @@ fn analyze(
                 combo_large_cents: combo_large,
                 inversion_small_cents: inv_small,
                 inversion_large_cents: inv_large,
-                suggested_extra_price_cents: suggested,
+                suggested_named_small_cents: suggested_small,
+                suggested_named_large_cents: suggested_large,
             });
         }
         if !matched_any {
@@ -278,10 +285,10 @@ pub fn PricingAdminPage() -> impl IntoView {
                     "fertige Pizza mit der gleichen Zutat. Beispiel: "
                     "Margherita (5,00 €) + Extra Salami (1,00 €) = 6,00 € "
                     "ist günstiger als Pizza Salami della Casa (5,80 €). "
-                    "Liste sortiert nach Dringlichkeit. Korrektur per "
-                    <a href="/admin/extras">"/admin/extras"</a>
-                    " oder "
-                    <a href="/admin/menu">"/admin/menu"</a>"."
+                    "Empfohlene Korrektur: Preis der fertigen Pizza in "
+                    <a href="/admin/menu">"/admin/menu"</a>
+                    " anheben — meist um 0,50–1,50 €. Sortiert nach "
+                    "Dringlichkeit (größte Inversion zuerst)."
                 </p>
 
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
@@ -311,7 +318,7 @@ fn ReportView(r: PricingReport) -> impl IntoView {
                             <th>"Kombination"</th>
                             <th>"Fertige Pizza"</th>
                             <th>"Differenz (klein/groß)"</th>
-                            <th>"Empfehlung"</th>
+                            <th>"Fertige Pizza anheben auf"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -396,7 +403,20 @@ fn IssueRow(i: PricingIssue) -> impl IntoView {
                 {inv_l}
             </td>
             <td>
-                "Extra → " <b>{format_eur(i.suggested_extra_price_cents)}</b>
+                {match (i.suggested_named_small_cents, i.suggested_named_large_cents) {
+                    (Some(s), Some(l)) => view! {
+                        <span>"klein → " <b>{format_eur(s)}</b></span>
+                        <br/>
+                        <span>"groß → " <b>{format_eur(l)}</b></span>
+                    }.into_any(),
+                    (Some(s), None) => view! {
+                        <span>"klein → " <b>{format_eur(s)}</b></span>
+                    }.into_any(),
+                    (None, Some(l)) => view! {
+                        <span>"groß → " <b>{format_eur(l)}</b></span>
+                    }.into_any(),
+                    (None, None) => view! { <span class="muted">"—"</span> }.into_any(),
+                }}
             </td>
         </tr>
     }
