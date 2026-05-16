@@ -279,9 +279,13 @@
   if cleaned.len() == 0 { return [] }
 
   let parse-line(line) = {
-    // Find the last space; if the trailing token contains "€" or is
-    // a bare number, peel it off as the price column.
-    let i = line.position(c => false) // placeholder; Typst lacks rfind
+    // Find the last space by walking the clusters. Typst has no
+    // rfind on str; the loop below collects the highest matching
+    // index in `last-space`. (Earlier versions kept a stray
+    // `.position(c => false)` call here as a placeholder, which
+    // broke under Typst 0.14 — `str.position` was removed and the
+    // residual call errored with "expected string or regex, found
+    // function".)
     let chars = line.clusters()
     let last-space = none
     for (idx, c) in chars.enumerate() {
