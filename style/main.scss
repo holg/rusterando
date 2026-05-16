@@ -619,12 +619,15 @@ main { display: block; width: 100%; }
     padding: 0.4rem 0.4rem;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
+    // grid: ‹ arrow | strip | › arrow | (optional list button).
+    // The 4th column auto-collapses when there's no list-button child.
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: auto 1fr auto auto;
     align-items: center;
     gap: 0.3rem;
 
-    .cat-arrow {
+    .cat-arrow,
+    .cat-list-btn {
       flex: 0 0 auto;
       width: 2.2rem;
       height: 2.2rem;
@@ -632,17 +635,33 @@ main { display: block; width: 100%; }
       border: 1px solid var(--border);
       background: white;
       color: var(--text);
-      font-size: 1.4rem;
       line-height: 1;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: background 120ms, border-color 120ms;
+      transition: background 120ms, border-color 120ms, color 120ms;
       &:hover, &:focus-visible {
         background: var(--accent);
         border-color: var(--primary);
         text-decoration: none;
+      }
+    }
+    .cat-arrow {
+      font-size: 1.4rem;
+    }
+    // List button uses the primary colour as background so it
+    // visually stands out as the "open full category list"
+    // action vs. the lighter arrow scrollers.
+    .cat-list-btn {
+      background: var(--primary);
+      color: white;
+      border-color: var(--primary);
+      svg { display: block; }
+      &:hover, &:focus-visible {
+        background: var(--primary-dark, var(--primary));
+        color: white;
+        border-color: var(--primary-dark, var(--primary));
       }
     }
 
@@ -693,8 +712,14 @@ main { display: block; width: 100%; }
 
   // Phones: header shrinks → sticky-top offset shrinks too.
   @media (max-width: 36rem) {
-    .category-nav { top: 2rem; padding: 0.35rem 0.3rem; }
-    .category-nav .cat-arrow { width: 1.9rem; height: 1.9rem; font-size: 1.2rem; }
+    .category-nav { top: 2rem; padding: 0.35rem 0.3rem; gap: 0.2rem; }
+    .category-nav .cat-arrow,
+    .category-nav .cat-list-btn {
+      width: 1.9rem;
+      height: 1.9rem;
+    }
+    .category-nav .cat-arrow { font-size: 1.2rem; }
+    .category-nav .cat-list-btn svg { width: 16px; height: 16px; }
   }
 
   .category {
@@ -854,37 +879,10 @@ main { display: block; width: 100%; }
   .total { font-variant-numeric: tabular-nums; }
 }
 
-// ----- Floating "Kategorien" FAB + bottom sheet (menu page) -----
-// Sits ABOVE the cart FAB at the bottom-right corner. Opens the
-// category sheet — full-width bottom sheet on phones, side-panel
-// on desktop. Per-shop toggle hides it for single-category shops.
-.category-fab {
-  position: fixed;
-  bottom: 4.8rem;       // clears the cart FAB (~3.5rem tall + 1.2rem gap)
-  right: 1.2rem;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.6rem 1rem;
-  border-radius: 999px;
-  background: var(--bg-elev);
-  color: var(--text);
-  border: 1px solid var(--border);
-  box-shadow: 0 8px 20px rgba(0,0,0,0.12);
-  font-weight: 600;
-  font-size: 0.9rem;
-  cursor: pointer;
-  transition: transform 120ms, background 120ms, border-color 120ms;
-  &:hover, &:focus-visible {
-    background: var(--accent);
-    border-color: var(--primary);
-    transform: translateY(-2px);
-    text-decoration: none;
-  }
-  .icon { font-size: 1.1rem; line-height: 1; }
-}
-
+// ----- Category overlay (menu page) -----
+// Opened by the bullet-list button inside the sticky .category-nav.
+// Bottom sheet on phones, side panel on desktop. Same overlay-click
+// closes pattern as the cart drawer.
 .category-overlay-bg {
   position: fixed;
   inset: 0;

@@ -373,10 +373,17 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
     // Sheet open state — toggled by the floating "Kategorien" FAB.
     let sheet_open: RwSignal<bool> = RwSignal::new(false);
 
-    // Hydrate-side: track which category section is in view and add
-    // `.active` to the matching pill. Single IntersectionObserver
-    // mounted after the DOM is ready; teardown happens when the page
-    // navigates away (Leptos cleanup runs the on_cleanup closure).
+    // Hydrate-side: track which category section is closest to the
+    // top of the viewport (just under the sticky nav) and mark the
+    // matching pill `.active`. Auto-scroll that pill into the centre
+    // of the strip so the customer always sees where they are.
+    //
+    // Replaces the v2 IntersectionObserver approach which had two
+    // bugs: rootMargin doesn't accept rem units (silently rejected
+    // → observer never fired), and the "no section intersecting"
+    // case (between two sections) left no pill marked. A plain
+    // "find the last section whose top ≤ probe-y" computation on
+    // every scroll returns exactly one answer and always works.
     #[cfg(feature = "hydrate")]
     {
         let cat_ids: Vec<String> = categories.iter().map(|c| c.id.clone()).collect();
@@ -384,102 +391,107 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
             use leptos::wasm_bindgen::closure::Closure;
             use leptos::wasm_bindgen::JsCast;
             let Some(win) = web_sys::window() else { return };
-            let Some(doc) = win.document() else { return };
 
-            // Per-observation: find the entry with the highest
-            // intersection ratio and mark its pill .active. Scroll
-            // the pill into view inside the strip so the customer
-            // sees where they are while reading down the menu.
-            let ids_for_cb = cat_ids.clone();
-            let cb = Closure::<dyn Fn(js_sys::Array, web_sys::IntersectionObserver)>::new(
-                move |entries: js_sys::Array, _obs: web_sys::IntersectionObserver| {
-                    let mut best: Option<(String, f64)> = None;
-                    for v in entries.iter() {
-                        let Ok(entry) = v.dyn_into::<web_sys::IntersectionObserverEntry>() else {
-                            continue;
-                        };
-                        if !entry.is_intersecting() {
-                            continue;
-                        }
-                        let id = entry.target().id();
-                        let ratio = entry.intersection_ratio();
-                        if best.as_ref().map(|(_, r)| ratio > *r).unwrap_or(true) {
-                            best = Some((id, ratio));
-                        }
-                    }
-                    let Some((section_id, _)) = best else { return };
-                    // section ids are "cat-<id>"; the tab a is "tab-<id>".
-                    let Some(cat_id) = section_id.strip_prefix("cat-") else {
-                        return;
-                    };
-                    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
-                        return;
-                    };
-                    // Mark .active on the matching pill, clear others.
-                    let strip = doc.query_selector(".category-tabs").ok().flatten();
-                    if let Some(strip) = strip {
-                        if let Ok(pills) = strip.query_selector_all("a[data-cat]") {
-                            for i in 0..pills.length() {
-                                if let Some(node) = pills.item(i) {
-                                    if let Ok(el) = node.dyn_into::<web_sys::Element>() {
-                                        let is_match = el
-                                            .get_attribute("data-cat")
-                                            .map(|v| v == cat_id)
-                                            .unwrap_or(false);
-                                        if is_match {
-                                            el.class_list().add_1("active").ok();
-                                            // Centre the active pill in the
-                                            // strip on every tick. scrollIntoView
-                                            // with `inline: "center"` is the
-                                            // browser-native way; falling back
-                                            // to a manual scroll_left math if
-                                            // unavailable is overkill for now.
-                                            let init = web_sys::ScrollIntoViewOptions::new();
-                                            init.set_behavior(web_sys::ScrollBehavior::Smooth);
-                                            init.set_block(web_sys::ScrollLogicalPosition::Nearest);
-                                            init.set_inline(web_sys::ScrollLogicalPosition::Center);
-                                            el.scroll_into_view_with_scroll_into_view_options(
-                                                &init,
-                                            );
-                                        } else {
-                                            el.class_list().remove_1("active").ok();
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let _ = ids_for_cb.len();
-                },
-            );
-
-            // Configure: a section counts as "active" when at least
-            // 10% of it is visible. rootMargin pulls the top edge
-            // down by 6rem so the sticky header + tabs (~5rem) don't
-            // count as "above" the section.
-            let init = web_sys::IntersectionObserverInit::new();
-            init.set_root_margin("-6rem 0px -50% 0px");
-            init.set_threshold(&js_sys::Array::of3(
-                &wasm_bindgen::JsValue::from_f64(0.0),
-                &wasm_bindgen::JsValue::from_f64(0.1),
-                &wasm_bindgen::JsValue::from_f64(0.4),
-            ));
-            let observer =
-                web_sys::IntersectionObserver::new_with_options(cb.as_ref().unchecked_ref(), &init)
-                    .ok();
-            cb.forget(); // observer outlives the closure; let JS GC it via the observer
-
-            if let Some(observer) = observer {
-                for id in &cat_ids {
+            // The recompute fn: for each .category section, find
+            // the one whose top is closest to (but not below) the
+            // probe line (140px from the viewport top — under the
+            // sticky header + nav). Mark it active; clear the rest.
+            // Clone cat_ids per-tick so the outer Effect closure
+            // stays FnMut (the Rc move would make it FnOnce).
+            let ids = std::rc::Rc::new(cat_ids.clone());
+            let ids_for_recompute = ids.clone();
+            let recompute = move || {
+                let Some(win) = web_sys::window() else { return };
+                let Some(doc) = win.document() else { return };
+                // Probe line: 140px from the top of the viewport,
+                // just under the sticky chain (header ~40px + nav
+                // ~50px + breathing). Tuned empirically.
+                let probe: f64 = 140.0;
+                let mut best: Option<(String, f64)> = None;
+                for id in ids_for_recompute.iter() {
                     let sel = format!("#cat-{id}");
-                    if let Some(target) = doc.query_selector(&sel).ok().flatten() {
-                        observer.observe(&target);
+                    let Some(el) = doc.query_selector(&sel).ok().flatten() else {
+                        continue;
+                    };
+                    let rect = el.get_bounding_client_rect();
+                    let top = rect.top();
+                    if top <= probe && best.as_ref().map(|(_, t)| top > *t).unwrap_or(true) {
+                        best = Some((id.clone(), top));
                     }
                 }
-                // Disconnect when the page unmounts so we don't keep
-                // a dangling observer between SPA navigations.
-                leptos::prelude::on_cleanup(move || observer.disconnect());
-            }
+                // If nothing is above the probe (page just loaded,
+                // user hasn't scrolled), pick the first category.
+                let active_cat = best
+                    .map(|(id, _)| id)
+                    .or_else(|| ids_for_recompute.first().cloned());
+                let Some(active_cat) = active_cat else { return };
+
+                let Some(strip) = doc.query_selector(".category-tabs").ok().flatten() else {
+                    return;
+                };
+                let Ok(pills) = strip.query_selector_all("a[data-cat]") else {
+                    return;
+                };
+                for i in 0..pills.length() {
+                    let Some(node) = pills.item(i) else { continue };
+                    let Ok(el) = node.dyn_into::<web_sys::Element>() else {
+                        continue;
+                    };
+                    let is_match = el
+                        .get_attribute("data-cat")
+                        .map(|v| v == active_cat)
+                        .unwrap_or(false);
+                    if is_match {
+                        if !el.class_list().contains("active") {
+                            el.class_list().add_1("active").ok();
+                            // Only centre when it wasn't already
+                            // active — avoids re-triggering smooth
+                            // scroll on every scroll tick.
+                            let opts = web_sys::ScrollIntoViewOptions::new();
+                            opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+                            opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
+                            opts.set_inline(web_sys::ScrollLogicalPosition::Center);
+                            el.scroll_into_view_with_scroll_into_view_options(&opts);
+                        }
+                    } else {
+                        el.class_list().remove_1("active").ok();
+                    }
+                }
+            };
+
+            // Initial mark on hydrate so the first pill is highlighted
+            // before any scroll happens.
+            recompute();
+
+            // Throttled scroll handler via requestAnimationFrame —
+            // recompute at most once per frame so very long scroll
+            // sessions stay smooth on phones.
+            let pending = std::rc::Rc::new(std::cell::Cell::new(false));
+            let recompute_rc = std::rc::Rc::new(recompute);
+            let pending_for_cb = pending.clone();
+            let recompute_for_cb = recompute_rc.clone();
+            let cb = Closure::<dyn Fn()>::new(move || {
+                if pending_for_cb.get() {
+                    return;
+                }
+                pending_for_cb.set(true);
+                let pending_inner = pending_for_cb.clone();
+                let recompute_inner = recompute_for_cb.clone();
+                let raf_cb = Closure::once_into_js(move || {
+                    pending_inner.set(false);
+                    recompute_inner();
+                });
+                if let Some(win) = web_sys::window() {
+                    let _ = win.request_animation_frame(raf_cb.as_ref().unchecked_ref());
+                }
+            });
+            win.add_event_listener_with_callback("scroll", cb.as_ref().unchecked_ref())
+                .ok();
+            // Also recompute on resize because viewport-height
+            // changes shift our probe line relative to section tops.
+            win.add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref())
+                .ok();
+            cb.forget();
         });
     }
 
@@ -497,12 +509,15 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
                 </p>
             </header>
 
-            // The .category-nav wrapper hosts the horizontal pill strip
-            // PLUS left/right arrow buttons. Sticky on every viewport,
-            // including phones. The .active pill is highlighted +
-            // auto-scrolled into view by a small hydrate-side effect
-            // driven by IntersectionObserver.
-            <CategoryNav cats=cats_for_tabs/>
+            // Sticky .category-nav: ‹ arrow, pill strip, › arrow,
+            // and (when the per-shop overlay setting is on) a
+            // bullet-list button that opens the category sheet.
+            // Everything travels together while scrolling.
+            <CategoryNav
+                cats=cats_for_tabs
+                show_list_button=category_overlay
+                sheet_open
+            />
 
             <div class="categories">
                 {cats_for_sections.into_iter().map(|cat| {
@@ -516,11 +531,10 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
 
             <Legend allergens additives/>
 
-            // Floating "Kategorien" button + full-screen-on-phone
-            // bottom sheet. Per-shop admin toggle hides it for
-            // single-category-list shops.
+            // Side / bottom sheet listing every category. Opened by
+            // the bullet-list button in the sticky nav above. Same
+            // overlay-click-closes pattern as the cart drawer.
             {category_overlay.then(|| view! {
-                <CategoryFab open=sheet_open/>
                 <CategorySheet cats=cats_for_sheet open=sheet_open/>
             })}
         </div>
@@ -528,11 +542,19 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
 }
 
 /// Sticky horizontal pill strip wrapped in a row of left/right scroll
-/// arrows. The arrows + auto-scroll logic depend on `web_sys` so they
-/// only fire on hydrate; SSR renders the strip with the arrows visible
-/// but inert.
+/// arrows + an optional list-overlay button. The list button sits to
+/// the right of the › arrow when the per-shop category-overlay setting
+/// is on; otherwise it's hidden. All controls travel with the sticky
+/// container so they're available everywhere the customer scrolls.
+///
+/// The arrow + auto-scroll logic depends on `web_sys` so it only fires
+/// on hydrate; SSR renders the controls visible but inert.
 #[component]
-fn CategoryNav(cats: Vec<MenuCategory>) -> impl IntoView {
+fn CategoryNav(
+    cats: Vec<MenuCategory>,
+    show_list_button: bool,
+    sheet_open: RwSignal<bool>,
+) -> impl IntoView {
     let scroll_strip = move |dir: i32| {
         #[cfg(feature = "hydrate")]
         {
@@ -577,21 +599,26 @@ fn CategoryNav(cats: Vec<MenuCategory>) -> impl IntoView {
                 on:click=move |_| scroll_strip(1)>
                 "›"
             </button>
+            // List-overlay button next to ›. SVG bullet-list icon
+            // (three horizontal lines + dots) so the meaning is
+            // visually unambiguous. Only renders when the per-shop
+            // `menu_category_overlay` setting is on.
+            {show_list_button.then(|| view! {
+                <button class="cat-list-btn"
+                    aria-label=crate::t!("menu.category_fab_aria")
+                    on:click=move |_| sheet_open.set(true)>
+                    <svg viewBox="0 0 16 16" width="20" height="20"
+                         aria-hidden="true" focusable="false">
+                        <circle cx="2.5" cy="3.5" r="1.3" fill="currentColor"/>
+                        <circle cx="2.5" cy="8" r="1.3" fill="currentColor"/>
+                        <circle cx="2.5" cy="12.5" r="1.3" fill="currentColor"/>
+                        <rect x="5.5" y="2.7" width="9" height="1.6" rx="0.4" fill="currentColor"/>
+                        <rect x="5.5" y="7.2" width="9" height="1.6" rx="0.4" fill="currentColor"/>
+                        <rect x="5.5" y="11.7" width="9" height="1.6" rx="0.4" fill="currentColor"/>
+                    </svg>
+                </button>
+            })}
         </div>
-    }
-}
-
-/// Floating button next to the cart FAB. Click → opens the
-/// category sheet. Independent of the cart's open state.
-#[component]
-fn CategoryFab(open: RwSignal<bool>) -> impl IntoView {
-    view! {
-        <button class="category-fab"
-            aria-label=crate::t!("menu.category_fab_aria")
-            on:click=move |_| open.set(true)>
-            <span class="icon">"📂"</span>
-            <span class="label">{crate::t!("menu.category_fab_label")}</span>
-        </button>
     }
 }
 
@@ -600,13 +627,30 @@ fn CategoryFab(open: RwSignal<bool>) -> impl IntoView {
 /// Uses the same overlay-click-to-close pattern as the cart drawer.
 #[component]
 fn CategorySheet(cats: Vec<MenuCategory>, open: RwSignal<bool>) -> impl IntoView {
-    let is_open = move || open.get();
     let close = move |_| open.set(false);
+    // Use `class=move || ...` instead of `class:open` so SSR + hydrate
+    // emit identical class strings and the reactive update always
+    // re-runs (some `class:` directives skip the initial diff after
+    // hydration if the SSR didn't pre-emit the class, which would
+    // leave the sheet stuck closed).
+    let bg_class = move || {
+        if open.get() {
+            "category-overlay-bg open"
+        } else {
+            "category-overlay-bg"
+        }
+    };
+    let sheet_class = move || {
+        if open.get() {
+            "category-sheet open"
+        } else {
+            "category-sheet"
+        }
+    };
     view! {
-        <div class="category-overlay-bg" class:open=is_open on:click=close></div>
-        <aside class="category-sheet"
-            class:open=is_open
-            aria-hidden=move || (!is_open()).to_string()
+        <div class=bg_class on:click=close></div>
+        <aside class=sheet_class
+            aria-hidden=move || (!open.get()).to_string()
             aria-label=crate::t!("menu.category_sheet_aria")>
             <header class="sheet-head">
                 <h2>{crate::t!("menu.category_sheet_title")}</h2>

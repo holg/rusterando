@@ -65,6 +65,8 @@ web-sys = { version = "0.3", features = [
     "ScrollIntoViewOptions",
     "ScrollBehavior",
     "ScrollLogicalPosition",
+    "DomRect",
+    "DomRectReadOnly",
 ], optional = true }
 
 [features]
