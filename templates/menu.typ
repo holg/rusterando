@@ -279,34 +279,43 @@
   if cleaned.len() == 0 { return [] }
 
   let parse-line(line) = {
-    // Find the last space by walking the clusters. Typst has no
-    // rfind on str; the loop below collects the highest matching
-    // index in `last-space`. (Earlier versions kept a stray
-    // `.position(c => false)` call here as a placeholder, which
-    // broke under Typst 0.14 — `str.position` was removed and the
-    // residual call errored with "expected string or regex, found
-    // function".)
+    // Walk the clusters and find the *leftmost* space such that
+    // everything from there to the end of the line is "price-ish"
+    // (digits, comma/period, currency symbol, whitespace). That
+    // boundary is the start of the price column. Naïvely splitting
+    // on the last space breaks on "Krabben 1 €" — last space sits
+    // between "1" and "€", leaving "1" stranded in the name.
+    let digits = "0123456789"
+    let price-chars = digits + ",.€" + "\u{00A0}"
+    let is-price-char(c) = price-chars.contains(c) or c == " "
     let chars = line.clusters()
-    let last-space = none
-    for (idx, c) in chars.enumerate() {
-      if c == " " { last-space = idx }
+    let split-at = none
+    let i = chars.len()
+    let all-price = true
+    while i > 0 {
+      i = i - 1
+      let c = chars.at(i)
+      if c == " " and all-price {
+        // Only accept this split if the price part actually contains
+        // at least one digit (otherwise the line was all-text and
+        // we'd amputate the last word into a fake price column).
+        let candidate = chars.slice(i + 1).join("")
+        let has-digit = false
+        for d in candidate.clusters() {
+          if digits.contains(d) { has-digit = true }
+        }
+        if has-digit { split-at = i }
+      } else if not is-price-char(c) {
+        all-price = false
+      }
     }
-    if last-space == none {
+    if split-at == none {
       return (line, "")
     }
-    let head = chars.slice(0, last-space).join("")
-    let tail = chars.slice(last-space + 1).join("")
-    // Treat as price if it has a € or starts with a digit.
-    let looks-like-price = (
-      tail.contains("€")
-        or (tail.len() > 0 and "0123456789".contains(tail.first()))
-    )
-    if looks-like-price {
-      // Non-breaking space inside the price so "10,00 €" doesn't wrap.
-      (head.trim(), tail.replace(" ", "\u{00A0}"))
-    } else {
-      (line, "")
-    }
+    let head = chars.slice(0, split-at).join("").trim()
+    let tail = chars.slice(split-at + 1).join("").trim()
+    // Non-breaking space inside the price so "0,60 €" doesn't wrap.
+    (head, tail.replace(" ", "\u{00A0}"))
   }
 
   block(
