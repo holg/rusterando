@@ -143,6 +143,11 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
             "i18n_enabled muss '0' / '1' (oder 'true' / 'false') sein.",
         ));
     }
+    if key == "menu_category_overlay" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
+        return Err(ServerFnError::new(
+            "menu_category_overlay muss '0' / '1' (oder 'true' / 'false') sein.",
+        ));
+    }
     if key == "stripe_mode" {
         // Only the two literal values are accepted. Refuse 'live'
         // when the matching env vars aren't set so the admin can't

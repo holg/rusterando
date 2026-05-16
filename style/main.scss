@@ -606,7 +606,10 @@ main { display: block; width: 100%; }
 
   .category-tabs {
     position: sticky;
-    top: 0;
+    // ~2.5rem matches the .site-header height (0.6rem × 2 padding +
+    // ~1.3rem brand wordmark). Hardcoded literal — if the header
+    // ever grows a sub-row this needs to bump in sync.
+    top: 2.5rem;
     z-index: 10;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
@@ -650,6 +653,40 @@ main { display: block; width: 100%; }
     }
   }
 
+  // Optional always-visible vertical category list, pinned to the
+  // left edge of the viewport. Toggled per shop via the
+  // `menu_category_overlay` app_settings row. Hidden below 60rem
+  // so it never collides with the menu grid on phones / tablets —
+  // there the horizontal tabs are the only nav.
+  .category-overlay {
+    position: fixed;
+    left: 0.6rem;
+    top: 6rem;       // header (2.5rem) + tabs (~2rem) + breathing room
+    z-index: 9;      // below tabs (10) and header (30)
+    max-height: calc(100vh - 7rem);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.6rem;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+    font-size: 0.85rem;
+    a {
+      padding: 0.3rem 0.6rem;
+      border-radius: 0.4rem;
+      color: var(--text);
+      white-space: nowrap;
+      &:hover, &:focus-visible {
+        background: var(--accent);
+        text-decoration: none;
+      }
+    }
+    @media (max-width: 60rem) { display: none; }
+  }
+
   .category {
     margin-bottom: 2.5rem;
     h2 {
@@ -657,7 +694,10 @@ main { display: block; width: 100%; }
       border-bottom: 2px solid var(--accent);
       padding-bottom: 0.3rem;
       margin: 0 0 1rem;
-      scroll-margin-top: 4rem;
+      // Clear both .site-header (~2.5rem) and the sticky
+      // .category-tabs (~2rem) so anchor jumps land just below
+      // the tabs, not behind them.
+      scroll-margin-top: 5rem;
     }
   }
 
@@ -2112,72 +2152,15 @@ button.add-item {
   &:hover { background: #fdecea; }
 }
 
-// Driver board "compact" mode: every card collapses to a one-line
-// header (order-num + address + contact). Details (items, cash, map
-// links, action buttons) live inside <details class="card-details">
-// so the driver can scan a long queue without drowning in info.
-//
-// A dashed divider sits between adjacent cards as a hard visual break,
-// which the driver explicitly asked for.
-.order-card.driver-card.compact,
-.tour-stop.compact {
-  padding: 0.5rem 0.7rem;
-  border-bottom: 1px dashed #b58900;
-  border-radius: 0;
-  background: transparent;
-
-  &:last-child { border-bottom: none; }
-
-  .order-head,
-  .tour-stop-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
-    row-gap: 0.2rem;
-    margin: 0;
-
-    .order-num,
-    strong { font-size: 1rem; }
-
-    .address-line {
-      flex: 1 1 100%;
-      font-weight: 600;
-      font-size: 0.95rem;
-    }
-
-    .contact-line {
-      flex: 1 1 100%;
-      font-size: 0.85rem;
-      color: var(--muted, #666);
-
-      a { color: inherit; text-decoration: underline; }
-    }
-  }
-
-  .card-details {
-    margin-top: 0.4rem;
-
-    summary {
-      cursor: pointer;
-      color: var(--muted, #666);
-      font-size: 0.85rem;
-      padding: 0.1rem 0;
-      list-style: revert;
-    }
-
-    > p { margin: 0.3rem 0; font-size: 0.9rem; }
-    .row { margin-top: 0.4rem; }
-  }
-}
-
-// Tour stop in compact mode keeps the seq pill but the rest follows
-// the same one-line header pattern as driver cards above.
-.tour-stop.compact {
-  background: #fafafa;
-  border-bottom: 1px dashed #b58900;
-
-  .tour-stop-head .seq { /* inherits the existing .seq pill rules */ }
+// Driver-card tour-selection checkbox in the top-right corner of
+// the .order-head row. Pushed to the right with margin-left:auto so
+// the checkbox sits opposite the order number + status pill.
+.driver-card .select-tour-corner {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  input { width: 1.1rem; height: 1.1rem; cursor: pointer; }
 }
 
 // ---------- Pizza extras picker (menu page) ----------

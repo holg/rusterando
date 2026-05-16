@@ -256,7 +256,14 @@ pub async fn update_order_status(id: String, status: String) -> Result<(), Serve
 pub async fn reprint_order(id: String) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
 
-    crate::pages::admin::require_admin().await?;
+    // Admin AND kitchen can reprint — kitchen sees the order list on
+    // /kitchen and needs to recover from a jammed/lost ticket without
+    // pulling the admin in. require_any() lets admins through too.
+    crate::pages::session::ssr::require_any(&[
+        crate::pages::session::Role::Admin,
+        crate::pages::session::Role::Kitchen,
+    ])
+    .await?;
 
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;

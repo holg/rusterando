@@ -240,6 +240,10 @@ pub fn KitchenBoardPage() -> impl IntoView {
     );
 
     let advance = ServerAction::<KitchenAdvance>::new();
+    // Reuse the same server fn admin uses for reprint — its auth was
+    // relaxed to accept the kitchen role too, so this call lands in
+    // the kitchen-printer outbox identically.
+    let reprinter = ServerAction::<crate::pages::admin::orders::ReprintOrder>::new();
     let orders = Resource::new(
         move || advance.version().get(),
         |_| async move { list_kitchen_orders().await },
@@ -257,7 +261,7 @@ pub fn KitchenBoardPage() -> impl IntoView {
             <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
                 {move || orders.get().map(|res| match res {
                     Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                    Ok(data) => view! { <Board data advance/> }.into_any(),
+                    Ok(data) => view! { <Board data advance reprinter/> }.into_any(),
                 })}
             </Suspense>
         </div>
@@ -265,14 +269,18 @@ pub fn KitchenBoardPage() -> impl IntoView {
 }
 
 #[component]
-fn Board(data: KitchenOrders, advance: ServerAction<KitchenAdvance>) -> impl IntoView {
+fn Board(
+    data: KitchenOrders,
+    advance: ServerAction<KitchenAdvance>,
+    reprinter: ServerAction<crate::pages::admin::orders::ReprintOrder>,
+) -> impl IntoView {
     view! {
         <div class="orders-board">
-            <Column title="Eingegangen" rows=data.received.clone() advance
+            <Column title="Eingegangen" rows=data.received.clone() advance reprinter
                 next_status="preparing" next_label="Zubereitung starten"/>
-            <Column title="In Zubereitung" rows=data.preparing.clone() advance
+            <Column title="In Zubereitung" rows=data.preparing.clone() advance reprinter
                 next_status="ready_for_pickup" next_label="Abholbereit / Lieferbereit"/>
-            <Column title="Fertig" rows=data.ready.clone() advance
+            <Column title="Fertig" rows=data.ready.clone() advance reprinter
                 next_status="received" next_label=""/>
         </div>
     }
@@ -283,6 +291,7 @@ fn Column(
     title: &'static str,
     rows: Vec<KitchenOrderRow>,
     advance: ServerAction<KitchenAdvance>,
+    reprinter: ServerAction<crate::pages::admin::orders::ReprintOrder>,
     next_status: &'static str,
     next_label: &'static str,
 ) -> impl IntoView {
@@ -296,7 +305,7 @@ fn Column(
                 view! {
                     <ul>
                         {rows.into_iter().map(|r| view! {
-                            <Card r advance next_status next_label/>
+                            <Card r advance reprinter next_status next_label/>
                         }).collect_view()}
                     </ul>
                 }.into_any()
@@ -309,6 +318,7 @@ fn Column(
 fn Card(
     r: KitchenOrderRow,
     advance: ServerAction<KitchenAdvance>,
+    reprinter: ServerAction<crate::pages::admin::orders::ReprintOrder>,
     next_status: &'static str,
     next_label: &'static str,
 ) -> impl IntoView {
@@ -318,6 +328,12 @@ fn Card(
         advance.dispatch(KitchenAdvance {
             id: id_for_advance.clone(),
             status: next.clone(),
+        });
+    };
+    let id_for_reprint = r.id.clone();
+    let on_reprint = move |_| {
+        reprinter.dispatch(crate::pages::admin::orders::ReprintOrder {
+            id: id_for_reprint.clone(),
         });
     };
     let is_delivery = r.order_type == "delivery";
@@ -355,6 +371,10 @@ fn Card(
                 } else {
                     view! { <button class="btn primary" on:click=on_advance>{next_label}</button> }.into_any()
                 }}
+                <button class="btn ghost" on:click=on_reprint
+                    disabled=move || reprinter.pending().get()>
+                    "🖨 Erneut drucken"
+                </button>
             </div>
         </li>
     }

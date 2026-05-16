@@ -337,6 +337,7 @@ fn Editor(
         allergens,
         additives,
         shop_phone: _,
+        category_overlay: _,
     } = payload;
     let cats_for_select: Vec<MenuCategory> = categories.clone();
 

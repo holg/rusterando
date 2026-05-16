@@ -68,7 +68,8 @@
     "extras_flat_each": "Chaque garniture {amount}.",
     "extras_first_n_free": "Les {n} premières garnitures sont incluses.",
     "extras_first_n_then_flat": "Les {n} premières garnitures sont incluses, chaque suivante {amount}.",
-    "unavailable": "actuellement indisponible"
+    "unavailable": "actuellement indisponible",
+    "category_overlay_aria": "Aperçu des catégories"
   },
   "cart": {
     "title": "Panier",

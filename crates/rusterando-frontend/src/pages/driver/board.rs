@@ -473,41 +473,41 @@ fn ReadyCard(
         "Online bezahlt".to_string()
     };
 
+    // Full admin-orders-style card. No more <details> collapsing —
+    // everything the driver needs to make a routing decision (items,
+    // cash, address, notes) is visible at a glance. Tour selection
+    // checkbox sits at the right edge of the head row instead of
+    // wrapping the order number.
     view! {
-        <li class="order-card driver-card compact" class:selected=is_checked>
+        <li class="order-card driver-card" class:selected=is_checked>
             <div class="order-head">
-                <label class="select-tour">
+                <strong class="order-num">{r.order_number}</strong>
+                <span class="status-pill" data-status=r.status.clone()>
+                    {status_label_de(&r.status)}
+                </span>
+                <label class="select-tour-corner" title="Für Tour auswählen">
                     <input type="checkbox"
                         prop:checked=move || is_checked.get()
                         on:change=move |ev| {
                             toggle_selected.run((id_for_check.clone(), event_target_checked(&ev)));
                         }/>
-                    <strong class="order-num">{r.order_number}</strong>
                 </label>
-                <span class="address-line">{r.address_line.clone()}</span>
-                <span class="contact-line">
-                    {r.contact_name.clone()} " · "
-                    <a href=tel_url.clone()>{r.contact_phone.clone()}</a>
-                </span>
             </div>
-            <details class="card-details">
-                <summary>"Details"</summary>
-                <p class="muted">
-                    <span class="status-pill" data-status=r.status.clone()>
-                        {status_label_de(&r.status)}
-                    </span>
-                    " · " {format!("Liefergebiet: {}", r.zone)}
-                </p>
-                {r.address_notes.map(|n| view! {
-                    <p class="muted">{format!("Hinweis: {n}")}</p>
-                })}
-                <p class="items">{r.items_summary}</p>
-                <p class={if needs_cash { "cash" } else { "muted" }}>{cash_label}</p>
-                <div class="row map-links">
-                    <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
-                    <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
-                </div>
-            </details>
+            <p class="contact">
+                {r.contact_name.clone()} " · "
+                <a href=tel_url.clone()>{r.contact_phone.clone()}</a>
+            </p>
+            <p class="address">"📍 " {r.address_line.clone()}</p>
+            <p class="muted small">{format!("Liefergebiet: {}", r.zone)}</p>
+            {r.address_notes.clone().map(|n| view! {
+                <p class="muted small">{format!("Hinweis: {n}")}</p>
+            })}
+            <p class="items">{r.items_summary}</p>
+            <p class={if needs_cash { "cash" } else { "total" }}>{cash_label}</p>
+            <div class="row">
+                <a class="btn ghost" href=apple_url>"🗺 Apple"</a>
+                <a class="btn ghost" href=google_url>"🗺 Google"</a>
+            </div>
         </li>
     }
 }
@@ -667,35 +667,44 @@ fn TourStopRow(
         format!("ETA +{mins} Min.")
     });
 
+    let cash_label = if needs_cash {
+        format!("BAR: {}", format_eur(s.total_cents))
+    } else {
+        "Online bezahlt".to_string()
+    };
+
+    // Tour stops use the same .order-card markup as ready cards
+    // (admin-orders style). Sequence number is the badge in the head;
+    // everything else is inline. No <details> collapse.
     view! {
-        <li class=move || if delivered { "tour-stop done compact" } else { "tour-stop compact" }>
-            <div class="tour-stop-head">
+        <li class=move || if delivered { "order-card tour-stop done" } else { "order-card tour-stop" }>
+            <div class="order-head">
                 <span class="seq">{seq + 1}</span>
-                <strong>{s.order_number.clone()}</strong>
-                <span class="address-line">{s.address_line.clone()}</span>
-                <span class="contact-line">
-                    {s.contact_name.clone()} " · "
-                    <a href=tel_url.clone()>{s.contact_phone.clone()}</a>
-                </span>
-                {eta_label.clone().map(|l| view! { <span class="muted">{l}</span> })}
-                {delivered.then(|| view! { <span class="status-pill" data-status="delivered">"Geliefert"</span> })}
+                <strong class="order-num">{s.order_number.clone()}</strong>
+                {delivered
+                    .then(|| view! {
+                        <span class="status-pill" data-status="delivered">"Geliefert"</span>
+                    })}
+                {eta_label.clone().map(|l| view! {
+                    <span class="muted small">{l}</span>
+                })}
             </div>
-            <details class="card-details">
-                <summary>"Details"</summary>
-                <p class={if needs_cash && !delivered { "cash" } else { "muted" }}>
-                    {if needs_cash { format!("BAR: {}", format_eur(s.total_cents)) } else { "Online bezahlt".to_string() }}
-                </p>
-                <div class="row map-links">
-                    <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
-                    <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
-                    {(!delivered).then(|| view! {
-                        <button class="btn primary small" on:click=on_delivered>"Geliefert"</button>
-                    })}
-                    {(!delivered).then(|| view! {
-                        <button class="btn ghost small" on:click=on_revert>"↩ zurücknehmen"</button>
-                    })}
-                </div>
-            </details>
+            <p class="contact">
+                {s.contact_name.clone()} " · "
+                <a href=tel_url.clone()>{s.contact_phone.clone()}</a>
+            </p>
+            <p class="address">"📍 " {s.address_line.clone()}</p>
+            <p class={if needs_cash && !delivered { "cash" } else { "total" }}>{cash_label}</p>
+            <div class="row">
+                <a class="btn ghost" href=apple_url>"🗺 Apple"</a>
+                <a class="btn ghost" href=google_url>"🗺 Google"</a>
+                {(!delivered).then(|| view! {
+                    <button class="btn primary" on:click=on_delivered>"✓ Geliefert"</button>
+                })}
+                {(!delivered).then(|| view! {
+                    <button class="btn ghost" on:click=on_revert>"↩ Zurück"</button>
+                })}
+            </div>
         </li>
     }
 }
@@ -734,37 +743,38 @@ fn LooseCard(r: DriverOrderRow, advance: ServerAction<DriverAdvance>) -> impl In
     let (apple_url, google_url) = map_links(&r.address_line, None, None);
     let tel_url = format!("tel:{}", r.contact_phone);
     let needs_cash = r.payment_status == "cash_on_pickup";
+    let cash_label = if needs_cash {
+        format!("BAR: {}", format_eur(r.total_cents))
+    } else {
+        "Online bezahlt".to_string()
+    };
 
+    // Legacy single orders out for delivery without a tour. Same
+    // admin-orders card shape as the ready / tour-stop cards — no
+    // <details>, all info inline, action row at the bottom.
     view! {
-        <li class="order-card driver-card compact">
+        <li class="order-card driver-card">
             <div class="order-head">
                 <strong class="order-num">{r.order_number}</strong>
-                <span class="address-line">{r.address_line.clone()}</span>
-                <span class="contact-line">
-                    {r.contact_name.clone()} " · "
-                    <a href=tel_url.clone()>{r.contact_phone.clone()}</a>
+                <span class="status-pill" data-status=r.status.clone()>
+                    {status_label_de(&r.status)}
                 </span>
             </div>
-            <details class="card-details">
-                <summary>"Details"</summary>
-                <p class="muted">
-                    <span class="status-pill" data-status=r.status.clone()>
-                        {status_label_de(&r.status)}
-                    </span>
-                    " · " {format!("Liefergebiet: {}", r.zone)}
-                </p>
-                {r.address_notes.map(|n| view! {
-                    <p class="muted">{format!("Hinweis: {n}")}</p>
-                })}
-                <p class={if needs_cash { "cash" } else { "muted" }}>
-                    {if needs_cash { format!("BAR: {}", format_eur(r.total_cents)) } else { "Online bezahlt".to_string() }}
-                </p>
-                <div class="row map-links">
-                    <a class="btn ghost small" href=apple_url>"🗺 Apple Maps"</a>
-                    <a class="btn ghost small" href=google_url>"🗺 Google Maps"</a>
-                    <button class="btn primary" on:click=on_advance>"Geliefert"</button>
-                </div>
-            </details>
+            <p class="contact">
+                {r.contact_name.clone()} " · "
+                <a href=tel_url.clone()>{r.contact_phone.clone()}</a>
+            </p>
+            <p class="address">"📍 " {r.address_line.clone()}</p>
+            <p class="muted small">{format!("Liefergebiet: {}", r.zone)}</p>
+            {r.address_notes.clone().map(|n| view! {
+                <p class="muted small">{format!("Hinweis: {n}")}</p>
+            })}
+            <p class={if needs_cash { "cash" } else { "total" }}>{cash_label}</p>
+            <div class="row">
+                <a class="btn ghost" href=apple_url>"🗺 Apple"</a>
+                <a class="btn ghost" href=google_url>"🗺 Google"</a>
+                <button class="btn primary" on:click=on_advance>"✓ Geliefert"</button>
+            </div>
         </li>
     }
 }

@@ -68,7 +68,8 @@
     "extras_flat_each": "每种配料 {amount}。",
     "extras_first_n_free": "前 {n} 种配料免费。",
     "extras_first_n_then_flat": "前 {n} 种配料免费,每多一种 {amount}。",
-    "unavailable": "暂时不可用"
+    "unavailable": "暂时不可用",
+    "category_overlay_aria": "分类总览"
   },
   "cart": {
     "title": "购物车",

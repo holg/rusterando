@@ -64,12 +64,25 @@ pub async fn list_menu() -> Result<MenuPayload, ServerFnError> {
         .map(|h| h.get().shop_phone)
         .unwrap_or_default();
 
+    // Per-shop toggle for the always-visible category sidebar. Stored
+    // as '0'/'1' (or 'true'/'false') in the generic app_settings table.
+    let category_overlay = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM app_settings WHERE key = 'menu_category_overlay'",
+    )
+    .fetch_optional(&db)
+    .await
+    .ok()
+    .flatten()
+    .map(|v| matches!(v.as_str(), "1" | "true"))
+    .unwrap_or(false);
+
     Ok(MenuPayload {
         categories,
         items,
         allergens,
         additives,
         shop_phone,
+        category_overlay,
     })
 }
 
@@ -131,12 +144,25 @@ pub async fn list_admin_menu() -> Result<MenuPayload, ServerFnError> {
         .map(|h| h.get().shop_phone)
         .unwrap_or_default();
 
+    // Same toggle the public payload carries — admin UI doesn't show
+    // an overlay, but the shape stays in sync.
+    let category_overlay = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM app_settings WHERE key = 'menu_category_overlay'",
+    )
+    .fetch_optional(&db)
+    .await
+    .ok()
+    .flatten()
+    .map(|v| matches!(v.as_str(), "1" | "true"))
+    .unwrap_or(false);
+
     Ok(MenuPayload {
         categories,
         items,
         allergens,
         additives,
         shop_phone,
+        category_overlay,
     })
 }
 
@@ -331,6 +357,7 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
         allergens,
         additives,
         shop_phone: phone,
+        category_overlay,
     } = payload;
 
     // Provide the resolved extras catalog to every Card via context. The
@@ -340,6 +367,7 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
     provide_context(extras_sv);
 
     let cats_for_tabs = categories.clone();
+    let cats_for_overlay = categories.clone();
     let cats_for_sections = categories.clone();
 
     view! {
@@ -362,6 +390,18 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
                     view! { <a href=href>{c.name.clone()}</a> }
                 }).collect_view()}
             </nav>
+
+            // Optional always-visible category list, per-shop toggle.
+            // Hidden on viewports < 60rem via CSS — phones stay on
+            // the horizontal tabs alone.
+            {category_overlay.then(|| view! {
+                <aside class="category-overlay" aria-label=crate::t!("menu.category_overlay_aria")>
+                    {cats_for_overlay.into_iter().map(|c| {
+                        let href = format!("#cat-{}", c.id);
+                        view! { <a href=href>{c.name.clone()}</a> }
+                    }).collect_view()}
+                </aside>
+            })}
 
             <div class="categories">
                 {cats_for_sections.into_iter().map(|cat| {

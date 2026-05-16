@@ -68,7 +68,8 @@
     "extras_flat_each": "Каждый ингредиент {amount}.",
     "extras_first_n_free": "Первые {n} ингредиентов включены.",
     "extras_first_n_then_flat": "Первые {n} ингредиентов включены, каждый дополнительный {amount}.",
-    "unavailable": "сейчас недоступно"
+    "unavailable": "сейчас недоступно",
+    "category_overlay_aria": "Обзор категорий"
   },
   "cart": {
     "title": "Корзина",

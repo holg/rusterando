@@ -68,7 +68,8 @@
     "extras_flat_each": "Each topping {amount}.",
     "extras_first_n_free": "The first {n} toppings are included.",
     "extras_first_n_then_flat": "The first {n} toppings are included, each additional {amount}.",
-    "unavailable": "currently unavailable"
+    "unavailable": "currently unavailable",
+    "category_overlay_aria": "Category overview"
   },
   "cart": {
     "title": "Cart",

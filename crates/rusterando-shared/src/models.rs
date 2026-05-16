@@ -77,6 +77,11 @@ pub struct MenuPayload {
     /// the component) so SSR and hydrate render the same DOM.
     #[serde(default)]
     pub shop_phone: String,
+    /// Per-shop toggle for the always-visible category list on the
+    /// menu page. Read from `app_settings.menu_category_overlay`. Off
+    /// by default; toggled in `/admin/settings`.
+    #[serde(default)]
+    pub category_overlay: bool,
 }
 
 /// Which size was chosen for a pizza when adding to the cart. `Single` for

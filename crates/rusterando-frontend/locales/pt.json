@@ -68,7 +68,8 @@
     "extras_flat_each": "Cada ingrediente {amount}.",
     "extras_first_n_free": "Os primeiros {n} ingredientes estão incluídos.",
     "extras_first_n_then_flat": "Os primeiros {n} ingredientes estão incluídos, cada adicional {amount}.",
-    "unavailable": "indisponível de momento"
+    "unavailable": "indisponível de momento",
+    "category_overlay_aria": "Visão geral das categorias"
   },
   "cart": {
     "title": "Carrinho",
