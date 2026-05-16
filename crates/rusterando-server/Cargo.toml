@@ -22,6 +22,16 @@ default = []
 # smoke-testing the printer chain without going through Stripe. NEVER
 # enable in production builds.
 debug-inject = []
+# Pass-through to rusterando-frontend's i18n feature. Required because
+# cargo-leptos's --bin-features applies to THIS crate; without the
+# pass-through, `cargo build --features ssr,i18n` errors with "no such
+# feature". Activating it only forwards to the frontend dep — there's
+# no server-side code gated on it directly.
+i18n = ["rusterando-frontend/i18n"]
+# `ssr` is implicit in our setup (the frontend dep already pulls in
+# ssr); we re-declare it as a feature here only so cargo-leptos's
+# --bin-features=ssr,i18n syntax is valid. No-op activation.
+ssr = []
 
 [dependencies]
 rusterando-shared = { workspace = true }

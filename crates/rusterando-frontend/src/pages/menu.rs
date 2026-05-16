@@ -18,8 +18,11 @@ pub async fn list_menu() -> Result<MenuPayload, ServerFnError> {
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
+    let cat_name = crate::i18n::coalesce_col("name", "");
     let cat_rows = sqlx::query_as::<_, (String, String, i64)>(
-        "SELECT id, name, sort_order FROM menu_categories WHERE is_active = 1 ORDER BY sort_order",
+        &format!(
+            "SELECT id, {cat_name} AS name, sort_order FROM menu_categories WHERE is_active = 1 ORDER BY sort_order"
+        ),
     )
     .fetch_all(&db)
     .await
@@ -165,8 +168,20 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
     }
 
     let where_clause = if admin { "" } else { "WHERE is_listed = 1" };
+    // Admin loader keeps the canonical DE columns so the edit form shows
+    // the source text. Customer-facing loader picks the active locale.
+    let name_col = if admin {
+        "name".to_string()
+    } else {
+        crate::i18n::coalesce_col("name", "")
+    };
+    let desc_col = if admin {
+        "description".to_string()
+    } else {
+        crate::i18n::coalesce_col("description", "")
+    };
     let sql = format!(
-        "SELECT id, category_id, menu_number, name, description, item_type,
+        "SELECT id, category_id, menu_number, {name_col} AS name, {desc_col} AS description, item_type,
                 price_small_cents, price_large_cents, size_small_label, size_large_label,
                 allergen_codes, additive_codes, is_spicy, is_available, is_listed, sort_order,
                 included_extras_count, flat_extra_price_cents, allow_extras
@@ -186,27 +201,47 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
     use rusterando_shared::models::{OptionGroup, OptionItem};
     use std::collections::HashMap;
 
-    let group_rows = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(
-        "SELECT mg.menu_item_id, g.id, g.label, g.min_select, g.max_select, g.sort_order
+    let group_label = if admin {
+        "g.label".to_string()
+    } else {
+        // Manual COALESCE here because coalesce_col() doesn't yet handle
+        // the table-alias prefix `g.` — we only have one consumer of this
+        // exact pattern so the inline version is OK.
+        let loc = crate::i18n::current_locale();
+        if loc == crate::i18n::Locale::DEFAULT {
+            "g.label".to_string()
+        } else {
+            format!("COALESCE(g.label_{lang}, g.label)", lang = loc.code())
+        }
+    };
+    let group_sql = format!(
+        "SELECT mg.menu_item_id, g.id, {group_label} AS label, g.min_select, g.max_select, g.sort_order
          FROM menu_item_option_groups mg
          JOIN item_option_groups g ON g.id = mg.group_id
          WHERE g.is_active = 1
-         ORDER BY mg.menu_item_id, g.sort_order, g.id",
-    )
-    .fetch_all(db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("load option groups: {e}")))?;
+         ORDER BY mg.menu_item_id, g.sort_order, g.id"
+    );
+    let group_rows = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(&group_sql)
+        .fetch_all(db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("load option groups: {e}")))?;
 
     // group_id → Vec<OptionItem>
-    let option_rows = sqlx::query_as::<_, (String, String, String, i64, i64)>(
-        "SELECT group_id, id, label, price_cents, sort_order
+    let option_label = if admin {
+        "label".to_string()
+    } else {
+        crate::i18n::coalesce_col("label", "")
+    };
+    let option_sql = format!(
+        "SELECT group_id, id, {option_label} AS label, price_cents, sort_order
          FROM item_options
          WHERE is_active = 1
-         ORDER BY group_id, sort_order, id",
-    )
-    .fetch_all(db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("load options: {e}")))?;
+         ORDER BY group_id, sort_order, id"
+    );
+    let option_rows = sqlx::query_as::<_, (String, String, String, i64, i64)>(&option_sql)
+        .fetch_all(db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("load options: {e}")))?;
 
     let mut options_by_group: HashMap<String, Vec<OptionItem>> = HashMap::new();
     for (gid, oid, label, price_cents, sort_order) in option_rows {
@@ -275,10 +310,10 @@ pub fn MenuPage() -> impl IntoView {
     });
 
     view! {
-        <Suspense fallback=|| view! { <p class="loading">"Speisekarte lädt…"</p> }>
+        <Suspense fallback=|| view! { <p class="loading">{crate::t!("menu.loading")}</p> }>
             {move || combined.get().map(|(menu_res, extras)| match menu_res {
                 Err(e) => view! {
-                    <p class="error">{format!("Fehler beim Laden der Speisekarte: {e}")}</p>
+                    <p class="error">{crate::t!("menu.load_error").replace("{err}", &e.to_string())}</p>
                 }.into_any(),
                 Ok(payload) => view! {
                     <MenuView payload extras=extras.clone()/>
@@ -310,13 +345,13 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
     view! {
         <div class="menu">
             <header class="menu-header">
-                <h1>"Speisekarte"</h1>
+                <h1>{crate::t!("menu.title")}</h1>
                 {(!phone.is_empty()).then(|| view! {
-                    <p>{format!("Telefonisch bestellen: {phone}")}</p>
+                    <p>{crate::t!("menu.phone_hint").replace("{phone}", &phone)}</p>
                 })}
                 <p>
                     <a class="pdf-link" href="/menu.pdf" target="_blank" rel="noopener">
-                        "📄 Speisekarte als PDF"
+                        {format!("📄 {}", crate::t!("home.qr_pdf_title"))}
                     </a>
                 </p>
             </header>
@@ -347,7 +382,7 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
 fn Legend(allergens: Vec<LegendEntry>, additives: Vec<LegendEntry>) -> impl IntoView {
     view! {
         <section class="legend" id="legend">
-            <h2>"Allergene & Zusatzstoffe"</h2>
+            <h2>{crate::t!("menu.legend_title")}</h2>
             <p class="legend-intro">
                 "Gemäß EU-Verordnung 1169/2011. Die Buchstaben hinter den Speisen kennzeichnen \
                  Allergene, die Zahlen Zusatzstoffe."
@@ -355,7 +390,7 @@ fn Legend(allergens: Vec<LegendEntry>, additives: Vec<LegendEntry>) -> impl Into
 
             <div class="legend-grid">
                 <div>
-                    <h3>"Allergene"</h3>
+                    <h3>{crate::t!("menu.allergens_heading")}</h3>
                     <dl>
                         {allergens.into_iter().map(|e| {
                             let id = format!("allergen-{}", e.code);
@@ -369,7 +404,7 @@ fn Legend(allergens: Vec<LegendEntry>, additives: Vec<LegendEntry>) -> impl Into
                     </dl>
                 </div>
                 <div>
-                    <h3>"Zusatzstoffe"</h3>
+                    <h3>{crate::t!("menu.additives_heading")}</h3>
                     <dl>
                         {additives.into_iter().map(|e| {
                             let id = format!("additive-{}", code_to_anchor(&e.code));
@@ -411,7 +446,10 @@ fn CategorySection(cat: MenuCategory, items: Vec<MenuItem>) -> impl IntoView {
 
 #[component]
 fn Card(it: MenuItem) -> impl IntoView {
-    let number = it.menu_number.clone().map(|n| format!("Nr. {n}"));
+    let number = it
+        .menu_number
+        .clone()
+        .map(|n| crate::t!("menu.menu_number_prefix").replace("{n}", &n));
     let allergens = it.allergen_codes.clone().filter(|s| !s.is_empty());
     let additives = it.additive_codes.clone().filter(|s| !s.is_empty());
     let unavailable = !it.is_available;
@@ -600,7 +638,7 @@ fn Card(it: MenuItem) -> impl IntoView {
             <div class="codes">
                 {allergens.map(|s| view! {
                     <span class="codeset allergens">
-                        <span class="label">"Allergene:"</span>
+                        <span class="label">{crate::t!("menu.allergens_label")}</span>
                         {split_codes(&s).into_iter().map(|c| {
                             let href = format!("#allergen-{c}");
                             view! { <a class="code" href=href>{c}</a> }
@@ -609,7 +647,7 @@ fn Card(it: MenuItem) -> impl IntoView {
                 })}
                 {additives.map(|s| view! {
                     <span class="codeset additives">
-                        <span class="label">"Zusatzstoffe:"</span>
+                        <span class="label">{crate::t!("menu.additives_label")}</span>
                         {split_codes(&s).into_iter().map(|c| {
                             let href = format!("#additive-{}", code_to_anchor(&c));
                             view! { <a class="code" href=href>{c}</a> }
@@ -654,7 +692,7 @@ fn Card(it: MenuItem) -> impl IntoView {
                         <button class="add wide"
                             disabled=move || unavailable || !options_valid.get()
                             on:click=add_small>
-                            <span class="add-size">"Hinzufügen"</span>
+                            <span class="add-size">{crate::t!("menu.add_to_size")}</span>
                             <span class="add-price">
                                 {move || format_eur(small_price + extras_sum_cents.get() + options_sum_cents.get())}
                             </span>
@@ -662,7 +700,7 @@ fn Card(it: MenuItem) -> impl IntoView {
                     }.into_any()
                 }}
             </div>
-            {unavailable.then(|| view! { <p class="oos">"derzeit nicht verfügbar"</p> })}
+            {unavailable.then(|| view! { <p class="oos">{crate::t!("menu.unavailable")}</p> })}
         </article>
     }
 }
@@ -694,16 +732,19 @@ fn ExtrasPicker(
     }
     let hint = match (included, flat_override) {
         (0, None) => None,
-        (0, Some(flat)) => Some(format!("Jede Zutat {}.", format_eur(flat))),
-        (n, None) => Some(format!("Die ersten {n} Zutaten sind inklusive.")),
-        (n, Some(flat)) => Some(format!(
-            "Die ersten {n} Zutaten sind inklusive, jede weitere {}.",
-            format_eur(flat)
-        )),
+        (0, Some(flat)) => {
+            Some(crate::t!("menu.extras_flat_each").replace("{amount}", &format_eur(flat)))
+        }
+        (n, None) => Some(crate::t!("menu.extras_first_n_free").replace("{n}", &n.to_string())),
+        (n, Some(flat)) => Some(
+            crate::t!("menu.extras_first_n_then_flat")
+                .replace("{n}", &n.to_string())
+                .replace("{amount}", &format_eur(flat)),
+        ),
     };
     view! {
         <details class="extras-picker">
-            <summary>"Extras hinzufügen"</summary>
+            <summary>{crate::t!("menu.expand_extras")}</summary>
             {hint.map(|h| view! { <p class="extras-hint">{h}</p> })}
             <ul class="extras-list">
                 {list.into_iter().map(|ex| {
@@ -849,7 +890,9 @@ fn OptionGroupsPicker(
                         </ul>
                         {(!single && min_select > 0).then(|| view! {
                             <p class="option-hint">
-                                {format!("Bitte {min_select}–{max_select} auswählen.")}
+                                {crate::t!("menu.options_choose_n")
+                                    .replace("{min}", &min_select.to_string())
+                                    .replace("{max}", &max_select.to_string())}
                             </p>
                         })}
                     </fieldset>

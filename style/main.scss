@@ -159,6 +159,24 @@ input[type="number"], input[type="password"], input[type="text"] {
       color: white;
     }
   }
+  // Locale switcher (i18n feature only). Plain <select> styled to
+  // sit next to the pill nav without competing with it.
+  .locale-switcher {
+    appearance: none;
+    -webkit-appearance: none;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.4rem 1.6rem 0.4rem 0.8rem;
+    background: white;
+    color: var(--text);
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path fill='%23666' d='M2 4l4 4 4-4z'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 0.5rem center;
+    background-size: 0.6rem;
+  }
 
   @media (max-width: 36rem) {
     padding: 0.5rem 0.7rem;

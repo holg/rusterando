@@ -84,7 +84,7 @@ pub fn CartFab() -> impl IntoView {
     // tag.
     view! {
         <Suspense fallback=|| view! {
-            <button class="cart-fab hidden" aria-label="Warenkorb öffnen" aria-hidden="true">
+            <button class="cart-fab hidden" aria-label=crate::t!("cart.fab_open_aria") aria-hidden="true">
                 <span class="icon">"🛒"</span>
                 <span class="count">{0}</span>
                 <span class="total">"0,00 €"</span>
@@ -97,7 +97,7 @@ pub fn CartFab() -> impl IntoView {
                 let cls = if count > 0 { "cart-fab" } else { "cart-fab hidden" };
                 let aria = if count > 0 { "false" } else { "true" };
                 view! {
-                    <button class=cls aria-label="Warenkorb öffnen" aria-hidden=aria
+                    <button class=cls aria-label=crate::t!("cart.fab_open_aria") aria-hidden=aria
                             on:click=move |_| ctx.open.set(true)>
                         <span class="icon">"🛒"</span>
                         <span class="count">{count}</span>
@@ -120,8 +120,8 @@ pub fn CartDrawer() -> impl IntoView {
         <div class="cart-overlay" class:open=is_open on:click=close></div>
         <aside class="cart-drawer" class:open=is_open aria-hidden=move || (!is_open()).to_string()>
             <header class="drawer-head">
-                <h2>"Warenkorb"</h2>
-                <button class="close" aria-label="Schließen" on:click=close>"×"</button>
+                <h2>{crate::t!("cart.title")}</h2>
+                <button class="close" aria-label=crate::t!("common.close") on:click=close>"×"</button>
             </header>
 
             // <Suspense> wrap for the resource read. The fallback
@@ -134,11 +134,11 @@ pub fn CartDrawer() -> impl IntoView {
             // resolved on the client and tachys is past the initial
             // hydrate walk.
             <div class="drawer-body">
-                <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+                <Suspense fallback=|| view! { <p class="loading">{crate::t!("common.loading")}</p> }>
                     {move || ctx.cart.get().map(|res| match res {
-                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                        Err(e) => view! { <p class="error">{format!("{}: {e}", crate::t!("common.error"))}</p> }.into_any(),
                         Ok(cart) if cart.lines.is_empty() => {
-                            view! { <p class="empty">"Ihr Warenkorb ist leer."</p> }.into_any()
+                            view! { <p class="empty">{crate::t!("cart.empty")}</p> }.into_any()
                         }
                         Ok(cart) => view! { <Lines cart/> }.into_any(),
                     })}
@@ -154,13 +154,13 @@ pub fn CartDrawer() -> impl IntoView {
                 // trip on element-cast mismatches.
                 <Suspense fallback=|| view! {
                     <div class="row">
-                        <span>"Zwischensumme"</span>
+                        <span>{crate::t!("cart.subtotal")}</span>
                         <strong>"…"</strong>
                     </div>
                     <p class="free-delivery hidden"></p>
-                    <p class="hint">"Zahlung an der Kasse oder online beim Bestellen."</p>
-                    <a class="btn primary disabled" href="/checkout">"Zur Kasse"</a>
-                    <button class="btn ghost" disabled=true>"Warenkorb leeren"</button>
+                    <p class="hint">{crate::t!("cart.payment_hint")}</p>
+                    <a class="btn primary disabled" href="/checkout">{crate::t!("cart.proceed")}</a>
+                    <button class="btn ghost" disabled=true>{crate::t!("cart.clear")}</button>
                 }>
                     {move || {
                         let cart = ctx.cart.get().and_then(|r| r.ok()).unwrap_or_default();
@@ -170,11 +170,12 @@ pub fn CartDrawer() -> impl IntoView {
                         let unlocked = threshold > 0 && cart.subtotal_cents >= threshold;
                         let missing = (threshold - cart.subtotal_cents).max(0);
                         let (banner_cls, banner_text) = if threshold > 0 && unlocked {
-                            ("free-delivery ok", "✓ Lieferung kostenlos".to_string())
+                            ("free-delivery ok", crate::t!("cart.free_delivery_unlocked"))
                         } else if threshold > 0 && !unlocked && has_items {
                             (
                                 "free-delivery hint",
-                                format!("Noch {} bis kostenlose Lieferung.", format_eur(missing)),
+                                crate::t!("cart.free_delivery_progress")
+                                    .replace("{amount}", &format_eur(missing)),
                             )
                         } else {
                             ("free-delivery hidden", String::new())
@@ -182,16 +183,16 @@ pub fn CartDrawer() -> impl IntoView {
                         let cta_cls = if has_items { "btn primary" } else { "btn primary disabled" };
                         view! {
                             <div class="row">
-                                <span>"Zwischensumme"</span>
+                                <span>{crate::t!("cart.subtotal")}</span>
                                 <strong>{total}</strong>
                             </div>
                             <p class=banner_cls>{banner_text}</p>
-                            <p class="hint">"Zahlung an der Kasse oder online beim Bestellen."</p>
-                            <a class=cta_cls href="/checkout" on:click=close>"Zur Kasse"</a>
+                            <p class="hint">{crate::t!("cart.payment_hint")}</p>
+                            <a class=cta_cls href="/checkout" on:click=close>{crate::t!("cart.proceed")}</a>
                             <button class="btn ghost"
                                 disabled=!has_items
                                 on:click=move |_| { ctx.clear.dispatch(ClearCart {}); }>
-                                "Warenkorb leeren"
+                                {crate::t!("cart.clear")}
                             </button>
                         }
                     }}
@@ -288,7 +289,7 @@ fn Line(line: CartLine) -> impl IntoView {
             <ul class="extras">
                 {items.into_iter().map(|e| {
                     let price_label = if e.price_cents == 0 {
-                        "gratis".to_string()
+                        crate::t!("common.free")
                     } else {
                         format!("+{}", format_eur(e.price_cents))
                     };
@@ -315,14 +316,14 @@ fn Line(line: CartLine) -> impl IntoView {
             </div>
             <div class="actions">
                 <div class="qty">
-                    <button on:click=dec aria-label="weniger">"−"</button>
+                    <button on:click=dec aria-label=crate::t!("cart.decrement")>"−"</button>
                     <span>{qty}</span>
-                    <button on:click=inc aria-label="mehr">"+"</button>
+                    <button on:click=inc aria-label=crate::t!("cart.increment")>"+"</button>
                 </div>
                 <strong class="line-total">{format_eur(line.line_total_cents)}</strong>
                 <div class="line-buttons">
-                    <button class="edit" on:click=edit aria-label="Extras bearbeiten" title="Extras bearbeiten">"✎"</button>
-                    <button class="remove" on:click=remove aria-label="entfernen">"🗑"</button>
+                    <button class="edit" on:click=edit aria-label=crate::t!("cart.edit_extras") title=crate::t!("cart.edit_extras")>"✎"</button>
+                    <button class="remove" on:click=remove aria-label=crate::t!("cart.remove")>"🗑"</button>
                 </div>
             </div>
         </li>

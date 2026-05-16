@@ -3291,13 +3291,13 @@ pub fn CheckoutPage() -> impl IntoView {
 
     view! {
         <section class="checkout">
-            <h1>"Kasse"</h1>
-            <Suspense fallback=|| view! { <p>"Lädt…"</p> }>
+            <h1>{crate::t!("checkout.title")}</h1>
+            <Suspense fallback=|| view! { <p>{crate::t!("common.loading")}</p> }>
                 {move || ctx.get().map(|res| match res {
-                    Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                    Err(e) => view! { <p class="error">{format!("{}: {e}", crate::t!("common.error"))}</p> }.into_any(),
                     Ok(c) if c.line_count == 0 => view! {
-                        <p class="empty">"Ihr Warenkorb ist leer. "
-                            <a href="/menu">"Zur Speisekarte"</a></p>
+                        <p class="empty">{crate::t!("cart.empty")} " "
+                            <a href="/menu">{crate::t!("checkout.to_menu")}</a></p>
                     }.into_any(),
                     Ok(c) => view! {
                         <Form ctx=c placer pickup_choice payment_method order_type delivery_zone_id/>
@@ -3321,12 +3321,12 @@ fn StripePane(order_id: String) -> impl IntoView {
     let return_url = format!("/orders/{order_id}");
     view! {
         <div class="stripe-pane">
-            <h2>"Online bezahlen"</h2>
+            <h2>{crate::t!("checkout.pay_online")}</h2>
             <div id="payment-element"></div>
             <button id="payment-submit" type="button" class="btn primary"
-                data-return-url=return_url>"Jetzt bezahlen"</button>
+                data-return-url=return_url>{crate::t!("checkout.pay_now")}</button>
             <p id="payment-message" class="error" style="display:none"></p>
-            <p class="hint">"Sichere Zahlung über Stripe — wir sehen Ihre Kartendaten nicht."</p>
+            <p class="hint">{crate::t!("checkout.stripe_hint")}</p>
         </div>
     }
 }
@@ -3685,19 +3685,19 @@ fn Form(
     view! {
         <div class="checkout-grid" class:hide-form=in_card_flow>
             <div class="summary-side">
-                <h2>"Zusammenfassung"</h2>
-                <p>{line_count} " Artikel"</p>
-                <p>"Zwischensumme: " <strong>{subtotal_label}</strong></p>
+                <h2>{crate::t!("checkout.summary")}</h2>
+                <p>{line_count} " " {crate::t!("checkout.items")}</p>
+                <p>{crate::t!("cart.subtotal")} ": " <strong>{subtotal_label}</strong></p>
                 {move || (is_delivery.get() && fee_cents.get() > 0).then(|| view! {
-                    <p>"Lieferung: " <strong>{format_eur(fee_cents.get())}</strong></p>
+                    <p>{crate::t!("checkout.delivery")} ": " <strong>{format_eur(fee_cents.get())}</strong></p>
                 })}
                 {move || (is_delivery.get() && free_delivery.get()).then(|| view! {
-                    <p class="ok">"✓ Kostenlose Lieferung"</p>
+                    <p class="ok">{crate::t!("cart.free_delivery_unlocked")}</p>
                 })}
                 {move || (voucher_discount.get() > 0).then(|| {
                     let label = voucher_preview
                         .with(|p| p.as_ref().and_then(|p| p.label.clone())
-                            .unwrap_or_else(|| "Gutschein".to_string()));
+                            .unwrap_or_else(|| crate::t!("voucher.label_placeholder")));
                     let code = voucher_preview
                         .with(|p| p.as_ref().map(|p| p.code.clone()).unwrap_or_default());
                     view! {
@@ -3710,23 +3710,24 @@ fn Form(
                 <p class="big">{move || format_eur(total_after_voucher.get())}</p>
                 {move || (is_delivery.get() && !free_delivery.get() && missing_to_free.get() > 0).then(|| view! {
                     <p class="hint">
-                        "Noch " <strong>{move || format_eur(missing_to_free.get())}</strong>
-                        " bis zur kostenlosen Lieferung."
+                        {move || crate::t!("cart.free_delivery_progress")
+                            .replace("{amount}", &format_eur(missing_to_free.get()))}
                     </p>
                 })}
                 {move || below_min.get().then(|| view! {
                     <p class="warn">
-                        "Mindestbestellwert: " {move || format_eur(min_cents.get())}
-                        ". Es fehlen noch " <strong>{move || format_eur(missing_to_min.get())}</strong>
-                        ". "
-                        <a href="/menu">"Zur Speisekarte"</a>
+                        {crate::t!("checkout.min_order_warn")
+                            .replace("{min}", &format_eur(min_cents.get()))
+                            .replace("{missing}", &format_eur(missing_to_min.get()))}
+                        " "
+                        <a href="/menu">{crate::t!("checkout.to_menu")}</a>
                     </p>
                 })}
                 {{
                     let line = checkout_address_line.clone();
                     (!line.is_empty()).then(move || view! {
                         <p class="hint">
-                            {format!("Adresse: {line}")}
+                            {crate::t!("checkout.address_label").replace("{line}", &line)}
                         </p>
                     })
                 }}
@@ -3734,12 +3735,12 @@ fn Form(
 
             <ActionForm action=placer attr:class="checkout-form">
                 <fieldset>
-                    <legend>"Bestellart"</legend>
+                    <legend>{crate::t!("checkout.order_type")}</legend>
                     <label class="radio">
                         <input type="radio" name="order_type" value="pickup"
                                prop:checked=move || order_type.get() == "pickup"
                                on:change=move |_| order_type.set("pickup".to_string())/>
-                        <span>"Abholung"</span>
+                        <span>{crate::t!("checkout.pickup")}</span>
                     </label>
                     {if delivery_available {
                         view! {
@@ -3747,19 +3748,19 @@ fn Form(
                                 <input type="radio" name="order_type" value="delivery"
                                        prop:checked=move || order_type.get() == "delivery"
                                        on:change=move |_| order_type.set("delivery".to_string())/>
-                                <span>"Lieferung"</span>
+                                <span>{crate::t!("checkout.delivery")}</span>
                             </label>
                         }.into_any()
                     } else {
                         view! {
-                            <p class="hint">"Lieferung ist derzeit nicht verfügbar."</p>
+                            <p class="hint">{crate::t!("checkout.delivery_unavailable")}</p>
                         }.into_any()
                     }}
                 </fieldset>
 
                 <Show when=move || is_delivery.get() fallback=|| ()>
                     <fieldset>
-                        <legend>"Lieferadresse"</legend>
+                        <legend>{crate::t!("checkout.delivery_address")}</legend>
                         // Hidden field carries the resolved zone id for legacy
                         // form-submission compatibility. The server re-runs
                         // validate_address regardless, so this is a hint only.
@@ -3773,7 +3774,7 @@ fn Form(
                             let validating_now = validating.get();
                             if validating_now {
                                 view! {
-                                    <p class="zone-status checking">"📍 Adresse wird geprüft…"</p>
+                                    <p class="zone-status checking">{format!("📍 {}", crate::t!("checkout.address_checking"))}</p>
                                 }.into_any()
                             } else if let Some(av) = v {
                                 if av.ok {
@@ -3783,15 +3784,16 @@ fn Form(
                                     let eta = av.eta_minutes.unwrap_or(0);
                                     view! {
                                         <p class="zone-status ok">
-                                            "✅ Liefergebiet: " <strong>{label}</strong>
-                                            " — Lieferzuschlag " <strong>{format_eur(fee)}</strong>
-                                            ", ab " {format_eur(min_o)}
-                                            " (ca. " {eta} " Min.)"
+                                            {format!("✅ {}: ", crate::t!("home.delivery_title"))}
+                                            <strong>{label}</strong>
+                                            " — " {crate::t!("home.zone_fee_suffix")} " " <strong>{format_eur(fee)}</strong>
+                                            ", " {crate::t!("home.zone_min_order_prefix")} " " {format_eur(min_o)}
+                                            {format!(" ({}~{}", "", eta)} " min)"
                                         </p>
                                     }.into_any()
                                 } else {
                                     let reason = av.reason.clone()
-                                        .unwrap_or_else(|| "Adresse ungültig.".to_string());
+                                        .unwrap_or_else(|| crate::t!("checkout.address_invalid"));
                                     view! {
                                         <p class="zone-status err">"⚠️ " {reason}</p>
                                     }.into_any()
@@ -3799,44 +3801,43 @@ fn Form(
                             } else {
                                 view! {
                                     <p class="zone-status hint">
-                                        "Wir prüfen Ihre Adresse, sobald Straße, "
-                                        "Hausnummer und PLZ ausgefüllt sind."
+                                        {crate::t!("checkout.address_validation_hint")}
                                     </p>
                                 }.into_any()
                             }
                         }}
                         <label>
-                            <span>"Straße"</span>
+                            <span>{crate::t!("checkout.street")}</span>
                             <input type="text" name="street" autocomplete="address-line1"
-                                   placeholder="z.B. Musterstraße"
+                                   placeholder=crate::t!("checkout.street_placeholder")
                                    prop:value=move || street_sig.get()
                                    on:input=move |ev| street_sig.set(event_target_value(&ev))/>
                         </label>
                         <label>
-                            <span>"Hausnummer"</span>
+                            <span>{crate::t!("checkout.house_number")}</span>
                             <input type="text" name="house_number"
-                                   placeholder="z.B. 18a"
+                                   placeholder=crate::t!("checkout.house_number_placeholder")
                                    prop:value=move || house_sig.get()
                                    on:input=move |ev| house_sig.set(event_target_value(&ev))/>
                         </label>
                         <label>
-                            <span>"PLZ"</span>
+                            <span>{crate::t!("checkout.postcode")}</span>
                             <input type="text" name="postcode" autocomplete="postal-code"
                                    placeholder="12345" inputmode="numeric"
                                    prop:value=move || postcode_sig.get()
                                    on:input=move |ev| postcode_sig.set(event_target_value(&ev))/>
                         </label>
                         <label>
-                            <span>"Ort"</span>
+                            <span>{crate::t!("checkout.city")}</span>
                             <input type="text" name="city" autocomplete="address-level2"
                                    placeholder="Lüdinghausen"
                                    prop:value=move || city_sig.get()
                                    on:input=move |ev| city_sig.set(event_target_value(&ev))/>
                         </label>
                         <label>
-                            <span>"Hinweis (optional)"</span>
+                            <span>{crate::t!("checkout.address_note")}</span>
                             <input type="text" name="address_notes"
-                                   placeholder="z.B. 3. OG · Klingel Müller"
+                                   placeholder=crate::t!("checkout.address_note_placeholder")
                                    prop:value=move || address_notes_sig.get()
                                    on:input=move |ev| address_notes_sig.set(event_target_value(&ev))/>
                         </label>
@@ -3848,7 +3849,7 @@ fn Form(
                             if addrs.len() <= 1 { return ().into_any(); }
                             view! {
                                 <div class="saved-addresses">
-                                    <span class="hint">"Andere gespeicherte Adressen:"</span>
+                                    <span class="hint">{crate::t!("checkout.saved_addresses")}</span>
                                     {addrs.into_iter().skip(1).map(|a| {
                                         let label = format!("{} {}, {}",
                                             a.street, a.house_number, a.postcode);
@@ -3869,41 +3870,41 @@ fn Form(
                 </Show>
 
                 <fieldset>
-                    <legend>"Kontakt"</legend>
+                    <legend>{crate::t!("checkout.contact")}</legend>
                     {move || recognised.get().then(|| view! {
                         <p class="hint welcome-back">
-                            "👋 Willkommen zurück — Daten sind eingetragen, bitte kurz prüfen."
+                            {format!("👋 {}", crate::t!("checkout.welcome_back"))}
                         </p>
                     })}
                     <label>
-                        <span>"Telefon"</span>
+                        <span>{crate::t!("checkout.phone")}</span>
                         <input type="tel" name="phone" required autocomplete="tel"
-                               placeholder="z.B. 0151 1234567"
+                               placeholder=crate::t!("checkout.phone_placeholder")
                                prop:value=move || phone_sig.get()
                                on:input=move |ev| phone_sig.set(event_target_value(&ev))/>
                     </label>
                     <label>
-                        <span>"Name"</span>
+                        <span>{crate::t!("checkout.name")}</span>
                         <input type="text" name="name" required autocomplete="name"
                                prop:value=move || name_sig.get()
                                on:input=move |ev| name_sig.set(event_target_value(&ev))/>
                     </label>
                     <label>
-                        <span>"E-Mail"</span>
+                        <span>{crate::t!("checkout.email")}</span>
                         <input type="email" name="email" required autocomplete="email"
-                               placeholder="für die Bestellbestätigung"
+                               placeholder=crate::t!("checkout.email_placeholder")
                                prop:value=move || email_sig.get()
                                on:input=move |ev| email_sig.set(event_target_value(&ev))/>
                     </label>
                 </fieldset>
 
                 <fieldset>
-                    <legend>{move || if is_delivery.get() { "Lieferzeit" } else { "Abholzeit" }}</legend>
+                    <legend>{move || if is_delivery.get() { crate::t!("checkout.delivery_time") } else { crate::t!("checkout.pickup_time") }}</legend>
                     <label class="radio">
                         <input type="radio" name="pickup_time" value="asap"
                                prop:checked=move || pickup_choice.get() == "asap"
                                on:change=move |_| pickup_choice.set("asap".to_string())/>
-                        <span>"Schnellstmöglich (ca. " {asap_minutes} " Min.)"</span>
+                        <span>{crate::t!("checkout.asap").replace("{n}", &asap_minutes.to_string())}</span>
                     </label>
 
                     {if has_slots {
@@ -3911,7 +3912,7 @@ fn Form(
                             <label class="radio">
                                 <input type="radio" name="pickup_time" value="scheduled"
                                        on:change=move |_| pickup_choice.set("scheduled".to_string())/>
-                                <span>"Späteren Zeitpunkt wählen"</span>
+                                <span>{crate::t!("checkout.pick_later")}</span>
                             </label>
                             <select name="pickup_time"
                                 disabled=move || pickup_choice.get() != "scheduled">
@@ -3921,30 +3922,30 @@ fn Form(
                             </select>
                         }.into_any()
                     } else {
-                        view! { <p class="hint">"Heute ist kein späterer Zeitpunkt möglich."</p> }.into_any()
+                        view! { <p class="hint">{crate::t!("checkout.no_slots")}</p> }.into_any()
                     }}
                 </fieldset>
 
                 <fieldset>
-                    <legend>"Zahlung"</legend>
+                    <legend>{crate::t!("checkout.payment")}</legend>
                     <label class="radio">
                         <input type="radio" name="payment_method" value="cash"
                                prop:checked=move || payment_method.get() == "cash"
                                on:change=move |_| payment_method.set("cash".to_string())/>
-                        <span>{move || if is_delivery.get() { "Bar bei Lieferung" } else { "Bar bei Abholung" }}</span>
+                        <span>{move || if is_delivery.get() { crate::t!("checkout.pay_cash_delivery") } else { crate::t!("checkout.pay_cash_pickup") }}</span>
                     </label>
                     <label class="radio">
                         <input type="radio" name="payment_method" value="card"
                                prop:checked=move || payment_method.get() == "card"
                                on:change=move |_| payment_method.set("card".to_string())/>
-                        <span>"Online bezahlen (Karte, Apple/Google Pay)"</span>
+                        <span>{crate::t!("checkout.pay_card_long")}</span>
                     </label>
                 </fieldset>
 
                 <fieldset class="voucher-fieldset">
-                    <legend>"Gutschein-Code (optional)"</legend>
+                    <legend>{crate::t!("checkout.voucher_legend")}</legend>
                     <input type="text" name="voucher_code" autocomplete="off"
-                           placeholder="z.B. WILLKOMMEN10"
+                           placeholder=crate::t!("checkout.voucher_placeholder")
                            prop:value=move || voucher_sig.get()
                            on:input=move |ev| voucher_sig.set(event_target_value(&ev))/>
                     {move || {
@@ -3954,7 +3955,7 @@ fn Form(
                         } else if let Some(e) = voucher_error.get() {
                             view! { <p class="warn">{e}</p> }.into_any()
                         } else {
-                            view! { <p class="hint muted">"Code eingeben — Rabatt wird sofort geprüft."</p> }.into_any()
+                            view! { <p class="hint muted">{crate::t!("checkout.voucher_hint")}</p> }.into_any()
                         }
                     }}
                 </fieldset>
@@ -3963,29 +3964,30 @@ fn Form(
                         disabled=move || pending.get() || below_min.get()
                                        || validating.get() || !address_valid.get()>
                     {move || {
-                        if pending.get() { "Bitte warten…".to_string() }
-                        else if validating.get() { "Adresse wird geprüft…".to_string() }
+                        if pending.get() { crate::t!("checkout.please_wait") }
+                        else if validating.get() { crate::t!("checkout.address_checking") }
                         else if !address_valid.get() {
                             // Pull the reason out of the validation if any.
                             validation.with(|v| v.as_ref()
                                 .and_then(|av| av.reason.clone())
-                                .unwrap_or_else(|| "Adresse prüfen".to_string()))
+                                .unwrap_or_else(|| crate::t!("checkout.check_address")))
                         }
                         else if below_min.get() {
-                            format!("Mindestbestellwert {} fehlt", format_eur(missing_to_min.get()))
+                            crate::t!("checkout.min_missing")
+                                .replace("{amount}", &format_eur(missing_to_min.get()))
                         }
                         else if payment_method.get() == "card" && total_after_voucher.get() == 0 {
                             // Voucher covers everything — nothing to pay,
                             // no Stripe step. Match what place_order does.
-                            "Bestellung aufgeben".to_string()
+                            crate::t!("checkout.place_order_btn")
                         }
-                        else if payment_method.get() == "card" { "Weiter zur Zahlung".to_string() }
-                        else { "Bestellung aufgeben".to_string() }
+                        else if payment_method.get() == "card" { crate::t!("checkout.proceed_payment") }
+                        else { crate::t!("checkout.place_order_btn") }
                     }}
                 </button>
 
                 {move || match value.get() {
-                    Some(Err(e)) => Some(view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any()),
+                    Some(Err(e)) => Some(view! { <p class="error">{format!("{}: {e}", crate::t!("common.error"))}</p> }.into_any()),
                     _ => None,
                 }}
             </ActionForm>

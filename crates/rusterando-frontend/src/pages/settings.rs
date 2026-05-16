@@ -42,6 +42,30 @@ impl ThemeHandle {
 /// and the admin <select> stay in sync.
 pub const ALLOWED_THEMES: &[&str] = &["warm", "dark"];
 
+/// Runtime toggle for the multilingual UI. `'1'` = show the locale
+/// switcher in the header AND serve `/<lang>/...` prefixed routes;
+/// `'0'` = single-locale shop, those routes 404. Same write-through
+/// pattern as ThemeHandle: seeded at boot from `app_settings`,
+/// rewritten in place when the admin toggles via `update_setting`.
+#[cfg(feature = "ssr")]
+#[derive(Clone, Default)]
+pub struct I18nHandle(pub Arc<RwLock<bool>>);
+
+#[cfg(feature = "ssr")]
+impl I18nHandle {
+    pub fn new(initial: bool) -> Self {
+        Self(Arc::new(RwLock::new(initial)))
+    }
+    pub fn get(&self) -> bool {
+        self.0.read().map(|g| *g).unwrap_or(false)
+    }
+    pub fn set(&self, v: bool) {
+        if let Ok(mut g) = self.0.write() {
+            *g = v;
+        }
+    }
+}
+
 /// Public-facing snapshot — what the menu/checkout/home pages need to
 /// render. Cached in checkout context so the form picks it up via the
 /// existing `load_checkout_context` server fn.
@@ -225,5 +249,19 @@ pub mod ssr {
             Some(ref v) if super::ALLOWED_THEMES.contains(&v.as_str()) => v.clone(),
             _ => "warm".to_string(),
         }
+    }
+
+    /// Boot-time read of the i18n toggle. Defaults to `false` (single-
+    /// locale shop) on missing rows or invalid values — matches the
+    /// migration default and keeps Davids' deployment behaviour
+    /// unchanged after upgrading.
+    pub async fn i18n_enabled(db: &SqlitePool) -> bool {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = 'i18n_enabled'")
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        matches!(row.as_ref().map(|(v,)| v.as_str()), Some("1" | "true"))
     }
 }

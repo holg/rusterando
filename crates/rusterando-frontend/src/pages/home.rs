@@ -132,19 +132,17 @@ pub fn Home() -> impl IntoView {
         </Suspense>
 
         <section id="delivery" class="delivery">
-            <h2>"Wir liefern"</h2>
+            <h2>{crate::t!("home.delivery_title")}</h2>
             <Suspense fallback=|| ()>
                 {move || delivery_info.get().map(|res| match res {
-                    Err(_) => view! { <p class="muted">"Lieferinfo nicht verfügbar."</p> }.into_any(),
+                    Err(_) => view! { <p class="muted">{crate::t!("home.delivery_unavailable")}</p> }.into_any(),
                     Ok(info) => {
                         let threshold = info.free_delivery_threshold_cents;
                         let banner = (threshold > 0).then(|| {
                             let label = format_eur(threshold);
+                            let template = crate::t!("home.free_delivery_banner");
                             view! {
-                                <p class="free-delivery-banner">
-                                    "🎉 Lieferung kostenlos ab " <strong>{label}</strong>
-                                    " Bestellwert."
-                                </p>
+                                <p class="free-delivery-banner" inner_html=template.replace("{amount}", &format!("<strong>{label}</strong>"))></p>
                             }
                         });
                         view! {
@@ -153,8 +151,8 @@ pub fn Home() -> impl IntoView {
                                 {info.zones.into_iter().map(|z| view! {
                                     <li>
                                         <strong>{z.name}</strong>
-                                        <span>"ab " {format_eur(z.min_order_cents)} " · "</span>
-                                        <span class="fee">"+ " {format_eur(z.fee_cents)} " Lieferzuschlag"</span>
+                                        <span>{crate::t!("home.zone_min_order_prefix")} " " {format_eur(z.min_order_cents)} " · "</span>
+                                        <span class="fee">"+ " {format_eur(z.fee_cents)} " " {crate::t!("home.zone_fee_suffix")}</span>
                                     </li>
                                 }).collect_view()}
                             </ul>
@@ -166,9 +164,9 @@ pub fn Home() -> impl IntoView {
 
         <section class="qr-card">
             <div class="qr-intro">
-                <h2>"Hier scannen, später bestellen"</h2>
+                <h2>{crate::t!("home.qr_title")}</h2>
                 <p>
-                    "Mit dem Handy scannen und entweder die Online-Speisekarte oder die druckbare PDF öffnen — "
+                    {crate::t!("home.qr_intro")} " "
                     <strong>{display}</strong>
                 </p>
             </div>
@@ -177,45 +175,45 @@ pub fn Home() -> impl IntoView {
                 <figure class="qr-tile">
                     <div class="qr-svg" inner_html=qr_site></div>
                     <figcaption>
-                        <strong>"Online-Speisekarte"</strong>
-                        <span>"Direkt im Browser bestellen"</span>
+                        <strong>{crate::t!("home.qr_online_title")}</strong>
+                        <span>{crate::t!("home.qr_online_sub")}</span>
                     </figcaption>
                 </figure>
                 <figure class="qr-tile">
                     <div class="qr-svg" inner_html=qr_pdf></div>
                     <figcaption>
-                        <strong>"Speisekarte als PDF"</strong>
-                        <span>"Zum Mitnehmen, Drucken, Teilen"</span>
+                        <strong>{crate::t!("home.qr_pdf_title")}</strong>
+                        <span>{crate::t!("home.qr_pdf_sub")}</span>
                     </figcaption>
                 </figure>
             </div>
 
             <p class="qr-actions">
                 <a class="btn ghost" href="/menu.pdf" target="_blank" rel="noopener">
-                    "📄 PDF herunterladen"
+                    {format!("📄 {}", crate::t!("home.pdf_download"))}
                 </a>
             </p>
         </section>
 
         <section id="hours" class="hours">
-            <h2>"Öffnungszeiten"</h2>
+            <h2>{crate::t!("header.opening_hours")}</h2>
             <table>
-                <tr><th>"Montag"</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                <tr><th>"Dienstag"</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                <tr><th>"Mittwoch"</th><td class="closed">"Ruhetag"</td></tr>
-                <tr><th>"Donnerstag"</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                <tr><th>"Freitag"</th><td>"16:00–22:00"</td></tr>
-                <tr><th>"Samstag"</th><td>"16:00–22:00"</td></tr>
-                <tr><th>"Sonntag"</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                <tr><th>{crate::t!("home.day_mon")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                <tr><th>{crate::t!("home.day_tue")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                <tr><th>{crate::t!("home.day_wed")}</th><td class="closed">{crate::t!("home.day_closed")}</td></tr>
+                <tr><th>{crate::t!("home.day_thu")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                <tr><th>{crate::t!("home.day_fri")}</th><td>"16:00–22:00"</td></tr>
+                <tr><th>{crate::t!("home.day_sat")}</th><td>"16:00–22:00"</td></tr>
+                <tr><th>{crate::t!("home.day_sun")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
             </table>
         </section>
 
         <footer class="site-footer">
             <a href="/admin">"Admin"</a>
             <span class="sep">"·"</span>
-            <a href="/impressum">"Impressum"</a>
+            <a href="/impressum">{crate::t!("header.imprint")}</a>
             <span class="sep">"·"</span>
-            <a href="/datenschutz">"Datenschutz"</a>
+            <a href="/datenschutz">{crate::t!("header.privacy")}</a>
         </footer>
     }
 }
@@ -252,10 +250,10 @@ fn HomeBody(content: crate::pages::home_content::HomeContent) -> impl IntoView {
                 <p class="tag">{hero.subtitle}</p>
                 {render_meta()}
                 <p class="cta">
-                    <a class="btn pill big" href="/menu">"Jetzt bestellen"</a>
+                    <a class="btn pill big" href="/menu">{crate::t!("home.order_now")}</a>
                 </p>
             </div>
-            <a class="hero-scroll-cue" href="#offers" aria-label="Weiter scrollen">"↓"</a>
+            <a class="hero-scroll-cue" href="#offers" aria-label=crate::t!("home.scroll_more")>"↓"</a>
         </section>
 
         <section id="offers" class="offers">

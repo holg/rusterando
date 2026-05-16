@@ -230,6 +230,20 @@ async fn main() {
 
     let routes = generate_route_list(App);
 
+    // When the frontend was built with `--features i18n`, also register
+    // a /<lang>/* mirror of every canonical route so axum can dispatch
+    // /en/menu, /it/menu, etc. to the same Leptos handler. Without
+    // this, the auto-generated route table only contains the canonical
+    // paths (built once at boot with an empty mock RequestUrl), so
+    // /en/menu falls through to the 404 catch-all.
+    //
+    // The Router base inside App() then strips the prefix per-request
+    // so the inner Routes tree matches the canonical version. Default
+    // locale (de) is intentionally excluded — its prefix is canonicalised
+    // away by the locale_canonicalize_middleware below.
+    #[cfg(feature = "i18n")]
+    let routes = expand_locale_routes(routes);
+
     // Trait-erased push handle so server fns in the frontend crate
     // can broadcast without depending on davidspizzeria-server's
     // concrete ApnsHandle type.
@@ -361,6 +375,9 @@ async fn main() {
         .fallback(leptos_axum::file_and_error_handler::<LeptosOptions, _>(
             shell,
         ))
+        // /de/* canonicalisation runs first so all downstream layers
+        // (rate-limit, admin-auth, Leptos) see the canonical URL.
+        .layer(axum::middleware::from_fn(locale_canonicalize_middleware))
         // Rate limit must wrap EVERYTHING so it sees server-fn paths that
         // leptos_axum auto-registers (those bypass our /api/{*fn_name} catch-all).
         .layer(axum::middleware::from_fn(rate_limit_middleware))
@@ -1301,6 +1318,92 @@ async fn server_fn_handler(
 /// Rate-limit middleware. Lives at the router level so it sees BOTH our
 /// hand-rolled routes and the server-fn paths that leptos_axum auto-registers
 /// (those don't go through `server_fn_handler`).
+/// For each canonical route the leptos route generator produced,
+/// emit additional `/<lang><canonical>` copies for every non-default
+/// locale. axum then dispatches `/en/menu` to the same Leptos handler
+/// that serves `/menu`; the App's `Router base=...` strips the prefix
+/// inside the handler so the inner Routes tree matches as canonical.
+///
+/// Default locale (de) is intentionally skipped — its prefix is
+/// canonicalised away to `/` by the locale_canonicalize_middleware
+/// so /de/foo is never actually served.
+#[cfg(feature = "i18n")]
+fn expand_locale_routes(
+    routes: Vec<leptos_axum::AxumRouteListing>,
+) -> Vec<leptos_axum::AxumRouteListing> {
+    use leptos_axum::AxumRouteListing;
+    // Same set as Locale::ALL minus the default. Hard-coded here
+    // because pulling the enum from the frontend crate would require
+    // the i18n feature to be on for the dep too, which is fine — the
+    // whole function is already #[cfg(feature = "i18n")].
+    let prefixes = ["en", "fr", "it", "es", "pt", "ru", "cn"];
+    let mut out = Vec::with_capacity(routes.len() * (1 + prefixes.len()));
+    for r in &routes {
+        out.push(r.clone());
+    }
+    for prefix in prefixes {
+        for r in &routes {
+            let p = r.path();
+            // `path` is something like "/", "/menu", "/orders/{id}", …
+            //
+            // Register both "/<lang>" and "/<lang>/" for the home
+            // route — axum treats them as distinct paths and a stray
+            // trailing slash would otherwise 404.
+            let make = |path: String| {
+                AxumRouteListing::new(
+                    path,
+                    Default::default(),
+                    [leptos_router::Method::Get, leptos_router::Method::Post],
+                    Vec::<leptos_router::static_routes::RegenerationFn>::new(),
+                )
+            };
+            if p == "/" {
+                out.push(make(format!("/{prefix}")));
+                out.push(make(format!("/{prefix}/")));
+            } else {
+                out.push(make(format!("/{prefix}{p}")));
+            }
+        }
+    }
+    out
+}
+
+/// When `feature = "i18n"` is enabled in the frontend crate, /de/...
+/// is the redundant prefix for the default locale and should 302 to
+/// the canonical un-prefixed URL. Browsing /de/menu lands on /menu.
+///
+/// Compiled in unconditionally here (the server crate doesn't track
+/// the frontend's feature flag), so even Davids' German-only build
+/// will redirect /de/* → /* if anyone hits it. Harmless on a single-
+/// locale deploy: nobody ever links there.
+async fn locale_canonicalize_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    let path = req.uri().path();
+    if let Some(rest) = path.strip_prefix("/de/") {
+        let qs = req
+            .uri()
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
+        let target = format!("/{rest}{qs}");
+        return (StatusCode::FOUND, [(header::LOCATION, target)]).into_response();
+    }
+    if path == "/de" {
+        let qs = req
+            .uri()
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
+        return (StatusCode::FOUND, [(header::LOCATION, format!("/{qs}"))]).into_response();
+    }
+    next.run(req).await
+}
+
 async fn rate_limit_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,

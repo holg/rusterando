@@ -138,6 +138,38 @@ pub fn App() -> impl IntoView {
     provide_meta_context();
     provide_cart_ctx();
 
+    // i18n: install the locale context AND derive the Router base
+    // path so the inner Routes block matches `/menu` regardless of
+    // whether the request is `/menu` or `/en/menu`. Off-builds skip
+    // both and pass an empty base.
+    //
+    // SSR + hydrate both compute the same value from the same path so
+    // there's no DOM mismatch at hydrate time. Hydrate reads
+    // window.location.pathname; SSR reads the path from
+    // leptos_router's RequestUrl context.
+    #[cfg(feature = "i18n")]
+    let router_base: &'static str = {
+        let path = current_path();
+        let (loc, _rest) = crate::i18n::split_locale_prefix(&path);
+        let initial = loc.unwrap_or(crate::i18n::Locale::DEFAULT);
+        let _ = crate::i18n::provide_locale_ctx(initial);
+        // Map the resolved locale to a *static* base string — required
+        // by Router's `base: Cow<'static, str>` prop. Default locale
+        // uses "" so canonical URLs have no prefix.
+        match initial {
+            crate::i18n::Locale::De => "",
+            crate::i18n::Locale::En => "/en",
+            crate::i18n::Locale::Fr => "/fr",
+            crate::i18n::Locale::It => "/it",
+            crate::i18n::Locale::Es => "/es",
+            crate::i18n::Locale::Pt => "/pt",
+            crate::i18n::Locale::Ru => "/ru",
+            crate::i18n::Locale::Cn => "/cn",
+        }
+    };
+    #[cfg(not(feature = "i18n"))]
+    let router_base: &'static str = "";
+
     // <title> driven by a server-fn-backed Resource so SSR and hydrate
     // render the same value. A direct context read would diverge: SSR
     // sees the BrandingHandle and writes the real shop name, hydrate
@@ -156,7 +188,7 @@ pub fn App() -> impl IntoView {
     view! {
         <Title text=title_text/>
 
-        <Router>
+        <Router base=router_base>
             // Sandbox-only banner. Renders nothing in live mode so the
             // public site looks identical to a production build.
             <TestModeBanner/>
@@ -194,5 +226,52 @@ pub fn App() -> impl IntoView {
             <CartFab/>
             <CartDrawer/>
         </Router>
+    }
+}
+
+/// Best-effort read of the current URL path. Used by the i18n
+/// resolver to spot a /<lang>/ prefix at App() boot — before the
+/// Router has had a chance to set up its own location signal.
+///
+/// SSR: the path comes from the http::request::Parts that the leptos
+/// integration layer makes available via context (provided by
+/// leptos_axum's route handler). Hydrate: window.location.pathname.
+#[cfg(feature = "i18n")]
+fn current_path() -> String {
+    #[cfg(feature = "ssr")]
+    {
+        // leptos_axum's provide_contexts() stores the URL as
+        // `http://leptos.dev/<actual-path>` — the scheme/host are a
+        // fake but the path is real. We parse with `url::Url` to
+        // extract the path cleanly. Falling back to "/" if anything
+        // goes wrong keeps the locale resolver defensive.
+        if let Some(req_url) = use_context::<leptos_router::location::RequestUrl>() {
+            let raw: &str = req_url.as_ref();
+            // leptos_axum stores the URL as `http://leptos.dev/<path>`
+            // — scheme + host are placeholders, the path after the
+            // host is real. We extract by hand to avoid pulling in
+            // the `url` crate as a direct dep.
+            let no_scheme = raw.find("://").map(|i| &raw[i + 3..]).unwrap_or(raw);
+            let path_and_q = no_scheme.find('/').map(|i| &no_scheme[i..]).unwrap_or("/");
+            let path = path_and_q
+                .split_once('?')
+                .map(|(p, _)| p)
+                .unwrap_or(path_and_q);
+            return path.to_string();
+        }
+        return "/".to_string();
+    }
+    #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
+    {
+        if let Some(win) = web_sys::window() {
+            if let Ok(p) = win.location().pathname() {
+                return p;
+            }
+        }
+        "/".to_string()
+    }
+    #[cfg(not(any(feature = "ssr", feature = "hydrate")))]
+    {
+        "/".to_string()
     }
 }

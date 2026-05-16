@@ -62,15 +62,20 @@ pub async fn list_pizza_extras() -> Result<Vec<PizzaExtra>, ServerFnError> {
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
-    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
-        "SELECT id, label, price_cents, sort_order
+    // Customer-facing endpoint → use the active locale's label, fall
+    // back to DE for empty translations. ORDER BY stays on the DE
+    // label so the rendering order doesn't shuffle per language.
+    let label_col = crate::i18n::coalesce_col("label", "");
+    let sql = format!(
+        "SELECT id, {label_col} AS label, price_cents, sort_order
          FROM pizza_extras
          WHERE is_available = 1
-         ORDER BY sort_order, label",
-    )
-    .fetch_all(&db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("load extras: {e}")))?;
+         ORDER BY sort_order, label"
+    );
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(&sql)
+        .fetch_all(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("load extras: {e}")))?;
 
     Ok(rows
         .into_iter()

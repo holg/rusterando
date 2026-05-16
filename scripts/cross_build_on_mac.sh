@@ -432,10 +432,31 @@ export CARGO_INCREMENTAL=0
 
 echo "Using profile: $PROFILE"
 
-LEPTOS_BIN_TARGET_TRIPLE=$TARGET_TRIPLE \
-  cargo leptos build --release \
-    --bin-cargo-args="--config=build.incremental=true" \
-    -v
+# Optional per-deployment features. The caller (deploy_to_server.sh)
+# reads $CARGO_FEATURES from the .env.<profile> file and exports it
+# before running this script. Davids' build leaves it unset → vanilla
+# German-only binary. Rusterando exports `i18n` so the build adds
+# the leptos_i18n dep + bundles the 8 locale files.
+#
+# Both the bin (ssr) and lib (hydrate) crates need the feature, so
+# we pass it via the matching --bin-features / --lib-features flags
+# of cargo-leptos. SSR + hydrate are always-on; we append to them.
+if [[ -n "${CARGO_FEATURES:-}" ]]; then
+  echo "Building with extra features: $CARGO_FEATURES"
+  BIN_FEATURES="ssr,${CARGO_FEATURES}"
+  LIB_FEATURES="hydrate,${CARGO_FEATURES}"
+  LEPTOS_BIN_TARGET_TRIPLE=$TARGET_TRIPLE \
+    cargo leptos build --release \
+      --bin-features "$BIN_FEATURES" \
+      --lib-features "$LIB_FEATURES" \
+      --bin-cargo-args="--config=build.incremental=true" \
+      -v
+else
+  LEPTOS_BIN_TARGET_TRIPLE=$TARGET_TRIPLE \
+    cargo leptos build --release \
+      --bin-cargo-args="--config=build.incremental=true" \
+      -v
+fi
 
 # Check if the build was successful
 LEPTOS_RC=$?

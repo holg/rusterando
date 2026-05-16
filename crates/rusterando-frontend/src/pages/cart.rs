@@ -74,19 +74,33 @@ pub mod ssr {
                 Option<String>,
             ),
         >(
-            "SELECT ci.id,
-                    ci.menu_item_id,
-                    mi.menu_number,
-                    mi.name,
-                    ci.options_json,
-                    ci.quantity,
-                    ci.unit_price_cents,
-                    ci.extras_json,
-                    ci.selected_options_json
-             FROM cart_items ci
-             JOIN menu_items mi ON mi.id = ci.menu_item_id
-             WHERE ci.cart_id = ?1
-             ORDER BY ci.created_at",
+            // Locale-aware item name: COALESCE(mi.name_<lang>, mi.name)
+            // so the cart line shows the customer's chosen language.
+            // The cart_items row itself doesn't snapshot the name; it
+            // references menu_item_id, so live JOIN here is correct.
+            &{
+                let loc = crate::i18n::current_locale();
+                let name_col = if loc == crate::i18n::Locale::DEFAULT {
+                    "mi.name".to_string()
+                } else {
+                    format!("COALESCE(mi.name_{lang}, mi.name)", lang = loc.code())
+                };
+                format!(
+                    "SELECT ci.id,
+                            ci.menu_item_id,
+                            mi.menu_number,
+                            {name_col} AS name,
+                            ci.options_json,
+                            ci.quantity,
+                            ci.unit_price_cents,
+                            ci.extras_json,
+                            ci.selected_options_json
+                     FROM cart_items ci
+                     JOIN menu_items mi ON mi.id = ci.menu_item_id
+                     WHERE ci.cart_id = ?1
+                     ORDER BY ci.created_at"
+                )
+            },
         )
         .bind(cart_id)
         .fetch_all(db)
@@ -271,8 +285,15 @@ pub async fn add_to_cart(
         Vec::new()
     } else {
         let placeholders = extras_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        // Snapshot the extras label in the customer's active locale so
+        // the cart line + receipt + kitchen print show consistent text
+        // regardless of when the cart is later viewed. The snapshot is
+        // intentional: a later DB rename shouldn't rewrite an open
+        // customer's order. v1 also doesn't refresh on locale switch
+        // (the customer would need to re-add to pick up a new locale).
+        let label_col = crate::i18n::coalesce_col("label", "");
         let q = format!(
-            "SELECT id, label, price_cents
+            "SELECT id, {label_col} AS label, price_cents
              FROM pizza_extras
              WHERE is_available = 1 AND id IN ({placeholders})"
         );
@@ -353,8 +374,20 @@ pub async fn add_to_cart(
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(",");
+        // Locale-aware snapshot of option + group labels (same
+        // rationale as extras above).
+        let loc = crate::i18n::current_locale();
+        let (opt_label, grp_label) = if loc == crate::i18n::Locale::DEFAULT {
+            ("o.label".to_string(), "g.label".to_string())
+        } else {
+            let lang = loc.code();
+            (
+                format!("COALESCE(o.label_{lang}, o.label)"),
+                format!("COALESCE(g.label_{lang}, g.label)"),
+            )
+        };
         let q = format!(
-            "SELECT o.id, o.label, o.price_cents, o.group_id, g.label AS group_label
+            "SELECT o.id, {opt_label} AS label, o.price_cents, o.group_id, {grp_label} AS group_label
              FROM item_options o
              JOIN item_option_groups g ON g.id = o.group_id
              WHERE o.is_active = 1 AND g.is_active = 1
