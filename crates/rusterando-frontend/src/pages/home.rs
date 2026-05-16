@@ -109,33 +109,42 @@ pub fn Home() -> impl IntoView {
     let pdf_url = format!("{}/menu.pdf", url.trim_end_matches('/'));
     let qr_site = qr_svg(&url);
     let qr_pdf = qr_svg(&pdf_url);
-    let delivery_info = OnceResource::new(home_delivery_info());
-    let home = OnceResource::new(get_home_content());
+    // Bundle both fetches into one resource so SSR and hydrate see
+    // exactly the same await-point. Two `OnceResource`s consumed by
+    // two `<Suspense>` blocks intermittently trips tachys's hydration
+    // walker with `entered unreachable code` — collapsing into one
+    // tuple-future avoids it (same pattern as MenuPage).
+    let combined = OnceResource::new(async move {
+        let h = get_home_content().await;
+        let d = home_delivery_info().await;
+        (h, d)
+    });
 
     view! {
         <Suspense fallback=|| view! {
             <section class="hero hero-cinematic">
                 <div class="hero-content"><h1 class="logo">"MEIN RESTAURANT"</h1></div>
             </section>
+            <section id="delivery" class="delivery">
+                <h2>{crate::t!("home.delivery_title")}</h2>
+            </section>
         }>
-            {move || home.get().map(|res| match res {
-                Err(_) => view! {
-                    <section class="hero hero-cinematic">
-                        <div class="hero-content">
-                            <h1 class="logo">"MEIN RESTAURANT"</h1>
-                            <p class="tag">"Konfiguriere Hero-Titel + Untertitel unter /admin/home."</p>
-                        </div>
-                    </section>
-                }.into_any(),
-                Ok(content) => view! { <HomeBody content/> }.into_any(),
-            })}
-        </Suspense>
-
-        <section id="delivery" class="delivery">
-            <h2>{crate::t!("home.delivery_title")}</h2>
-            <Suspense fallback=|| ()>
-                {move || delivery_info.get().map(|res| match res {
-                    Err(_) => view! { <p class="muted">{crate::t!("home.delivery_unavailable")}</p> }.into_any(),
+            {move || combined.get().map(|(home_res, delivery_res)| {
+                let hero = match home_res {
+                    Err(_) => view! {
+                        <section class="hero hero-cinematic">
+                            <div class="hero-content">
+                                <h1 class="logo">"MEIN RESTAURANT"</h1>
+                                <p class="tag">"Konfiguriere Hero-Titel + Untertitel unter /admin/home."</p>
+                            </div>
+                        </section>
+                    }.into_any(),
+                    Ok(content) => view! { <HomeBody content/> }.into_any(),
+                };
+                let delivery_body = match delivery_res {
+                    Err(_) => view! {
+                        <p class="muted">{crate::t!("home.delivery_unavailable")}</p>
+                    }.into_any(),
                     Ok(info) => {
                         let threshold = info.free_delivery_threshold_cents;
                         let banner = (threshold > 0).then(|| {
@@ -158,9 +167,16 @@ pub fn Home() -> impl IntoView {
                             </ul>
                         }.into_any()
                     }
-                })}
-            </Suspense>
-        </section>
+                };
+                view! {
+                    {hero}
+                    <section id="delivery" class="delivery">
+                        <h2>{crate::t!("home.delivery_title")}</h2>
+                        {delivery_body}
+                    </section>
+                }
+            })}
+        </Suspense>
 
         <section class="qr-card">
             <div class="qr-intro">
