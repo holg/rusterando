@@ -94,10 +94,32 @@ input[type="number"], input[type="password"], input[type="text"] {
   font-family: inherit;
 }
 
+// Sticky-offset variables. The TEST badge (when stripe is in sandbox)
+// sits above the .site-header, so anything that wants to stick BELOW
+// the header has to clear both. We declare safe defaults here and
+// override via :has() when the badge is present, so /menu's
+// .category-nav (and any future sticky element) can read a single
+// canonical value instead of duplicating the math.
+:root {
+  --sticky-top-offset: 0px;       // how far the .site-header itself sits from the viewport top
+  --sticky-content-offset: 2.5rem; // header bottom edge; what subsequent sticky content uses
+}
+body:has(.test-mode-banner) {
+  --sticky-top-offset: 2rem;       // ~ banner height (0.35rem × 2 + ~1.3rem content)
+  --sticky-content-offset: 4.5rem; // banner + header
+}
+@media (max-width: 36rem) {
+  :root { --sticky-content-offset: 2rem; }
+  body:has(.test-mode-banner) {
+    --sticky-top-offset: 1.8rem;
+    --sticky-content-offset: 3.8rem;
+  }
+}
+
 // ----- Sticky site header -----
 .site-header {
   position: sticky;
-  top: 0;
+  top: var(--sticky-top-offset);
   z-index: 30;
   display: flex;
   align-items: center;
@@ -609,11 +631,12 @@ main { display: block; width: 100%; }
 
   // Sticky horizontal-pill nav: the .category-nav wrapper carries
   // the sticky position so the wrapper (arrows + strip) sticks
-  // together. Top offset matches the .site-header height (~2.5rem
-  // desktop, ~2rem on phones — see the @media below).
+  // together. Top offset uses --sticky-content-offset so the nav
+  // automatically clears both the site header AND the TEST badge
+  // (when stripe is in sandbox mode and the banner is rendered).
   .category-nav {
     position: sticky;
-    top: 2.5rem;
+    top: var(--sticky-content-offset);
     z-index: 10;
     margin: 0 -1rem 1.2rem;
     padding: 0.4rem 0.4rem;
@@ -713,9 +736,11 @@ main { display: block; width: 100%; }
     }
   }
 
-  // Phones: header shrinks → sticky-top offset shrinks too.
+  // Phones: header shrinks → the :root @media block has already
+  // reduced --sticky-content-offset, so .category-nav follows.
+  // Only the visual padding/gap shrink here.
   @media (max-width: 36rem) {
-    .category-nav { top: 2rem; padding: 0.35rem 0.3rem; gap: 0.2rem; }
+    .category-nav { padding: 0.35rem 0.3rem; gap: 0.2rem; }
     .category-nav .cat-arrow,
     .category-nav .cat-list-btn {
       width: 1.9rem;

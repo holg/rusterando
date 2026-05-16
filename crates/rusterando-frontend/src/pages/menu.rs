@@ -357,7 +357,7 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
         allergens,
         additives,
         shop_phone: phone,
-        category_overlay,
+        category_overlay: _,
     } = payload;
 
     // Provide the resolved extras catalog to every Card via context. The
@@ -510,12 +510,14 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
             </header>
 
             // Sticky .category-nav: ‹ arrow, pill strip, › arrow,
-            // and (when the per-shop overlay setting is on) a
-            // bullet-list button that opens the category sheet.
-            // Everything travels together while scrolling.
+            // and a bullet-list button that opens the category sheet.
+            // Always rendered now — the `category_overlay` admin
+            // setting still exists (in app_settings) but is no longer
+            // wired here; the bullet-list + sheet are small enough
+            // that they're always worth showing.
             <CategoryNav
                 cats=cats_for_tabs
-                show_list_button=category_overlay
+                show_list_button=true
                 sheet_open
             />
 
@@ -534,9 +536,7 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
             // Side / bottom sheet listing every category. Opened by
             // the bullet-list button in the sticky nav above. Same
             // overlay-click-closes pattern as the cart drawer.
-            {category_overlay.then(|| view! {
-                <CategorySheet cats=cats_for_sheet open=sheet_open/>
-            })}
+            <CategorySheet cats=cats_for_sheet open=sheet_open/>
         </div>
     }
 }
