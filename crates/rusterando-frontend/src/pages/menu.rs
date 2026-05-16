@@ -518,9 +518,6 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
                 show_list_button=category_overlay
                 sheet_open
             />
-            // Reserves the vertical room the now-fixed nav would
-            // otherwise occupy in normal flow.
-            <div class="category-nav-spacer"></div>
 
             <div class="categories">
                 {cats_for_sections.into_iter().map(|cat| {
