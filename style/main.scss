@@ -607,16 +607,22 @@ main { display: block; width: 100%; }
     }
   }
 
-  // Sticky horizontal-pill nav: the .category-nav wrapper carries
-  // the sticky position so the wrapper (arrows + strip) sticks
-  // together. Top offset matches the .site-header height (~2.5rem
-  // desktop, ~2rem on phones — see the @media below).
+  // Fixed-position horizontal-pill nav: pinned to the viewport just
+  // below the .site-header. Earlier versions used `position: sticky`
+  // but iOS Safari intermittently un-stuck it on scroll inside long
+  // pages — `position: fixed` is bulletproof and gives the same UX.
+  // A spacer (.category-nav-spacer) reserves vertical room in flow
+  // so the menu content doesn't jump underneath. The nav spans the
+  // full viewport width (so the background extends edge-to-edge),
+  // and its inner grid is capped to the same 80rem column as .menu.
   .category-nav {
-    position: sticky;
+    position: fixed;
     top: 2.5rem;
-    z-index: 10;
-    margin: 0 -1rem 1.2rem;
-    padding: 0.4rem 0.4rem;
+    left: 0;
+    right: 0;
+    z-index: 25;
+    margin: 0;
+    padding: 0.4rem max(1rem, calc((100vw - 80rem) / 2 + 1rem));
     background: var(--bg);
     border-bottom: 1px solid var(--border);
     // grid: ‹ arrow | strip | › arrow | (optional list button).
@@ -710,9 +716,22 @@ main { display: block; width: 100%; }
     }
   }
 
-  // Phones: header shrinks → sticky-top offset shrinks too.
+  // Spacer that fills the slot the now-fixed .category-nav would
+  // otherwise occupy in normal flow, so the menu content doesn't
+  // jump up under the header. Height tracks the nav's intrinsic
+  // height: arrow/button (2.2rem) + vertical padding (0.4rem × 2)
+  // + the 1.2rem gap we used to live on the nav's bottom-margin.
+  .category-nav-spacer {
+    height: calc(2.2rem + 0.8rem + 1.2rem);
+  }
+
+  // Phones: header + nav both shrink; spacer follows.
   @media (max-width: 36rem) {
-    .category-nav { top: 2rem; padding: 0.35rem 0.3rem; gap: 0.2rem; }
+    .category-nav {
+      top: 2rem;
+      padding: 0.35rem 0.3rem;
+      gap: 0.2rem;
+    }
     .category-nav .cat-arrow,
     .category-nav .cat-list-btn {
       width: 1.9rem;
@@ -720,6 +739,9 @@ main { display: block; width: 100%; }
     }
     .category-nav .cat-arrow { font-size: 1.2rem; }
     .category-nav .cat-list-btn svg { width: 16px; height: 16px; }
+    .category-nav-spacer {
+      height: calc(1.9rem + 0.7rem + 1rem);
+    }
   }
 
   .category {
