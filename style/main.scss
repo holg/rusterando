@@ -94,32 +94,26 @@ input[type="number"], input[type="password"], input[type="text"] {
   font-family: inherit;
 }
 
-// Sticky-offset variables. The TEST badge (when stripe is in sandbox)
-// sits above the .site-header, so anything that wants to stick BELOW
-// the header has to clear both. We declare safe defaults here and
-// override via :has() when the badge is present, so /menu's
-// .category-nav (and any future sticky element) can read a single
-// canonical value instead of duplicating the math.
+// Sticky-offset variable. The TEST badge (when stripe is in sandbox)
+// is the only thing that stays pinned to the viewport top on
+// scroll — the .site-header scrolls away with the page. So any
+// content that wants to stick below the badge reads
+// --sticky-content-offset, which is 0 in live mode and ~banner-height
+// in test mode.
 :root {
-  --sticky-top-offset: 0px;       // how far the .site-header itself sits from the viewport top
-  --sticky-content-offset: 2.5rem; // header bottom edge; what subsequent sticky content uses
+  --sticky-content-offset: 0px;
 }
 body:has(.test-mode-banner) {
-  --sticky-top-offset: 2rem;       // ~ banner height (0.35rem × 2 + ~1.3rem content)
-  --sticky-content-offset: 4.5rem; // banner + header
+  --sticky-content-offset: 2rem; // ~ banner height (0.35rem × 2 + ~1.3rem content)
 }
 @media (max-width: 36rem) {
-  :root { --sticky-content-offset: 2rem; }
   body:has(.test-mode-banner) {
-    --sticky-top-offset: 1.8rem;
-    --sticky-content-offset: 3.8rem;
+    --sticky-content-offset: 1.8rem;
   }
 }
 
-// ----- Sticky site header -----
+// ----- Site header (scrolls away with the page) -----
 .site-header {
-  position: sticky;
-  top: var(--sticky-top-offset);
   z-index: 30;
   display: flex;
   align-items: center;
