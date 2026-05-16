@@ -348,29 +348,31 @@ pub fn DriverBoardPage() -> impl IntoView {
                 <button class="btn ghost" on:click=move |_| orders.refetch()>"Aktualisieren"</button>
                 <button class="logout" on:click=move |_| { logout.dispatch(crate::pages::session::SessionLogout {}); }>"Abmelden"</button>
             </header>
-            <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
-                {move || orders.get().map(|res| match res {
-                    Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                    Ok(d)  => view! {
-                        <Stacks
-                            d
-                            advance
-                            starter
-                            stop_delivered
-                            tour_finisher
-                            stop_remover
-                            tour_canceller
-                            selected
-                            on_start_tour=Callback::new(on_start_tour)
-                            toggle_selected=Callback::new(move |(id, on): (String, bool)| toggle_selected(id, on))
-                        />
-                    }.into_any(),
-                })}
-            </Suspense>
-            {move || match starter.value().get() {
-                Some(Err(e)) => Some(view! { <p class="error">{format!("Tour-Fehler: {e}")}</p> }.into_any()),
-                _ => None,
-            }}
+            <main class="orders-page">
+                <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+                    {move || orders.get().map(|res| match res {
+                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                        Ok(d)  => view! {
+                            <Stacks
+                                d
+                                advance
+                                starter
+                                stop_delivered
+                                tour_finisher
+                                stop_remover
+                                tour_canceller
+                                selected
+                                on_start_tour=Callback::new(on_start_tour)
+                                toggle_selected=Callback::new(move |(id, on): (String, bool)| toggle_selected(id, on))
+                            />
+                        }.into_any(),
+                    })}
+                </Suspense>
+                {move || match starter.value().get() {
+                    Some(Err(e)) => Some(view! { <p class="error">{format!("Tour-Fehler: {e}")}</p> }.into_any()),
+                    _ => None,
+                }}
+            </main>
         </div>
     }
 }

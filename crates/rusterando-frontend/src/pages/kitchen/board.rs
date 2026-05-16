@@ -258,12 +258,14 @@ pub fn KitchenBoardPage() -> impl IntoView {
                 <button class="btn ghost" on:click=move |_| orders.refetch()>"Aktualisieren"</button>
                 <button class="logout" on:click=move |_| { logout.dispatch(crate::pages::session::SessionLogout {}); }>"Abmelden"</button>
             </header>
-            <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
-                {move || orders.get().map(|res| match res {
-                    Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                    Ok(data) => view! { <Board data advance reprinter/> }.into_any(),
-                })}
-            </Suspense>
+            <main class="orders-page">
+                <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+                    {move || orders.get().map(|res| match res {
+                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                        Ok(data) => view! { <Board data advance reprinter/> }.into_any(),
+                    })}
+                </Suspense>
+            </main>
         </div>
     }
 }
