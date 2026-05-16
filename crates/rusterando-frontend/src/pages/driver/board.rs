@@ -471,6 +471,8 @@ fn ReadyCard(
     let needs_cash = r.payment_status == "cash_on_pickup";
     let cash_label = if needs_cash {
         format!("BAR: {}", format_eur(r.total_cents))
+    } else if r.payment_status == "voucher_paid" {
+        "Mit Gutschein bezahlt".to_string()
     } else {
         "Online bezahlt".to_string()
     };
@@ -671,6 +673,8 @@ fn TourStopRow(
 
     let cash_label = if needs_cash {
         format!("BAR: {}", format_eur(s.total_cents))
+    } else if s.payment_status == "voucher_paid" {
+        "Mit Gutschein bezahlt".to_string()
     } else {
         "Online bezahlt".to_string()
     };
@@ -747,6 +751,8 @@ fn LooseCard(r: DriverOrderRow, advance: ServerAction<DriverAdvance>) -> impl In
     let needs_cash = r.payment_status == "cash_on_pickup";
     let cash_label = if needs_cash {
         format!("BAR: {}", format_eur(r.total_cents))
+    } else if r.payment_status == "voucher_paid" {
+        "Mit Gutschein bezahlt".to_string()
     } else {
         "Online bezahlt".to_string()
     };

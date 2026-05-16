@@ -2542,7 +2542,11 @@ pub async fn start_tour(
                 "Bestellung {num} ist nicht 'Abholbereit' (aktuell: {status})."
             )));
         }
-        if !matches!(pay.as_str(), "paid" | "cash_on_pickup") {
+        // Tour-eligible payment states:
+        //   paid           — Stripe (or other online) completed
+        //   cash_on_pickup — driver collects on arrival
+        //   voucher_paid   — fully covered by a voucher, no money owed
+        if !matches!(pay.as_str(), "paid" | "cash_on_pickup" | "voucher_paid") {
             return Err(ServerFnError::new(format!(
                 "Bestellung {num} hat einen unklaren Zahlungsstatus ({pay})."
             )));
