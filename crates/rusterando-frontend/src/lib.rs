@@ -14,6 +14,7 @@ pub mod utils;
 #[cfg(feature = "ssr")]
 pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<branding::GetShopName>();
+    leptos::server_fn::axum::register_explicit::<i18n::GetI18nEnabled>();
     leptos::server_fn::axum::register_explicit::<stripe::GetStripeMode>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListMenu>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListAdminMenu>();

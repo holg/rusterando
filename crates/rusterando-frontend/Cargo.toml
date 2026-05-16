@@ -36,12 +36,6 @@ async-stripe = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 async-trait = { version = "0.1", optional = true }
 
-# i18n addon — optional. When OFF (default) the `t!` macro inlines
-# from locales/de.json at runtime via the local de_only shim. When ON
-# this crate handles URL-prefix routing, cookie-backed locale memory,
-# and runtime switching across de/en/fr/it/es/pt/ru/cn.
-leptos_i18n = { version = "0.6", optional = true }
-
 # WASM-only
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
@@ -63,10 +57,6 @@ web-sys = { version = "0.3", features = [
 
 [features]
 default = []
-# Multi-language UI. Adds en/fr/it/es/pt/ru/cn alongside the always-on
-# German baseline. Without this flag the binary is bit-equivalent to
-# the German-only build the davidspizzeria.de deploy ships today.
-i18n = ["dep:leptos_i18n"]
 hydrate = [
     "leptos/hydrate",
     "dep:wasm-bindgen",

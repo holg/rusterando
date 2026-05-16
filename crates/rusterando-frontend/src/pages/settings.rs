@@ -138,6 +138,11 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     if key == "theme" && !ALLOWED_THEMES.contains(&value.trim()) {
         return Err(ServerFnError::new("Thema muss 'warm' oder 'dark' sein."));
     }
+    if key == "i18n_enabled" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
+        return Err(ServerFnError::new(
+            "i18n_enabled muss '0' / '1' (oder 'true' / 'false') sein.",
+        ));
+    }
     if key == "stripe_mode" {
         // Only the two literal values are accepted. Refuse 'live'
         // when the matching env vars aren't set so the admin can't
@@ -205,6 +210,14 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     if key == "stripe_mode" {
         if let Some(h) = use_context::<crate::stripe::StripeModeHandle>() {
             h.set(crate::stripe::StripeMode::from_setting(value.trim()));
+        }
+    }
+    // i18n toggle — flip the runtime handle so the next request
+    // immediately sees the new state (locale switcher visibility,
+    // /<lang>/* guard middleware).
+    if key == "i18n_enabled" {
+        if let Some(h) = use_context::<I18nHandle>() {
+            h.set(matches!(value.trim(), "1" | "true"));
         }
     }
     Ok(())

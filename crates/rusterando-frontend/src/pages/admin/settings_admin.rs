@@ -113,6 +113,7 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
     let is_cents = key.ends_with("_cents");
     let is_theme = key == "theme";
     let is_stripe_mode = key == "stripe_mode";
+    let is_i18n_toggle = key == "i18n_enabled";
     let preview_eur = Memo::new(move |_| {
         value
             .get()
@@ -147,6 +148,16 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
                 on:change=move |ev| value.set(event_target_value(&ev))>
                 <option value="sandbox">"Sandbox (Test) — keine echten Zahlungen"</option>
                 <option value="live">"Live (Echtbetrieb) — Karten werden belastet"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_i18n_toggle {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="0">"Aus — nur Deutsch (Standard)"</option>
+                <option value="1">"An — Sprachauswahl + /en/, /fr/, /it/, … Pfade aktiv"</option>
             </select>
         }
         .into_any()

@@ -151,82 +151,78 @@ fn de_table() -> &'static HashMap<String, String> {
     DE_TABLE.get_or_init(|| build_table(DE_JSON, "de"))
 }
 
-// The other 7 are only embedded when the `i18n` feature is on, so
-// off-builds don't carry extra bytes.
-#[cfg(feature = "i18n")]
-mod tables_on {
-    use super::*;
-    static EN_JSON: &str = include_str!("../locales/en.json");
-    static FR_JSON: &str = include_str!("../locales/fr.json");
-    static IT_JSON: &str = include_str!("../locales/it.json");
-    static ES_JSON: &str = include_str!("../locales/es.json");
-    static PT_JSON: &str = include_str!("../locales/pt.json");
-    static RU_JSON: &str = include_str!("../locales/ru.json");
-    static CN_JSON: &str = include_str!("../locales/cn.json");
+// All 7 non-default JSONs are bundled unconditionally — ~250 KB total,
+// trivially small vs. the rest of the WASM bundle. The runtime
+// `i18n_enabled` admin toggle decides whether the locale switcher
+// renders and whether /<lang>/ paths are served; the data is always
+// here in case it's flipped on.
+static EN_JSON: &str = include_str!("../locales/en.json");
+static FR_JSON: &str = include_str!("../locales/fr.json");
+static IT_JSON: &str = include_str!("../locales/it.json");
+static ES_JSON: &str = include_str!("../locales/es.json");
+static PT_JSON: &str = include_str!("../locales/pt.json");
+static RU_JSON: &str = include_str!("../locales/ru.json");
+static CN_JSON: &str = include_str!("../locales/cn.json");
 
-    static EN_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
-    static FR_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
-    static IT_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
-    static ES_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
-    static PT_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
-    static RU_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
-    static CN_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+static EN_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+static FR_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+static IT_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+static ES_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+static PT_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+static RU_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
+static CN_TABLE: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-    pub fn table_for(loc: Locale) -> Option<&'static HashMap<String, String>> {
-        match loc {
-            Locale::De => Some(de_table()),
-            Locale::En => Some(EN_TABLE.get_or_init(|| build_table(EN_JSON, "en"))),
-            Locale::Fr => Some(FR_TABLE.get_or_init(|| build_table(FR_JSON, "fr"))),
-            Locale::It => Some(IT_TABLE.get_or_init(|| build_table(IT_JSON, "it"))),
-            Locale::Es => Some(ES_TABLE.get_or_init(|| build_table(ES_JSON, "es"))),
-            Locale::Pt => Some(PT_TABLE.get_or_init(|| build_table(PT_JSON, "pt"))),
-            Locale::Ru => Some(RU_TABLE.get_or_init(|| build_table(RU_JSON, "ru"))),
-            Locale::Cn => Some(CN_TABLE.get_or_init(|| build_table(CN_JSON, "cn"))),
-        }
+fn table_for(loc: Locale) -> &'static HashMap<String, String> {
+    match loc {
+        Locale::De => de_table(),
+        Locale::En => EN_TABLE.get_or_init(|| build_table(EN_JSON, "en")),
+        Locale::Fr => FR_TABLE.get_or_init(|| build_table(FR_JSON, "fr")),
+        Locale::It => IT_TABLE.get_or_init(|| build_table(IT_JSON, "it")),
+        Locale::Es => ES_TABLE.get_or_init(|| build_table(ES_JSON, "es")),
+        Locale::Pt => PT_TABLE.get_or_init(|| build_table(PT_JSON, "pt")),
+        Locale::Ru => RU_TABLE.get_or_init(|| build_table(RU_JSON, "ru")),
+        Locale::Cn => CN_TABLE.get_or_init(|| build_table(CN_JSON, "cn")),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Active-locale context. Always available so server fns / SQL loaders
-// can call `current_locale()` without `#[cfg]` gating — in off-builds
-// it just always returns DEFAULT.
+// Active-locale context. Always available; defaults to Locale::De when
+// no context has been provided. The locale signal is set in App() based
+// on the URL path; SSR + hydrate compute it identically.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "i18n")]
-pub use ctx_on::*;
+use leptos::prelude::*;
 
-#[cfg(feature = "i18n")]
-mod ctx_on {
-    use super::Locale;
-    use leptos::prelude::*;
+#[derive(Debug, Clone, Copy)]
+pub struct LocaleCtx(pub RwSignal<Locale>);
 
-    #[derive(Debug, Clone, Copy)]
-    pub struct LocaleCtx(pub RwSignal<Locale>);
-
-    /// Read the current locale from context. Falls back to DE if no
-    /// context has been provided (defensive — every App() that uses
-    /// the i18n feature must call provide_locale_ctx).
-    pub fn current_locale() -> Locale {
-        use_context::<LocaleCtx>()
-            .map(|c| c.0.get())
-            .unwrap_or(Locale::DEFAULT)
-    }
-
-    /// Install the locale context. Pass the initial locale resolved
-    /// from the request path / cookie / default. Returns the signal
-    /// so a locale switcher can write to it.
-    pub fn provide_locale_ctx(initial: Locale) -> RwSignal<Locale> {
-        let sig = RwSignal::new(initial);
-        provide_context(LocaleCtx(sig));
-        sig
-    }
-}
-
-/// Stub for off-builds so callers can use `crate::i18n::current_locale()`
-/// without a `#[cfg]` shim. Always returns `Locale::De`.
-#[cfg(not(feature = "i18n"))]
+/// Read the current locale from context. Falls back to DE if no
+/// context has been provided (defensive — every App() should call
+/// `provide_locale_ctx`).
 pub fn current_locale() -> Locale {
-    Locale::DEFAULT
+    use_context::<LocaleCtx>()
+        .map(|c| c.0.get())
+        .unwrap_or(Locale::DEFAULT)
+}
+
+/// Install the locale context. Pass the initial locale resolved
+/// from the request path. Returns the signal so a locale switcher
+/// can write to it.
+pub fn provide_locale_ctx(initial: Locale) -> RwSignal<Locale> {
+    let sig = RwSignal::new(initial);
+    provide_context(LocaleCtx(sig));
+    sig
+}
+
+/// Server fn exposing the runtime i18n toggle to SSR + hydrate.
+/// Reads `app_settings.i18n_enabled` via the I18nHandle that the
+/// server crate provides at boot. Defaults to `false` if the handle
+/// is missing (older binaries / fresh DB).
+#[server(name = GetI18nEnabled, prefix = "/api", endpoint = "i18n_enabled")]
+pub async fn get_i18n_enabled() -> Result<bool, ServerFnError> {
+    Ok(use_context::<crate::pages::settings::I18nHandle>()
+        .map(|h| h.get())
+        .unwrap_or(false))
 }
 
 /// Build a SQL fragment that resolves the right per-locale column with
@@ -249,30 +245,19 @@ pub fn coalesce_col(base: &str, _table_alias: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Translation lookup. Two implementations selected by feature flag.
+// Translation lookup.
 // ---------------------------------------------------------------------------
 
-/// Translation lookup. Missing keys return `⚠key` so a typo is loud
-/// in the UI instead of silent (matches leptos_i18n's dev-mode hint).
-#[cfg(not(feature = "i18n"))]
-pub fn t(key: &str) -> String {
-    de_table()
-        .get(key)
-        .cloned()
-        .unwrap_or_else(|| format!("⚠{key}"))
-}
-
 /// Locale-aware lookup. Reads the active locale from context, falls
-/// back to German for keys missing in the active locale's table.
-#[cfg(feature = "i18n")]
+/// back to German for keys missing in the active locale's table,
+/// then to `⚠key` to make typos loud in the UI.
 pub fn t(key: &str) -> String {
     let loc = current_locale();
-    if let Some(tab) = tables_on::table_for(loc) {
-        if let Some(v) = tab.get(key) {
-            return v.clone();
-        }
+    let tab = table_for(loc);
+    if let Some(v) = tab.get(key) {
+        return v.clone();
     }
-    // Fallback chain: active locale → DE → key-warning.
+    // Fallback: active locale → DE → key-warning.
     de_table()
         .get(key)
         .cloned()

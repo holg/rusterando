@@ -47,6 +47,13 @@ struct AppState {
     /// payment-method detail lookup.
     #[allow(dead_code)]
     stripe_mode: rusterando_frontend::stripe::StripeModeHandle,
+    /// Multilingual UI toggle. `false` = single-locale (German-only)
+    /// shop, the locale switcher is hidden, /<lang>/* routes 404.
+    /// `true` = the locale switcher appears in the header and
+    /// prefixed routes serve translated content. Same boot-read +
+    /// write-through pattern as the other handles.
+    #[allow(dead_code)]
+    i18n: rusterando_frontend::pages::settings::I18nHandle,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
@@ -182,6 +189,13 @@ async fn main() {
     let stripe_mode = rusterando_frontend::stripe::StripeModeHandle::new(stripe_mode_initial);
     tracing::info!(mode = ?stripe_mode_initial, "Stripe mode at boot");
 
+    // i18n toggle — same boot read + write-through pattern. Default
+    // is false (single-locale) so a fresh deployment behaves like
+    // Davids' until the admin flips the switch in /admin/settings.
+    let i18n_initial = rusterando_frontend::pages::settings::ssr::i18n_enabled(&db).await;
+    let i18n = rusterando_frontend::pages::settings::I18nHandle::new(i18n_initial);
+    tracing::info!(enabled = i18n_initial, "i18n toggle at boot");
+
     // Kitchen-printer subsystem (see src/kitchen.rs). Spun up only
     // when KITCHEN_LISTEN_ADDR is set in .env so printerless deploys
     // skip the outbox writes entirely. Always loopback in production
@@ -226,6 +240,7 @@ async fn main() {
         branding,
         kitchen,
         stripe_mode,
+        i18n,
     };
 
     let routes = generate_route_list(App);
@@ -241,7 +256,11 @@ async fn main() {
     // so the inner Routes tree matches the canonical version. Default
     // locale (de) is intentionally excluded — its prefix is canonicalised
     // away by the locale_canonicalize_middleware below.
-    #[cfg(feature = "i18n")]
+    // Always expand: every binary registers /<lang>/* routes for the
+    // 7 non-default locales. Whether they ACTUALLY serve customer
+    // content is decided at request time by `i18n_guard_middleware`
+    // below, which 404s any prefixed path when the admin toggle is
+    // off (Davids' default), so the SEO leak is closed.
     let routes = expand_locale_routes(routes);
 
     // Trait-erased push handle so server fns in the frontend crate
@@ -276,6 +295,7 @@ async fn main() {
                 let branding = state.branding.clone();
                 let kitchen_sink = kitchen_sink.clone();
                 let stripe_mode = state.stripe_mode.clone();
+                let i18n = state.i18n.clone();
                 move || {
                     provide_context(db.clone());
                     provide_context(pwd.clone());
@@ -287,6 +307,7 @@ async fn main() {
                     // KitchenSinkHandle — None on printerless deploys.
                     provide_context(kitchen_sink.clone());
                     provide_context(stripe_mode.clone());
+                    provide_context(i18n.clone());
                 }
             },
             {
@@ -378,6 +399,13 @@ async fn main() {
         // /de/* canonicalisation runs first so all downstream layers
         // (rate-limit, admin-auth, Leptos) see the canonical URL.
         .layer(axum::middleware::from_fn(locale_canonicalize_middleware))
+        // Then the i18n-toggle guard: 404 /<lang>/* when the admin
+        // setting is off. Needs state to read the I18nHandle, so it
+        // uses from_fn_with_state.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            i18n_guard_middleware,
+        ))
         // Rate limit must wrap EVERYTHING so it sees server-fn paths that
         // leptos_axum auto-registers (those bypass our /api/{*fn_name} catch-all).
         .layer(axum::middleware::from_fn(rate_limit_middleware))
@@ -1297,6 +1325,7 @@ async fn server_fn_handler(
             let theme = state.theme.clone();
             let branding = state.branding.clone();
             let stripe_mode = state.stripe_mode.clone();
+            let i18n = state.i18n.clone();
             move || {
                 provide_context(db.clone());
                 provide_context(pwd.clone());
@@ -1307,6 +1336,7 @@ async fn server_fn_handler(
                 provide_context(branding.clone());
                 provide_context(kitchen_sink.clone());
                 provide_context(stripe_mode.clone());
+                provide_context(i18n.clone());
             }
         },
         req,
@@ -1327,7 +1357,6 @@ async fn server_fn_handler(
 /// Default locale (de) is intentionally skipped — its prefix is
 /// canonicalised away to `/` by the locale_canonicalize_middleware
 /// so /de/foo is never actually served.
-#[cfg(feature = "i18n")]
 fn expand_locale_routes(
     routes: Vec<leptos_axum::AxumRouteListing>,
 ) -> Vec<leptos_axum::AxumRouteListing> {
@@ -1368,14 +1397,41 @@ fn expand_locale_routes(
     out
 }
 
-/// When `feature = "i18n"` is enabled in the frontend crate, /de/...
-/// is the redundant prefix for the default locale and should 302 to
-/// the canonical un-prefixed URL. Browsing /de/menu lands on /menu.
+/// Closes the SEO leak for single-locale deployments: when the admin
+/// hasn't enabled i18n, /<lang>/* paths (for the 7 non-default
+/// locales) should 404 instead of secretly serving translated content.
+/// Wired before the leptos route handler so prefixed URLs don't reach
+/// the route table even though it carries them.
 ///
-/// Compiled in unconditionally here (the server crate doesn't track
-/// the frontend's feature flag), so even Davids' German-only build
-/// will redirect /de/* → /* if anyone hits it. Harmless on a single-
-/// locale deploy: nobody ever links there.
+/// Implemented as middleware (not a route) so a single `if` decides
+/// the fate of all 7 prefixes without enumerating them in axum's
+/// router tree.
+async fn i18n_guard_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if state.i18n.get() {
+        return next.run(req).await;
+    }
+    // i18n disabled — block the 7 non-default locale prefixes.
+    let p = req.uri().path();
+    for prefix in ["/en", "/fr", "/it", "/es", "/pt", "/ru", "/cn"] {
+        if p == prefix || p.starts_with(&format!("{prefix}/")) {
+            return (StatusCode::NOT_FOUND, "").into_response();
+        }
+    }
+    next.run(req).await
+}
+
+/// `/de/...` is the redundant prefix for the default locale and should
+/// 302 to the canonical un-prefixed URL. Browsing /de/menu lands on
+/// /menu. Runs regardless of the i18n toggle — even single-locale
+/// shops benefit from canonicalising stray /de/ links nobody made
+/// themselves but a bot might guess.
 async fn locale_canonicalize_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,

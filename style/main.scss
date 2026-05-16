@@ -159,8 +159,9 @@ input[type="number"], input[type="password"], input[type="text"] {
       color: white;
     }
   }
-  // Locale switcher (i18n feature only). Plain <select> styled to
-  // sit next to the pill nav without competing with it.
+  // Locale switcher. Runtime-toggled via `i18n_enabled` admin setting;
+  // when off, `.hidden` removes it from view but keeps the DOM in
+  // place so SSR + hydrate match.
   .locale-switcher {
     appearance: none;
     -webkit-appearance: none;
@@ -176,6 +177,9 @@ input[type="number"], input[type="password"], input[type="text"] {
     background-repeat: no-repeat;
     background-position: right 0.5rem center;
     background-size: 0.6rem;
+  }
+  .locale-switcher.hidden {
+    display: none;
   }
 
   @media (max-width: 36rem) {

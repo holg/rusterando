@@ -140,35 +140,32 @@ pub fn App() -> impl IntoView {
 
     // i18n: install the locale context AND derive the Router base
     // path so the inner Routes block matches `/menu` regardless of
-    // whether the request is `/menu` or `/en/menu`. Off-builds skip
-    // both and pass an empty base.
+    // whether the request is `/menu` or `/en/menu`. Always-on now —
+    // the runtime `i18n_enabled` admin toggle separately decides
+    // whether the locale switcher renders and whether prefixed routes
+    // are served (server-side middleware enforces the 404 when off).
     //
     // SSR + hydrate both compute the same value from the same path so
     // there's no DOM mismatch at hydrate time. Hydrate reads
-    // window.location.pathname; SSR reads the path from
-    // leptos_router's RequestUrl context.
-    #[cfg(feature = "i18n")]
-    let router_base: &'static str = {
-        let path = current_path();
-        let (loc, _rest) = crate::i18n::split_locale_prefix(&path);
-        let initial = loc.unwrap_or(crate::i18n::Locale::DEFAULT);
-        let _ = crate::i18n::provide_locale_ctx(initial);
-        // Map the resolved locale to a *static* base string — required
-        // by Router's `base: Cow<'static, str>` prop. Default locale
-        // uses "" so canonical URLs have no prefix.
-        match initial {
-            crate::i18n::Locale::De => "",
-            crate::i18n::Locale::En => "/en",
-            crate::i18n::Locale::Fr => "/fr",
-            crate::i18n::Locale::It => "/it",
-            crate::i18n::Locale::Es => "/es",
-            crate::i18n::Locale::Pt => "/pt",
-            crate::i18n::Locale::Ru => "/ru",
-            crate::i18n::Locale::Cn => "/cn",
-        }
+    // window.location.pathname; SSR reads it from leptos_router's
+    // RequestUrl context.
+    let path = current_path();
+    let (loc, _rest) = crate::i18n::split_locale_prefix(&path);
+    let initial = loc.unwrap_or(crate::i18n::Locale::DEFAULT);
+    let _ = crate::i18n::provide_locale_ctx(initial);
+    // Map the resolved locale to a *static* base string — required
+    // by Router's `base: Cow<'static, str>` prop. Default locale
+    // uses "" so canonical URLs have no prefix.
+    let router_base: &'static str = match initial {
+        crate::i18n::Locale::De => "",
+        crate::i18n::Locale::En => "/en",
+        crate::i18n::Locale::Fr => "/fr",
+        crate::i18n::Locale::It => "/it",
+        crate::i18n::Locale::Es => "/es",
+        crate::i18n::Locale::Pt => "/pt",
+        crate::i18n::Locale::Ru => "/ru",
+        crate::i18n::Locale::Cn => "/cn",
     };
-    #[cfg(not(feature = "i18n"))]
-    let router_base: &'static str = "";
 
     // <title> driven by a server-fn-backed Resource so SSR and hydrate
     // render the same value. A direct context read would diverge: SSR
@@ -236,7 +233,6 @@ pub fn App() -> impl IntoView {
 /// SSR: the path comes from the http::request::Parts that the leptos
 /// integration layer makes available via context (provided by
 /// leptos_axum's route handler). Hydrate: window.location.pathname.
-#[cfg(feature = "i18n")]
 fn current_path() -> String {
     #[cfg(feature = "ssr")]
     {
@@ -259,7 +255,7 @@ fn current_path() -> String {
                 .unwrap_or(path_and_q);
             return path.to_string();
         }
-        return "/".to_string();
+        "/".to_string()
     }
     #[cfg(all(feature = "hydrate", not(feature = "ssr")))]
     {

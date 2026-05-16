@@ -9,5 +9,10 @@
 -- Default '0' (disabled) matches Davids' current behaviour: the
 -- /admin/settings page picks up the toggle, and admins of new
 -- deployments must explicitly turn it on.
-INSERT INTO app_settings (key, value) VALUES ('i18n_enabled', '0')
+INSERT INTO app_settings (key, value, label_de, hint_de) VALUES (
+    'i18n_enabled',
+    '0',
+    'Mehrsprachige Oberfläche',
+    'Wenn aktiviert, zeigt der Header die Sprachauswahl und /en/, /fr/, /it/, /es/, /pt/, /ru/, /cn/-URLs liefern die übersetzte Oberfläche. Aus = einsprachiger Shop (nur Deutsch).'
+)
 ON CONFLICT(key) DO NOTHING;
