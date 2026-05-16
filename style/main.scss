@@ -657,7 +657,10 @@ main { display: block; width: 100%; }
       background: var(--primary);
       color: white;
       border-color: var(--primary);
-      svg { display: block; }
+      // SVG must not intercept the tap — let the click bubble to the
+      // button so Leptos's delegated handler sees it (Safari otherwise
+      // delivers the click to the inner <circle>/<rect> nodes).
+      svg { display: block; pointer-events: none; }
       &:hover, &:focus-visible {
         background: var(--primary-dark, var(--primary));
         color: white;
