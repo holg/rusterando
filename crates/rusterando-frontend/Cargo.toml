@@ -46,6 +46,11 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Location",
     "HtmlInputElement",
+    "HtmlSelectElement",
+    "Document",
+    "Element",
+    "NodeList",
+    "DomTokenList",
     "File",
     "FileList",
     "FormData",
@@ -53,6 +58,13 @@ web-sys = { version = "0.3", features = [
     "RequestInit",
     "Response",
     "Blob",
+    # Menu page: track current section + auto-scroll the active pill.
+    "IntersectionObserver",
+    "IntersectionObserverInit",
+    "IntersectionObserverEntry",
+    "ScrollIntoViewOptions",
+    "ScrollBehavior",
+    "ScrollLogicalPosition",
 ], optional = true }
 
 [features]

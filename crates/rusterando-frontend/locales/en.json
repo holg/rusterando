@@ -69,7 +69,13 @@
     "extras_first_n_free": "The first {n} toppings are included.",
     "extras_first_n_then_flat": "The first {n} toppings are included, each additional {amount}.",
     "unavailable": "currently unavailable",
-    "category_overlay_aria": "Category overview"
+    "category_overlay_aria": "Category overview",
+    "scroll_left_aria": "Scroll left",
+    "scroll_right_aria": "Scroll right",
+    "category_fab_aria": "Open category list",
+    "category_fab_label": "Categories",
+    "category_sheet_aria": "Category list",
+    "category_sheet_title": "Categories"
   },
   "cart": {
     "title": "Cart",

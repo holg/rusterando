@@ -69,7 +69,13 @@
     "extras_first_n_free": "Первые {n} ингредиентов включены.",
     "extras_first_n_then_flat": "Первые {n} ингредиентов включены, каждый дополнительный {amount}.",
     "unavailable": "сейчас недоступно",
-    "category_overlay_aria": "Обзор категорий"
+    "category_overlay_aria": "Обзор категорий",
+    "scroll_left_aria": "Прокрутить влево",
+    "scroll_right_aria": "Прокрутить вправо",
+    "category_fab_aria": "Открыть список категорий",
+    "category_fab_label": "Категории",
+    "category_sheet_aria": "Список категорий",
+    "category_sheet_title": "Категории"
   },
   "cart": {
     "title": "Корзина",

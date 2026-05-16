@@ -367,8 +367,121 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
     provide_context(extras_sv);
 
     let cats_for_tabs = categories.clone();
-    let cats_for_overlay = categories.clone();
+    let cats_for_sheet = categories.clone();
     let cats_for_sections = categories.clone();
+
+    // Sheet open state — toggled by the floating "Kategorien" FAB.
+    let sheet_open: RwSignal<bool> = RwSignal::new(false);
+
+    // Hydrate-side: track which category section is in view and add
+    // `.active` to the matching pill. Single IntersectionObserver
+    // mounted after the DOM is ready; teardown happens when the page
+    // navigates away (Leptos cleanup runs the on_cleanup closure).
+    #[cfg(feature = "hydrate")]
+    {
+        let cat_ids: Vec<String> = categories.iter().map(|c| c.id.clone()).collect();
+        Effect::new(move |_| {
+            use leptos::wasm_bindgen::closure::Closure;
+            use leptos::wasm_bindgen::JsCast;
+            let Some(win) = web_sys::window() else { return };
+            let Some(doc) = win.document() else { return };
+
+            // Per-observation: find the entry with the highest
+            // intersection ratio and mark its pill .active. Scroll
+            // the pill into view inside the strip so the customer
+            // sees where they are while reading down the menu.
+            let ids_for_cb = cat_ids.clone();
+            let cb = Closure::<dyn Fn(js_sys::Array, web_sys::IntersectionObserver)>::new(
+                move |entries: js_sys::Array, _obs: web_sys::IntersectionObserver| {
+                    let mut best: Option<(String, f64)> = None;
+                    for v in entries.iter() {
+                        let Ok(entry) = v.dyn_into::<web_sys::IntersectionObserverEntry>() else {
+                            continue;
+                        };
+                        if !entry.is_intersecting() {
+                            continue;
+                        }
+                        let id = entry.target().id();
+                        let ratio = entry.intersection_ratio();
+                        if best.as_ref().map(|(_, r)| ratio > *r).unwrap_or(true) {
+                            best = Some((id, ratio));
+                        }
+                    }
+                    let Some((section_id, _)) = best else { return };
+                    // section ids are "cat-<id>"; the tab a is "tab-<id>".
+                    let Some(cat_id) = section_id.strip_prefix("cat-") else {
+                        return;
+                    };
+                    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+                        return;
+                    };
+                    // Mark .active on the matching pill, clear others.
+                    let strip = doc.query_selector(".category-tabs").ok().flatten();
+                    if let Some(strip) = strip {
+                        if let Ok(pills) = strip.query_selector_all("a[data-cat]") {
+                            for i in 0..pills.length() {
+                                if let Some(node) = pills.item(i) {
+                                    if let Ok(el) = node.dyn_into::<web_sys::Element>() {
+                                        let is_match = el
+                                            .get_attribute("data-cat")
+                                            .map(|v| v == cat_id)
+                                            .unwrap_or(false);
+                                        if is_match {
+                                            el.class_list().add_1("active").ok();
+                                            // Centre the active pill in the
+                                            // strip on every tick. scrollIntoView
+                                            // with `inline: "center"` is the
+                                            // browser-native way; falling back
+                                            // to a manual scroll_left math if
+                                            // unavailable is overkill for now.
+                                            let init = web_sys::ScrollIntoViewOptions::new();
+                                            init.set_behavior(web_sys::ScrollBehavior::Smooth);
+                                            init.set_block(web_sys::ScrollLogicalPosition::Nearest);
+                                            init.set_inline(web_sys::ScrollLogicalPosition::Center);
+                                            el.scroll_into_view_with_scroll_into_view_options(
+                                                &init,
+                                            );
+                                        } else {
+                                            el.class_list().remove_1("active").ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let _ = ids_for_cb.len();
+                },
+            );
+
+            // Configure: a section counts as "active" when at least
+            // 10% of it is visible. rootMargin pulls the top edge
+            // down by 6rem so the sticky header + tabs (~5rem) don't
+            // count as "above" the section.
+            let init = web_sys::IntersectionObserverInit::new();
+            init.set_root_margin("-6rem 0px -50% 0px");
+            init.set_threshold(&js_sys::Array::of3(
+                &wasm_bindgen::JsValue::from_f64(0.0),
+                &wasm_bindgen::JsValue::from_f64(0.1),
+                &wasm_bindgen::JsValue::from_f64(0.4),
+            ));
+            let observer =
+                web_sys::IntersectionObserver::new_with_options(cb.as_ref().unchecked_ref(), &init)
+                    .ok();
+            cb.forget(); // observer outlives the closure; let JS GC it via the observer
+
+            if let Some(observer) = observer {
+                for id in &cat_ids {
+                    let sel = format!("#cat-{id}");
+                    if let Some(target) = doc.query_selector(&sel).ok().flatten() {
+                        observer.observe(&target);
+                    }
+                }
+                // Disconnect when the page unmounts so we don't keep
+                // a dangling observer between SPA navigations.
+                leptos::prelude::on_cleanup(move || observer.disconnect());
+            }
+        });
+    }
 
     view! {
         <div class="menu">
@@ -384,24 +497,12 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
                 </p>
             </header>
 
-            <nav class="category-tabs">
-                {cats_for_tabs.into_iter().map(|c| {
-                    let href = format!("#cat-{}", c.id);
-                    view! { <a href=href>{c.name.clone()}</a> }
-                }).collect_view()}
-            </nav>
-
-            // Optional always-visible category list, per-shop toggle.
-            // Hidden on viewports < 60rem via CSS — phones stay on
-            // the horizontal tabs alone.
-            {category_overlay.then(|| view! {
-                <aside class="category-overlay" aria-label=crate::t!("menu.category_overlay_aria")>
-                    {cats_for_overlay.into_iter().map(|c| {
-                        let href = format!("#cat-{}", c.id);
-                        view! { <a href=href>{c.name.clone()}</a> }
-                    }).collect_view()}
-                </aside>
-            })}
+            // The .category-nav wrapper hosts the horizontal pill strip
+            // PLUS left/right arrow buttons. Sticky on every viewport,
+            // including phones. The .active pill is highlighted +
+            // auto-scrolled into view by a small hydrate-side effect
+            // driven by IntersectionObserver.
+            <CategoryNav cats=cats_for_tabs/>
 
             <div class="categories">
                 {cats_for_sections.into_iter().map(|cat| {
@@ -414,7 +515,116 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
             </div>
 
             <Legend allergens additives/>
+
+            // Floating "Kategorien" button + full-screen-on-phone
+            // bottom sheet. Per-shop admin toggle hides it for
+            // single-category-list shops.
+            {category_overlay.then(|| view! {
+                <CategoryFab open=sheet_open/>
+                <CategorySheet cats=cats_for_sheet open=sheet_open/>
+            })}
         </div>
+    }
+}
+
+/// Sticky horizontal pill strip wrapped in a row of left/right scroll
+/// arrows. The arrows + auto-scroll logic depend on `web_sys` so they
+/// only fire on hydrate; SSR renders the strip with the arrows visible
+/// but inert.
+#[component]
+fn CategoryNav(cats: Vec<MenuCategory>) -> impl IntoView {
+    let scroll_strip = move |dir: i32| {
+        #[cfg(feature = "hydrate")]
+        {
+            use leptos::wasm_bindgen::JsCast;
+            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                if let Some(el) = doc.query_selector(".category-tabs").ok().flatten() {
+                    if let Ok(el) = el.dyn_into::<web_sys::Element>() {
+                        let cur = el.scroll_left();
+                        // Scroll ~70% of the visible strip per click — far
+                        // enough to feel like a real jump, short enough to
+                        // keep the previous pills as anchor context.
+                        let step = (el.client_width() as f64 * 0.7) as i32;
+                        el.set_scroll_left(cur + dir * step);
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "hydrate"))]
+        {
+            let _ = dir;
+        }
+    };
+    view! {
+        <div class="category-nav">
+            <button class="cat-arrow left"
+                aria-label=crate::t!("menu.scroll_left_aria")
+                on:click=move |_| scroll_strip(-1)>
+                "‹"
+            </button>
+            <nav class="category-tabs">
+                {cats.into_iter().map(|c| {
+                    let href = format!("#cat-{}", c.id);
+                    let id = format!("tab-{}", c.id);
+                    let data_cat = c.id.clone();
+                    view! {
+                        <a href=href id=id data-cat=data_cat>{c.name.clone()}</a>
+                    }
+                }).collect_view()}
+            </nav>
+            <button class="cat-arrow right"
+                aria-label=crate::t!("menu.scroll_right_aria")
+                on:click=move |_| scroll_strip(1)>
+                "›"
+            </button>
+        </div>
+    }
+}
+
+/// Floating button next to the cart FAB. Click → opens the
+/// category sheet. Independent of the cart's open state.
+#[component]
+fn CategoryFab(open: RwSignal<bool>) -> impl IntoView {
+    view! {
+        <button class="category-fab"
+            aria-label=crate::t!("menu.category_fab_aria")
+            on:click=move |_| open.set(true)>
+            <span class="icon">"📂"</span>
+            <span class="label">{crate::t!("menu.category_fab_label")}</span>
+        </button>
+    }
+}
+
+/// Bottom-sheet (mobile) / side-sheet (desktop) listing every
+/// category. One tap scrolls to the section and closes the sheet.
+/// Uses the same overlay-click-to-close pattern as the cart drawer.
+#[component]
+fn CategorySheet(cats: Vec<MenuCategory>, open: RwSignal<bool>) -> impl IntoView {
+    let is_open = move || open.get();
+    let close = move |_| open.set(false);
+    view! {
+        <div class="category-overlay-bg" class:open=is_open on:click=close></div>
+        <aside class="category-sheet"
+            class:open=is_open
+            aria-hidden=move || (!is_open()).to_string()
+            aria-label=crate::t!("menu.category_sheet_aria")>
+            <header class="sheet-head">
+                <h2>{crate::t!("menu.category_sheet_title")}</h2>
+                <button class="close"
+                    aria-label=crate::t!("common.close")
+                    on:click=close>
+                    "×"
+                </button>
+            </header>
+            <nav class="sheet-list">
+                {cats.into_iter().map(|c| {
+                    let href = format!("#cat-{}", c.id);
+                    view! {
+                        <a href=href on:click=close>{c.name.clone()}</a>
+                    }
+                }).collect_view()}
+            </nav>
+        </aside>
     }
 }
 

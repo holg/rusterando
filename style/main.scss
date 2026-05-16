@@ -583,13 +583,16 @@ main { display: block; width: 100%; }
 .menu {
   max-width: 80rem;
   margin: 0 auto;
-  padding: 2rem 1rem;
+  // Side padding only — no top padding here, so `.category-nav`'s
+  // sticky-top behaviour butts directly against the site header.
+  // The .menu-header below adds the per-page H1 spacing.
+  padding: 0 1rem 2rem;
   width: 100%;
   min-width: 0; // critical: lets the sticky/scrolling tab-strip child shrink instead of forcing parent grow
 
   .menu-header {
     text-align: center;
-    margin-bottom: 1.5rem;
+    margin: 2rem 0 1rem;
     h1 { color: var(--primary); margin: 0; }
     p { color: var(--muted); margin: 0.4rem 0 0; }
     .pdf-link {
@@ -604,87 +607,94 @@ main { display: block; width: 100%; }
     }
   }
 
-  .category-tabs {
+  // Sticky horizontal-pill nav: the .category-nav wrapper carries
+  // the sticky position so the wrapper (arrows + strip) sticks
+  // together. Top offset matches the .site-header height (~2.5rem
+  // desktop, ~2rem on phones — see the @media below).
+  .category-nav {
     position: sticky;
-    // ~2.5rem matches the .site-header height (0.6rem × 2 padding +
-    // ~1.3rem brand wordmark). Hardcoded literal — if the header
-    // ever grows a sub-row this needs to bump in sync.
     top: 2.5rem;
     z-index: 10;
+    margin: 0 -1rem 1.2rem;
+    padding: 0.4rem 0.4rem;
     background: var(--bg);
     border-bottom: 1px solid var(--border);
-    margin: 0 -1rem 1.5rem;
-    padding: 0.6rem 1rem;
-    max-width: 100vw;       // can't be wider than viewport
-    width: 100%;
-
-    // horizontal swipe strip
-    display: flex;
-    flex-wrap: nowrap;
-    gap: 0.5rem;
-    overflow-x: scroll;     // explicit (some browsers don't expose scrollbar w/ "auto" if content fits at first paint)
-    overflow-y: hidden;
-    overscroll-behavior-x: contain;
-    scroll-snap-type: x proximity;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
-
-    // visible scrollbar on WebKit so the user knows it's swipable
-    &::-webkit-scrollbar { height: 8px; }
-    &::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-
-    a {
-      flex: 0 0 auto;          // no shrink, no wrap-onto-next-line
-      scroll-snap-align: start;
-      padding: 0.4rem 0.8rem;
-      border-radius: 1rem;
-      background: white;
-      border: 1px solid var(--border);
-      font-size: 0.85rem;
-      color: var(--text);
-      white-space: nowrap;
-      transition: border-color 120ms, background 120ms;
-    }
-    a:hover, a:focus-visible {
-      border-color: var(--primary);
-      background: #fff5f0;
-      text-decoration: none;
-    }
-  }
-
-  // Optional always-visible vertical category list, pinned to the
-  // left edge of the viewport. Toggled per shop via the
-  // `menu_category_overlay` app_settings row. Hidden below 60rem
-  // so it never collides with the menu grid on phones / tablets —
-  // there the horizontal tabs are the only nav.
-  .category-overlay {
-    position: fixed;
-    left: 0.6rem;
-    top: 6rem;       // header (2.5rem) + tabs (~2rem) + breathing room
-    z-index: 9;      // below tabs (10) and header (30)
-    max-height: calc(100vh - 7rem);
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
     gap: 0.3rem;
-    padding: 0.6rem;
-    background: var(--bg-elev);
-    border: 1px solid var(--border);
-    border-radius: 0.5rem;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
-    font-size: 0.85rem;
-    a {
-      padding: 0.3rem 0.6rem;
-      border-radius: 0.4rem;
+
+    .cat-arrow {
+      flex: 0 0 auto;
+      width: 2.2rem;
+      height: 2.2rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: white;
       color: var(--text);
-      white-space: nowrap;
+      font-size: 1.4rem;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 120ms, border-color 120ms;
       &:hover, &:focus-visible {
         background: var(--accent);
+        border-color: var(--primary);
         text-decoration: none;
       }
     }
-    @media (max-width: 60rem) { display: none; }
+
+    .category-tabs {
+      // horizontal swipe strip — fills the grid middle column
+      min-width: 0;
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 0.5rem;
+      overflow-x: scroll;
+      overflow-y: hidden;
+      overscroll-behavior-x: contain;
+      scroll-snap-type: x proximity;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+      &::-webkit-scrollbar { height: 6px; }
+      &::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+      a {
+        flex: 0 0 auto;
+        scroll-snap-align: start;
+        padding: 0.4rem 0.8rem;
+        border-radius: 1rem;
+        background: white;
+        border: 1px solid var(--border);
+        font-size: 0.85rem;
+        color: var(--text);
+        white-space: nowrap;
+        transition: border-color 120ms, background 120ms, color 120ms;
+      }
+      a:hover, a:focus-visible {
+        border-color: var(--primary);
+        background: #fff5f0;
+        text-decoration: none;
+      }
+      // Marked active by the hydrate-side IntersectionObserver as
+      // the user scrolls through the page — the customer always
+      // knows where they are AND which pill matches their section.
+      a.active {
+        background: var(--primary);
+        border-color: var(--primary);
+        color: white;
+        font-weight: 700;
+      }
+    }
+  }
+
+  // Phones: header shrinks → sticky-top offset shrinks too.
+  @media (max-width: 36rem) {
+    .category-nav { top: 2rem; padding: 0.35rem 0.3rem; }
+    .category-nav .cat-arrow { width: 1.9rem; height: 1.9rem; font-size: 1.2rem; }
   }
 
   .category {
@@ -842,6 +852,124 @@ main { display: block; width: 100%; }
     margin-left: -0.2rem;
   }
   .total { font-variant-numeric: tabular-nums; }
+}
+
+// ----- Floating "Kategorien" FAB + bottom sheet (menu page) -----
+// Sits ABOVE the cart FAB at the bottom-right corner. Opens the
+// category sheet — full-width bottom sheet on phones, side-panel
+// on desktop. Per-shop toggle hides it for single-category shops.
+.category-fab {
+  position: fixed;
+  bottom: 4.8rem;       // clears the cart FAB (~3.5rem tall + 1.2rem gap)
+  right: 1.2rem;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 20px rgba(0,0,0,0.12);
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: transform 120ms, background 120ms, border-color 120ms;
+  &:hover, &:focus-visible {
+    background: var(--accent);
+    border-color: var(--primary);
+    transform: translateY(-2px);
+    text-decoration: none;
+  }
+  .icon { font-size: 1.1rem; line-height: 1; }
+}
+
+.category-overlay-bg {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms;
+  z-index: 60;
+  &.open { opacity: 1; pointer-events: auto; }
+}
+
+.category-sheet {
+  position: fixed;
+  // Side sheet (desktop): pinned to the right edge.
+  top: 0; right: 0; bottom: 0;
+  width: min(420px, 100vw);
+  background: white;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);
+  transition: transform 220ms ease-out;
+  box-shadow: -12px 0 32px rgba(0,0,0,0.15);
+  &.open { transform: translateX(0); }
+
+  .sheet-head {
+    display: flex;
+    align-items: center;
+    padding: 1rem 1.2rem;
+    border-bottom: 1px solid var(--border);
+    h2 { margin: 0; flex: 1; color: var(--primary); font-size: 1.15rem; }
+    .close {
+      background: var(--primary);
+      color: white;
+      font-size: 1.5rem;
+      width: 2.75rem;
+      height: 2.75rem;
+      border-radius: 999px;
+      border: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.18);
+      &:hover, &:active { background: var(--primary-dark); transform: scale(1.05); }
+    }
+  }
+  .sheet-list {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    padding: 0.6rem 1rem 1.2rem;
+    a {
+      display: block;
+      padding: 0.7rem 0.8rem;
+      border-radius: 0.5rem;
+      color: var(--text);
+      font-size: 1rem;
+      &:hover, &:focus-visible {
+        background: var(--accent);
+        text-decoration: none;
+      }
+      & + a { border-top: 1px solid var(--border); border-radius: 0; }
+    }
+  }
+}
+
+// Phones: bottom sheet instead of side sheet. Same elements,
+// repositioned via media query.
+@media (max-width: 36rem) {
+  .category-sheet {
+    top: auto;
+    right: 0;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    max-height: 75vh;
+    border-top-left-radius: 1rem;
+    border-top-right-radius: 1rem;
+    transform: translateY(100%);
+    box-shadow: 0 -12px 32px rgba(0,0,0,0.18);
+    &.open { transform: translateY(0); }
+  }
 }
 
 .cart-overlay {

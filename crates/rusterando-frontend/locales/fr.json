@@ -69,7 +69,13 @@
     "extras_first_n_free": "Les {n} premières garnitures sont incluses.",
     "extras_first_n_then_flat": "Les {n} premières garnitures sont incluses, chaque suivante {amount}.",
     "unavailable": "actuellement indisponible",
-    "category_overlay_aria": "Aperçu des catégories"
+    "category_overlay_aria": "Aperçu des catégories",
+    "scroll_left_aria": "Faire défiler à gauche",
+    "scroll_right_aria": "Faire défiler à droite",
+    "category_fab_aria": "Ouvrir la liste des catégories",
+    "category_fab_label": "Catégories",
+    "category_sheet_aria": "Liste des catégories",
+    "category_sheet_title": "Catégories"
   },
   "cart": {
     "title": "Panier",

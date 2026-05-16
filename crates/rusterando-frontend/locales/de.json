@@ -69,7 +69,13 @@
     "extras_first_n_free": "Die ersten {n} Zutaten sind inklusive.",
     "extras_first_n_then_flat": "Die ersten {n} Zutaten sind inklusive, jede weitere {amount}.",
     "unavailable": "derzeit nicht verfügbar",
-    "category_overlay_aria": "Kategorie-Übersicht"
+    "category_overlay_aria": "Kategorie-Übersicht",
+    "scroll_left_aria": "Nach links scrollen",
+    "scroll_right_aria": "Nach rechts scrollen",
+    "category_fab_aria": "Kategorie-Übersicht öffnen",
+    "category_fab_label": "Kategorien",
+    "category_sheet_aria": "Kategorie-Liste",
+    "category_sheet_title": "Kategorien"
   },
   "cart": {
     "title": "Warenkorb",

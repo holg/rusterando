@@ -69,7 +69,13 @@
     "extras_first_n_free": "前 {n} 种配料免费。",
     "extras_first_n_then_flat": "前 {n} 种配料免费,每多一种 {amount}。",
     "unavailable": "暂时不可用",
-    "category_overlay_aria": "分类总览"
+    "category_overlay_aria": "分类总览",
+    "scroll_left_aria": "向左滚动",
+    "scroll_right_aria": "向右滚动",
+    "category_fab_aria": "打开分类列表",
+    "category_fab_label": "分类",
+    "category_sheet_aria": "分类列表",
+    "category_sheet_title": "分类"
   },
   "cart": {
     "title": "购物车",

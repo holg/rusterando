@@ -69,7 +69,13 @@
     "extras_first_n_free": "I primi {n} ingredienti sono inclusi.",
     "extras_first_n_then_flat": "I primi {n} ingredienti sono inclusi, ogni successivo {amount}.",
     "unavailable": "attualmente non disponibile",
-    "category_overlay_aria": "Panoramica categorie"
+    "category_overlay_aria": "Panoramica categorie",
+    "scroll_left_aria": "Scorri a sinistra",
+    "scroll_right_aria": "Scorri a destra",
+    "category_fab_aria": "Apri elenco categorie",
+    "category_fab_label": "Categorie",
+    "category_sheet_aria": "Elenco categorie",
+    "category_sheet_title": "Categorie"
   },
   "cart": {
     "title": "Carrello",
