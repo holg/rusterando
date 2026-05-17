@@ -1,6 +1,4 @@
 use leptos::prelude::*;
-#[cfg(feature = "ssr")]
-use leptos_meta::Title;
 use leptos_meta::{provide_meta_context, HashedStylesheet, MetaTags};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::{ParamSegment, StaticSegment};
@@ -62,7 +60,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     // be coordinated with the SSR stream markers. A plain inline
     // global is hydrate-safe by construction — same string on SSR
     // and hydrate, no async boundary.
-    let bootstrap_script = {
+    let (bootstrap_script, page_title) = {
         #[cfg(feature = "ssr")]
         {
             let name = use_context::<crate::branding::BrandingHandle>()
@@ -82,11 +80,11 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             let js = format!(
                 "window.__appBootstrap = {{ shop_name: {name_json}, i18n_enabled: {i18n_on}, stripe_sandbox: {stripe_sandbox} }};"
             );
-            Some(js)
+            (Some(js), name)
         }
         #[cfg(not(feature = "ssr"))]
         {
-            None::<String>
+            (None::<String>, String::from("Mein Restaurant"))
         }
     };
 
@@ -111,6 +109,13 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <HydrationScripts options=options.clone()/>
                 <HashedStylesheet id="leptos" options/>
                 <MetaTags/>
+                // Page title baked directly into <head>. shell() runs
+                // only on SSR; hydrate never re-emits it, so there's
+                // no view-tree footprint to mismatch. Avoids the
+                // <Title> component (which writes to head via a side
+                // effect but has an empty body-render that confuses
+                // the hydrate walker into expecting a `()` marker).
+                <title>{page_title}</title>
                 // Bootstrap blob lives in <head> instead of <body> so
                 // it sits OUTSIDE the subtree tachys's hydrate walker
                 // traverses (the walker starts at <body>'s first
@@ -235,32 +240,15 @@ pub fn App() -> impl IntoView {
     // resource's await-point couldn't be coordinated with the SSR
     // stream markers at the document root. Splitting the path by
     // feature gate eliminates the resource entirely.
-    // On SSR, read the real shop name from BrandingHandle and emit a
-    // <Title> so the streamed HTML carries the correct browser-tab
-    // text. On hydrate, do nothing — the title is already in the DOM
-    // and re-emitting it would either flicker or panic (the previous
-    // `OnceResource::new` version triggered the tachys "entered
-    // unreachable code" hydration panic because a resource read
-    // outside a <Suspense> at the document root can't be coordinated
-    // with the SSR stream markers).
-    let title_node = {
-        #[cfg(feature = "ssr")]
-        {
-            let name = use_context::<crate::branding::BrandingHandle>()
-                .map(|h| h.get().shop_name)
-                .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "Mein Restaurant".to_string());
-            Some(view! { <Title text=name/> })
-        }
-        #[cfg(not(feature = "ssr"))]
-        {
-            None::<leptos::tachys::view::any_view::AnyView>
-        }
-    };
+    // No <Title> in the App view — see app.rs::shell() which writes
+    // the document <title> as a literal element in <head>. Earlier
+    // attempts that put `{Option<view!{<Title>}>}` here injected a
+    // `<!--<() />-->` placeholder marker into <body> on SSR because
+    // <Title>'s body-render is empty (Title writes to <head>, not the
+    // current position). The hydrate side emitted a different
+    // placeholder shape and tachys panicked at hydration.rs:195.
 
     view! {
-        {title_node}
-
         <Router base=router_base>
             // Sandbox-only banner. Renders nothing in live mode so the
             // public site looks identical to a production build.
