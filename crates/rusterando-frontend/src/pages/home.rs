@@ -213,14 +213,24 @@ pub fn Home() -> impl IntoView {
 
         <section id="hours" class="hours">
             <h2>{crate::t!("header.opening_hours")}</h2>
+            // Explicit <tbody>: browsers auto-insert one when parsing
+            // <table><tr>... HTML, but Leptos's view tree doesn't emit
+            // it. The SSR HTML therefore says <table><tr> while the
+            // hydrated DOM is <table><tbody><tr>, and tachys's hydrate
+            // walker panics at hydration.rs:248 ("hydration error
+            // occurred while trying to hydrate an element defined at
+            // pages/home.rs:217:22"). Adding <tbody> here makes both
+            // sides agree.
             <table>
-                <tr><th>{crate::t!("home.day_mon")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                <tr><th>{crate::t!("home.day_tue")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                <tr><th>{crate::t!("home.day_wed")}</th><td class="closed">{crate::t!("home.day_closed")}</td></tr>
-                <tr><th>{crate::t!("home.day_thu")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                <tr><th>{crate::t!("home.day_fri")}</th><td>"16:00–22:00"</td></tr>
-                <tr><th>{crate::t!("home.day_sat")}</th><td>"16:00–22:00"</td></tr>
-                <tr><th>{crate::t!("home.day_sun")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                <tbody>
+                    <tr><th>{crate::t!("home.day_mon")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                    <tr><th>{crate::t!("home.day_tue")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                    <tr><th>{crate::t!("home.day_wed")}</th><td class="closed">{crate::t!("home.day_closed")}</td></tr>
+                    <tr><th>{crate::t!("home.day_thu")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                    <tr><th>{crate::t!("home.day_fri")}</th><td>"16:00–22:00"</td></tr>
+                    <tr><th>{crate::t!("home.day_sat")}</th><td>"16:00–22:00"</td></tr>
+                    <tr><th>{crate::t!("home.day_sun")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                </tbody>
             </table>
         </section>
 

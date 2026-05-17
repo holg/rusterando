@@ -881,7 +881,8 @@ main { display: block; width: 100%; }
 // ----- Floating cart FAB + drawer -----
 .cart-fab.hidden,
 .drawer-body p.hidden,
-.drawer-foot .free-delivery.hidden { display: none; }
+.drawer-foot .free-delivery.hidden,
+.test-mode-banner.hidden { display: none; }
 .cart-fab {
   position: fixed;
   bottom: 1.2rem;

@@ -36,21 +36,28 @@ fn stripe_sandbox_sync() -> bool {
 
 /// Yellow striped banner: "TEST-MODUS · Keine echten Zahlungen".
 /// Mount above the SiteHeader; the CSS keeps it sticky at the top
-/// of the viewport. Renders nothing in production (live) so the
-/// document layout is identical there.
+/// of the viewport. In live mode the markup is still present but
+/// invisible (display:none) so SSR and hydrate emit the SAME tag
+/// shape — earlier versions returned `().into_any()` in live mode,
+/// which leaks placeholder marker comments (`<!>` + `<!--<()/>-->`)
+/// into the SSR HTML that the hydrate walker can't match against
+/// the empty `()` it produces, panicking tachys hydration.rs:195
+/// with "entered unreachable code".
 #[component]
 pub fn TestModeBanner() -> impl IntoView {
     let is_sandbox = stripe_sandbox_sync();
-    if !is_sandbox {
-        return ().into_any();
-    }
+    let cls = if is_sandbox {
+        "test-mode-banner"
+    } else {
+        "test-mode-banner hidden"
+    };
+    let aria_hidden = if is_sandbox { "false" } else { "true" };
     view! {
-        <div class="test-mode-banner" role="alert" aria-live="polite">
+        <div class=cls role="alert" aria-live="polite" aria-hidden=aria_hidden>
             <span class="label">"⚠ TEST-MODUS"</span>
             <span class="hint">
                 "Keine echten Zahlungen · Stripe-Sandbox aktiv"
             </span>
         </div>
     }
-    .into_any()
 }
