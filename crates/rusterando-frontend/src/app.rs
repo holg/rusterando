@@ -90,6 +90,17 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
         }
     };
 
+    // Bootstrap blob: always emit a <script> element on SSR (empty
+    // body in the unlikely None branch), never wrap it in `Option`.
+    // `Option<view!{<script>}>` adds placeholder marker comments to
+    // the surrounding HTML that the hydrate walker doesn't reproduce
+    // (hydrate mounts `App` directly and never re-runs `shell()`),
+    // which trips tachys at hydration.rs:195 with "entered
+    // unreachable code". Keeping the tag shape constant — same
+    // <script> element either way — gives the walker stable DOM to
+    // diff against.
+    let bootstrap_js: String = bootstrap_script.unwrap_or_default();
+
     view! {
         <!DOCTYPE html>
         <html lang="de" class=html_class>
@@ -100,6 +111,11 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <HydrationScripts options=options.clone()/>
                 <HashedStylesheet id="leptos" options/>
                 <MetaTags/>
+                // Bootstrap blob lives in <head> instead of <body> so
+                // it sits OUTSIDE the subtree tachys's hydrate walker
+                // traverses (the walker starts at <body>'s first
+                // child mounting `App`).
+                <script>{bootstrap_js}</script>
                 <script>
                     {r#"
                     // Translate vertical mouse-wheel into horizontal scroll on .category-tabs.
@@ -167,14 +183,6 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 </script>
             </head>
             <body>
-                // SSR-only inline bootstrap. Sets window.__appBootstrap
-                // with the shop name and i18n_enabled flag so the
-                // hydrate-side chrome can read them synchronously
-                // (no OnceResource, no Suspense — those tripped tachys's
-                // hydration walker with "entered unreachable code").
-                {bootstrap_script.map(|js| view! {
-                    <script>{js}</script>
-                })}
                 <App/>
             </body>
         </html>
