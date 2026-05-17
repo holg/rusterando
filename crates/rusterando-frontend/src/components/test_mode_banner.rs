@@ -2,48 +2,55 @@
 //! is in Stripe sandbox mode. Disappears completely in live mode
 //! so production traffic sees no chrome.
 //!
-//! Driven by a server-fn-backed `OnceResource` (`get_stripe_mode`)
-//! so SSR and hydrate render the same DOM. Reading the
-//! `StripeModeHandle` directly from context would diverge (handle
-//! is SSR-only) and crash hydration — same trap the wordmark hit
-//! before we ran it through a resource.
+//! Reads `window.__appBootstrap.stripe_sandbox` synchronously instead
+//! of going through an `OnceResource`/Suspense pair. The previous
+//! resource-driven version tripped tachys's hydration walker with
+//! "entered unreachable code" — resource reads in the document-root
+//! chrome can't be coordinated with the SSR stream markers. The SSR
+//! shell now bakes the flag into an inline `<script>` so both SSR
+//! and hydrate render the same DOM via a sync read.
 
 use leptos::prelude::*;
 
-use crate::stripe::get_stripe_mode;
+fn stripe_sandbox_sync() -> bool {
+    #[cfg(feature = "ssr")]
+    {
+        use_context::<crate::stripe::StripeModeHandle>()
+            .map(|h| matches!(h.get(), crate::stripe::StripeMode::Sandbox))
+            .unwrap_or(false)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        use leptos::wasm_bindgen::JsValue;
+        let Some(window) = web_sys::window() else {
+            return false;
+        };
+        let bootstrap = js_sys::Reflect::get(&window, &JsValue::from_str("__appBootstrap"))
+            .unwrap_or(JsValue::UNDEFINED);
+        js_sys::Reflect::get(&bootstrap, &JsValue::from_str("stripe_sandbox"))
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+}
 
 /// Yellow striped banner: "TEST-MODUS · Keine echten Zahlungen".
 /// Mount above the SiteHeader; the CSS keeps it sticky at the top
-/// of the viewport. Width-fills the page; renders nothing in
-/// production (live) so the document layout is identical there.
+/// of the viewport. Renders nothing in production (live) so the
+/// document layout is identical there.
 #[component]
 pub fn TestModeBanner() -> impl IntoView {
-    let mode = OnceResource::new(get_stripe_mode());
-
-    view! {
-        // Suspense fallback intentionally empty: during the first
-        // SSR pass we don't know the mode yet and we don't want a
-        // visible flash. The banner appears once the resource
-        // resolves (which on SSR is immediate after the server fn
-        // runs; on hydrate it reads the streamed payload).
-        <Suspense fallback=|| ()>
-            {move || mode.get().map(|res| {
-                let is_sandbox = res
-                    .as_deref()
-                    .map(|s| s == "sandbox")
-                    .unwrap_or(false);
-                if !is_sandbox {
-                    return ().into_any();
-                }
-                view! {
-                    <div class="test-mode-banner" role="alert" aria-live="polite">
-                        <span class="label">"⚠ TEST-MODUS"</span>
-                        <span class="hint">
-                            "Keine echten Zahlungen · Stripe-Sandbox aktiv"
-                        </span>
-                    </div>
-                }.into_any()
-            })}
-        </Suspense>
+    let is_sandbox = stripe_sandbox_sync();
+    if !is_sandbox {
+        return ().into_any();
     }
+    view! {
+        <div class="test-mode-banner" role="alert" aria-live="polite">
+            <span class="label">"⚠ TEST-MODUS"</span>
+            <span class="hint">
+                "Keine echten Zahlungen · Stripe-Sandbox aktiv"
+            </span>
+        </div>
+    }
+    .into_any()
 }

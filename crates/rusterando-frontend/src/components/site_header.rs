@@ -9,32 +9,71 @@
 
 use leptos::prelude::*;
 
-use crate::branding::get_shop_name;
-use crate::i18n::get_i18n_enabled;
+/// Read the shop name baked into `window.__appBootstrap` by the SSR
+/// shell. SSR side reads from `BrandingHandle` directly. We avoid the
+/// previous `OnceResource::new(get_shop_name())` because resource
+/// reads in the chrome were tripping tachys's hydration walker with
+/// "entered unreachable code" — a sync read agrees byte-for-byte
+/// between SSR and hydrate.
+fn shop_name_sync() -> String {
+    #[cfg(feature = "ssr")]
+    {
+        use_context::<crate::branding::BrandingHandle>()
+            .map(|h| h.get().display_name())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Mein Restaurant".to_string())
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        // Read window.__appBootstrap.shop_name. The script tag that
+        // sets it is the first thing in <body>, so it has already
+        // executed by the time hydrate runs.
+        use leptos::wasm_bindgen::JsValue;
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return "Mein Restaurant".to_string(),
+        };
+        let bootstrap = js_sys::Reflect::get(&window, &JsValue::from_str("__appBootstrap"))
+            .unwrap_or(JsValue::UNDEFINED);
+        let name = js_sys::Reflect::get(&bootstrap, &JsValue::from_str("shop_name"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Mein Restaurant".to_string());
+        name
+    }
+}
+
+/// Read the runtime i18n_enabled flag from the SSR-baked bootstrap.
+fn i18n_enabled_sync() -> bool {
+    #[cfg(feature = "ssr")]
+    {
+        use_context::<crate::pages::settings::I18nHandle>()
+            .map(|h| h.get())
+            .unwrap_or(false)
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        use leptos::wasm_bindgen::JsValue;
+        let Some(window) = web_sys::window() else {
+            return false;
+        };
+        let bootstrap = js_sys::Reflect::get(&window, &JsValue::from_str("__appBootstrap"))
+            .unwrap_or(JsValue::UNDEFINED);
+        js_sys::Reflect::get(&bootstrap, &JsValue::from_str("i18n_enabled"))
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+}
 
 #[component]
 pub fn SiteHeader() -> impl IntoView {
-    // Wordmark text comes from `BrandingHandle.shop_name` via a server
-    // fn so SSR + hydrate render the same DOM. A direct context read
-    // would diverge: SSR returns the cached value, hydrate has no
-    // `BrandingHandle` (it's an SSR-only newtype) and would render
-    // empty → tachys hydration mismatch.
-    let name = OnceResource::new(get_shop_name());
+    let name_upper = shop_name_sync().to_uppercase();
     view! {
         <header class="site-header">
             <a class="brand" href="/">
-                <Suspense fallback=|| view! {
-                    <span class="brand-wordmark">"\u{00a0}"</span>
-                }>
-                    {move || name.get().map(|res| {
-                        let upper = res
-                            .ok()
-                            .filter(|s| !s.trim().is_empty())
-                            .unwrap_or_else(|| "Mein Restaurant".to_string())
-                            .to_uppercase();
-                        view! { <span class="brand-wordmark">{upper}</span> }
-                    })}
-                </Suspense>
+                <span class="brand-wordmark">{name_upper}</span>
             </a>
             <nav class="site-nav">
                 <a class="pill" href="/menu">{crate::t!("header.menu")}</a>
@@ -47,8 +86,9 @@ pub fn SiteHeader() -> impl IntoView {
 }
 
 /// Native-`<select>` locale switcher. The runtime `i18n_enabled` admin
-/// toggle decides whether it renders — same OnceResource pattern as
-/// the shop name / Stripe-mode chip so SSR + hydrate agree on the DOM.
+/// toggle decides whether it renders. Reads the toggle synchronously
+/// from `window.__appBootstrap` so SSR and hydrate emit the same DOM
+/// without an `OnceResource`/Suspense pair.
 ///
 /// Plain navigation (window.location.href) instead of the Leptos
 /// router's use_navigate so the Router fully remounts with the new
@@ -57,7 +97,7 @@ pub fn SiteHeader() -> impl IntoView {
 fn LocaleSwitcher() -> impl IntoView {
     use crate::i18n::{current_locale, Locale};
 
-    let enabled = OnceResource::new(get_i18n_enabled());
+    let on = i18n_enabled_sync();
     let active = current_locale();
 
     let on_change = move |ev: leptos::ev::Event| {
@@ -87,37 +127,27 @@ fn LocaleSwitcher() -> impl IntoView {
         }
     };
 
-    // The Suspense fallback + resolved branch render the same DOM
-    // shape — a single <select> with the `.hidden` class toggled —
-    // so tachys' hydration walker doesn't trip over a tag mismatch
-    // between SSR and the first client tick.
+    let cls = if on {
+        "locale-switcher"
+    } else {
+        "locale-switcher hidden"
+    };
+    let aria = if on { "false" } else { "true" };
+    let tabidx = if on { 0 } else { -1 };
     view! {
-        <Suspense fallback=|| view! {
-            <select class="locale-switcher hidden" aria-hidden="true" tabindex="-1">
-                <option value="de" selected=true>"Deutsch"</option>
-            </select>
-        }>
-            {move || {
-                let on = enabled.get().and_then(|r| r.ok()).unwrap_or(false);
-                let cls = if on { "locale-switcher" } else { "locale-switcher hidden" };
-                let aria = if on { "false" } else { "true" };
+        <select class=cls
+            aria-label="Language"
+            aria-hidden=aria
+            tabindex=tabidx
+            on:change=on_change>
+            {Locale::ALL.iter().map(|&loc| {
+                let code = loc.code();
+                let label = loc.label();
+                let selected = loc == active;
                 view! {
-                    <select class=cls
-                        aria-label="Language"
-                        aria-hidden=aria
-                        tabindex=move || if on { 0 } else { -1 }
-                        on:change=on_change>
-                        {Locale::ALL.iter().map(|&loc| {
-                            let code = loc.code();
-                            let label = loc.label();
-                            let selected = loc == active;
-                            view! {
-                                <option value=code selected=selected>{label}</option>
-                            }
-                        }).collect_view()}
-                    </select>
+                    <option value=code selected=selected>{label}</option>
                 }
-            }}
-        </Suspense>
+            }).collect_view()}
+        </select>
     }
 }

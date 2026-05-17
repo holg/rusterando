@@ -52,6 +52,44 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     };
     let html_class = format!("theme-{theme_class}");
 
+    // SSR-time bootstrap data. We bake the shop name and the runtime
+    // i18n_enabled flag into an inline `<script>` so the hydrate
+    // side can read them synchronously from `window.__appBootstrap`
+    // instead of through a server-fn `OnceResource`. Resource reads
+    // in the chrome (site-header wordmark, locale-switcher gate)
+    // were tripping tachys's hydration walker with "entered
+    // unreachable code" because their Suspense await-points couldn't
+    // be coordinated with the SSR stream markers. A plain inline
+    // global is hydrate-safe by construction — same string on SSR
+    // and hydrate, no async boundary.
+    let bootstrap_script = {
+        #[cfg(feature = "ssr")]
+        {
+            let name = use_context::<crate::branding::BrandingHandle>()
+                .map(|h| h.get().display_name())
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Mein Restaurant".to_string());
+            let i18n_on = use_context::<crate::pages::settings::I18nHandle>()
+                .map(|h| h.get())
+                .unwrap_or(false);
+            let stripe_sandbox = use_context::<crate::stripe::StripeModeHandle>()
+                .map(|h| matches!(h.get(), crate::stripe::StripeMode::Sandbox))
+                .unwrap_or(false);
+            // serde_json::to_string escapes the name correctly so a
+            // shop with `"` or `\` in its display name can't break out
+            // of the string literal.
+            let name_json = serde_json::to_string(&name).unwrap_or_else(|_| "\"\"".to_string());
+            let js = format!(
+                "window.__appBootstrap = {{ shop_name: {name_json}, i18n_enabled: {i18n_on}, stripe_sandbox: {stripe_sandbox} }};"
+            );
+            Some(js)
+        }
+        #[cfg(not(feature = "ssr"))]
+        {
+            None::<String>
+        }
+    };
+
     view! {
         <!DOCTYPE html>
         <html lang="de" class=html_class>
@@ -129,6 +167,14 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 </script>
             </head>
             <body>
+                // SSR-only inline bootstrap. Sets window.__appBootstrap
+                // with the shop name and i18n_enabled flag so the
+                // hydrate-side chrome can read them synchronously
+                // (no OnceResource, no Suspense — those tripped tachys's
+                // hydration walker with "entered unreachable code").
+                {bootstrap_script.map(|js| view! {
+                    <script>{js}</script>
+                })}
                 <App/>
             </body>
         </html>
