@@ -1,5 +1,7 @@
 use leptos::prelude::*;
-use leptos_meta::{provide_meta_context, HashedStylesheet, MetaTags, Title};
+#[cfg(feature = "ssr")]
+use leptos_meta::Title;
+use leptos_meta::{provide_meta_context, HashedStylesheet, MetaTags};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::{ParamSegment, StaticSegment};
 
@@ -167,23 +169,43 @@ pub fn App() -> impl IntoView {
         crate::i18n::Locale::Cn => "/cn",
     };
 
-    // <title> driven by a server-fn-backed Resource so SSR and hydrate
-    // render the same value. A direct context read would diverge: SSR
-    // sees the BrandingHandle and writes the real shop name, hydrate
-    // has no handle and would fall back to a literal — leptos_meta's
-    // Title then overwrites the SSR title with whatever hydrate passed,
-    // leaking the build-time fallback into the browser tab.
-    let shop_name = OnceResource::new(crate::branding::get_shop_name());
-    let title_text = move || {
-        shop_name
-            .get()
-            .and_then(|res| res.ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "Mein Restaurant".to_string())
+    // <title> resolution:
+    //   - SSR side: reads BrandingHandle from context and emits the
+    //     real shop name into the SSR HTML's <title> tag.
+    //   - Hydrate side: SSR already wrote the correct title, so we
+    //     skip the <Title> emit and leave document.title alone.
+    //
+    // The previous implementation used `OnceResource::new(get_shop_name())`
+    // here, but a resource read **outside** a <Suspense> caused tachys
+    // to panic during hydration with "entered unreachable code" — the
+    // resource's await-point couldn't be coordinated with the SSR
+    // stream markers at the document root. Splitting the path by
+    // feature gate eliminates the resource entirely.
+    // On SSR, read the real shop name from BrandingHandle and emit a
+    // <Title> so the streamed HTML carries the correct browser-tab
+    // text. On hydrate, do nothing — the title is already in the DOM
+    // and re-emitting it would either flicker or panic (the previous
+    // `OnceResource::new` version triggered the tachys "entered
+    // unreachable code" hydration panic because a resource read
+    // outside a <Suspense> at the document root can't be coordinated
+    // with the SSR stream markers).
+    let title_node = {
+        #[cfg(feature = "ssr")]
+        {
+            let name = use_context::<crate::branding::BrandingHandle>()
+                .map(|h| h.get().shop_name)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Mein Restaurant".to_string());
+            Some(view! { <Title text=name/> })
+        }
+        #[cfg(not(feature = "ssr"))]
+        {
+            None::<leptos::tachys::view::any_view::AnyView>
+        }
     };
 
     view! {
-        <Title text=title_text/>
+        {title_node}
 
         <Router base=router_base>
             // Sandbox-only banner. Renders nothing in live mode so the
