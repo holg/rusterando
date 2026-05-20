@@ -74,8 +74,10 @@
 #let col-orange = rgb("#f4a261")
 
 // ----- Page setup ----------------------------------------------------------
+// Sheet: 21cm × 44,3cm landscape (measured from David's existing print).
+// Folded into thirds → three 147.67mm panels.
 #set page(
-  width: 444mm,
+  width: 443mm,
   height: 210mm,
   margin: 0mm,
   fill: col-bg,
@@ -196,22 +198,21 @@
     {
       text(size: 7pt, weight: "bold")[#num-str#it.name#spicy-mark]
       text(size: 5pt, fill: col-muted)[#codes-str]
-      let desc = it.at("description", default: none)
-      // Descriptions already start with "mit …" in the seed data, so we
-      // render them as-is without a redundant prefix.
-      if desc != none and desc != "" [
-        \ #text(size: 6pt, fill: col-muted)[#desc]
-      ]
+      // Descriptions intentionally omitted from the PDF so we can
+      // afford generous line+card spacing instead. Web menu keeps them.
     },
     align(right, text(size: 7pt, weight: "bold")[#small]),
   )
+  // Inter-row spacing tuned to use the leftover vertical room in
+  // the new tri-fold layout (4 menu sub-cols × 2 pages). 0.6em
+  // gives readable airy rows without overflowing onto a 3rd page.
   if has-large {
     cells.push(align(right, text(size: 7pt, weight: "bold")[#large]))
-    block(spacing: 0.4em, grid(
+    block(spacing: 0.6em, grid(
       columns: (1fr, 12mm, 12mm), gutter: 1mm, ..cells
     ))
   } else {
-    block(spacing: 0.4em, grid(
+    block(spacing: 0.6em, grid(
       columns: (1fr, 12mm), gutter: 1mm, ..cells
     ))
   }
@@ -245,6 +246,8 @@
     )
   } else { [] }
 
+  // Restored generous card padding + spacing (was tightened to 3mm/1mm
+  // for the single-page squeeze; the new 2-page tri-fold has room).
   block(
     fill: col-pink,
     stroke: 0.5pt + col-pink-2,
@@ -361,86 +364,186 @@
   }
 ]
 
-// ----- Page layout ---------------------------------------------------------
-
-#grid(
-  columns: (145mm, 1fr),
-  gutter: 0mm,
-  side-panel,
-  pad(x: 6mm, y: 6mm)[
-    #columns(4, gutter: 4mm)[
-      #for cat in data.categories {
-        category-card(cat)
-        v(2mm)
-      }
-      // Extras come last — they're admin-edited free-text lists in
-      // app_settings, separate from the menu_items table. Empty lists
-      // produce no card.
-      #let extras-pizza = data.branding.at("extras_pizza_lines", default: ())
-      #let extras-pasta = data.branding.at("extras_pasta_lines", default: ())
-      #if extras-pizza.len() > 0 {
-        extras-card("Pizza-Extras", extras-pizza)
-        v(2mm)
-      }
-      #if extras-pasta.len() > 0 {
-        extras-card("Pasta-Extras", extras-pasta)
-        v(2mm)
-      }
-      #v(4mm)
-      #legend
-    ]
-  ],
-)
-
-// ----- Final page: scan-to-order QR ----------------------------------------
+// ----- QR scan panel (right third of page 1) -------------------------------
 //
-// Customers can pull this PDF up on their phone or print it as a flyer; the
-// QR makes it trivial to land back on the live ordering site.
-//
-// We strip the protocol prefix from the URL for cleaner display. The
-// expression must stay on a single line (or be parenthesised) — bare line
-// continuations after `#let foo = …` are interpreted as content, which is
-// how we ended up with literal ".replace(…)" text in the rendered PDF.
+// Was a standalone last page; now squeezed into a 148mm-wide tri-fold
+// panel. Strips the protocol prefix for cleaner display. Expression
+// must stay on a single line (or be parenthesised) — bare line
+// continuations after `#let foo = …` are interpreted as content,
+// which is how we ended up with literal ".replace(…)" text in the
+// rendered PDF in an earlier version.
 
 #let display-url = (
   data.site_url.replace("https://", "").replace("http://", "").trim("/")
 )
 
-// Use a fresh page with side margins so the panel sits centred horizontally
-// without inheriting the 0mm margin from the dense menu pages.
-#set page(margin: (x: 18mm, y: 14mm))
-#pagebreak()
-
-#align(center + horizon)[
+#let qr-panel = rect(
+  width: 100%,
+  height: 100%,
+  fill: col-bg,
+  stroke: none,
+  inset: 8mm,
+)[
   #set text(fill: col-text)
+  #align(center + horizon)[
+    #text(size: 24pt, weight: "bold", fill: col-red)[Hier scannen,]
+    #v(-3mm)
+    #text(size: 24pt, weight: "bold", fill: col-red, style: "italic")[später bestellen]
 
-  #text(size: 34pt, weight: "bold", fill: col-red)[Hier scannen,]
-  #v(-4mm)
-  #text(size: 34pt, weight: "bold", fill: col-red, style: "italic")[später bestellen]
+    #v(5mm)
 
-  #v(6mm)
+    #box(
+      width: 70mm,
+      height: 70mm,
+      inset: 2mm,
+      fill: white,
+      stroke: 1pt + col-pink-2,
+      radius: 3pt,
+    )[
+      #image("/img/qr.svg", width: 100%, height: 100%, fit: "contain")
+    ]
 
-  #box(
-    width: 80mm,
-    height: 80mm,
-    inset: 3mm,
-    fill: white,
-    stroke: 1pt + col-pink-2,
-    radius: 3pt,
-  )[
-    #image("/img/qr.svg", width: 100%, height: 100%, fit: "contain")
-  ]
+    #v(3mm)
+    #text(size: 14pt, weight: "bold")[#display-url]
 
-  #v(4mm)
-  #text(size: 20pt, weight: "bold")[#display-url]
+    #v(2mm)
+    #text(size: 8pt, fill: col-muted)[
+      Online bestellen · Speisekarte als PDF \
+      Lieferung & Abholung
+    ]
 
-  #v(2mm)
-  #text(size: 10pt, fill: col-muted)[
-    Online bestellen · Speisekarte als PDF · Lieferung & Abholung
-  ]
-
-  #v(8mm)
-  #text(size: 9pt, fill: col-muted)[
-    #data.branding.address · #data.branding.phone
+    #v(6mm)
+    #text(size: 8pt, fill: col-muted)[
+      #data.branding.address \
+      #data.branding.phone
+    ]
   ]
 ]
+
+// ----- Cover panel (left third of page 1) ----------------------------------
+//
+// David's photo collage — full-bleed on the outside-front of the
+// folded leporello. Wickelfalz: left panel of the print sheet ends
+// up as the visible cover after the right panel folds in first.
+// Image is a static asset embedded in pdf.rs (`/img/cover.jpg`).
+
+#let cover-panel = box(
+  width: 100%,
+  height: 100%,
+  clip: true,
+)[
+  #image("/img/cover.jpg", width: 100%, height: 100%, fit: "cover")
+]
+
+// ----- Page 1 + 2: cover + QR/ads + menu flow ------------------------------
+//
+// Layout (one A3 sheet folded into 3 panels per side, 6 panels total):
+//
+//   PAGE 1 (outside, folded shut shows leftmost panel):
+//     [ COVER IMAGE | menu start | menu cont. ]
+//        ~148mm        ~148mm       ~148mm
+//
+//   PAGE 2 (inside spread, opened up):
+//     [ QR + addr/hours | menu cont. | menu cont. + legend ]
+//        ~148mm            ~148mm        ~148mm
+//
+// To get the menu flowing across all 4 sub-columns while reserving
+// the first sub-column of each page for cover/QR, we partition the
+// categories list manually and lay each page out as a top-level grid.
+
+// Two-page tri-fold layout. Each page has 3 fold-panels (sub-pages).
+// 4 of the 6 panels carry menu items, each panel laid out as 2 inner
+// columns. Total: 8 menu sub-columns + 1 cover panel + 1 QR-and-ads
+// panel.
+//
+//   PAGE 1 (outside, folded shut shows leftmost panel):
+//     [ COVER IMAGE | menu 2-col | menu 2-col ]
+//       fold-panel    fold-panel   fold-panel
+//
+//   PAGE 2 (inside spread, opened up):
+//     [ QR + ads/addr | menu 2-col | menu 2-col + legend ]
+//       fold-panel       fold-panel   fold-panel
+
+#let panel-w = (443mm - 12mm) / 3  // ~143.7mm per fold panel
+
+// Pre-render menu cards so we can manually partition them across
+// the 4 menu panels. Card sizes vary wildly (some categories have
+// 33 items, others 2), so partitioning by ITEM count is essential —
+// partitioning by card count puts all pizzas on one panel.
+#let extras-pizza = data.branding.at("extras_pizza_lines", default: ())
+#let extras-pasta = data.branding.at("extras_pasta_lines", default: ())
+
+// Build a flat list of (card, item-count) tuples. `item-count` for
+// extras-cards is approximated from line count (used for size only).
+#let card-list = {
+  let xs = ()
+  for cat in data.categories {
+    xs.push((card: category-card(cat), n: cat.items.len()))
+  }
+  if extras-pizza.len() > 0 {
+    xs.push((card: extras-card("Pizza-Extras", extras-pizza), n: extras-pizza.len()))
+  }
+  if extras-pasta.len() > 0 {
+    xs.push((card: extras-card("Pasta-Extras", extras-pasta), n: extras-pasta.len()))
+  }
+  xs
+}
+
+#let total-items = card-list.fold(0, (acc, c) => acc + c.n)
+// Page 1 should take a bit MORE than half because page 2 also carries
+// the QR-panel overhead (panel 1) AND the legend at the end of the
+// menu flow, which together eat ~30mm of column space. Aim for ~57%
+// of items on page 1, ~43% on page 2.
+#let per-page-target = total-items * 0.57
+
+#let split-at = {
+  let acc = 0
+  let idx = 0
+  for c in card-list {
+    if acc + c.n > per-page-target { break }
+    acc += c.n
+    idx += 1
+  }
+  idx
+}
+
+#let p1-cards = card-list.slice(0, split-at).map(c => c.card)
+#let p2-cards = card-list.slice(split-at).map(c => c.card)
+
+#let cards-to-content(cards) = {
+  for c in cards [
+    #c
+    #v(2mm)
+  ]
+}
+
+// Page 1: cover image (left panel) + menu spanning the right 2 panels.
+// Menu is laid out as ONE 4-column flow across the right two-thirds
+// of the page — fold lines fall between cols 2 and 3, which is a
+// natural break, not a layout boundary. Typst balances columns
+// automatically so we get even fill without empty bottoms.
+#grid(
+  columns: (panel-w, 2 * panel-w),
+  gutter: 0mm,
+  cover-panel,
+  pad(x: 3mm, y: 6mm,
+    columns(4, gutter: 3mm, cards-to-content(p1-cards))
+  ),
+)
+
+#pagebreak()
+
+// Page 2: QR (left panel) + menu spanning the right 2 panels as a
+// 4-column flow. Legend appended at the very end so it lands in the
+// last column.
+#grid(
+  columns: (panel-w, 2 * panel-w),
+  gutter: 0mm,
+  // QR scan card only. The old dark side-panel (brand wordmark +
+  // Ladenfront + promo boxes + hours + address) is dropped entirely
+  // — David didn't want it carried over to the new design.
+  pad(x: 3mm, y: 6mm)[#qr-panel],
+  pad(x: 3mm, y: 6mm,
+    columns(4, gutter: 3mm, cards-to-content(p2-cards) + v(2mm) + legend)
+  ),
+)

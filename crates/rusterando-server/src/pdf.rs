@@ -31,6 +31,11 @@ const TEMPLATE_VPATH: &str = "/menu.typ";
 // at compile time so the running binary needs no filesystem access.
 const ASSET_LADENFRONT: &[u8] = include_bytes!("../../../public/img/ladenfront.jpg");
 const ASSET_LADENFRONT_VPATH: &str = "/img/ladenfront.jpg";
+/// Tri-fold cover photo used on the left panel of page 1 (the
+/// outside-front when the leporello is folded shut). Static asset;
+/// to change it, replace public/img/cover.jpg and rebuild.
+const ASSET_COVER: &[u8] = include_bytes!("../../../public/img/cover.jpg");
+const ASSET_COVER_VPATH: &str = "/img/cover.jpg";
 
 /// Virtual paths the template uses for admin-uploaded ad slots. The
 /// template can reference these unconditionally; we serve a 1×1
@@ -284,6 +289,7 @@ impl World for MenuWorld {
                     .unwrap_or_else(|| ASSET_LADENFRONT.to_vec());
                 Ok(Bytes::new(bytes))
             }
+            Some(p) if p == ASSET_COVER_VPATH => Ok(Bytes::new(ASSET_COVER.to_vec())),
             Some(p) if p == ASSET_AD_COVER_VPATH => Ok(Bytes::new(
                 self.ad_cover.clone().unwrap_or_else(|| BLANK_PNG.to_vec()),
             )),
