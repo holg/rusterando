@@ -1961,6 +1961,77 @@ main { display: block; width: 100%; }
   margin: 0 auto;
   padding: 0 1rem 4rem;
 
+  // Sticky nav bar: bulk collapse/expand buttons + horizontal pill
+  // strip of category names. Same conceptual shape as the public
+  // /menu's .category-nav but lives inside the admin shell so the
+  // top offset clears the admin-shell-bar rather than the public
+  // site-header.
+  .admin-menu-nav {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 0.5rem 0;
+    margin-bottom: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+
+    .nav-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      .btn {
+        font-size: 0.85rem;
+        padding: 0.3rem 0.7rem;
+      }
+    }
+
+    .nav-pills {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 0.4rem;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+      scroll-snap-type: x proximity;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+      &::-webkit-scrollbar { height: 6px; }
+      &::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+      .pill {
+        flex: 0 0 auto;
+        scroll-snap-align: start;
+        padding: 0.3rem 0.7rem;
+        border-radius: 1rem;
+        background: white;
+        border: 1px solid var(--border);
+        font-size: 0.8rem;
+        color: var(--text);
+        white-space: nowrap;
+        text-decoration: none;
+        transition: border-color 120ms, background 120ms, color 120ms;
+        &:hover, &:focus-visible {
+          border-color: var(--primary);
+          background: #fff5f0;
+          text-decoration: none;
+        }
+        &.active {
+          background: var(--primary);
+          border-color: var(--primary);
+          color: white;
+          font-weight: 700;
+        }
+      }
+    }
+  }
+
+  // Pull-cat-block anchor target margin so anchor jumps don't slip
+  // under the sticky nav.
+  .cat-block { scroll-margin-top: 8rem; }
+
   .cat-block {
     background: white;
     border: 1px solid var(--border);

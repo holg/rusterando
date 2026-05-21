@@ -340,9 +340,191 @@ fn Editor(
         category_overlay: _,
     } = payload;
     let cats_for_select: Vec<MenuCategory> = categories.clone();
+    let cats_for_nav: Vec<MenuCategory> = categories.clone();
+
+    // Hydrate-side: track which category section is closest to the
+    // viewport top and mark the matching pill .active. Mirrors the
+    // public /menu scroll-listener (menu.rs:387). When you click a
+    // pill, the anchor jump triggers a scroll which then triggers
+    // recompute → the pill highlights itself; no extra wiring needed.
+    #[cfg(feature = "hydrate")]
+    {
+        let cat_ids: Vec<String> = categories.iter().map(|c| c.id.clone()).collect();
+        Effect::new(move |_| {
+            use leptos::wasm_bindgen::closure::Closure;
+            use leptos::wasm_bindgen::JsCast;
+            let Some(win) = web_sys::window() else { return };
+            let ids = std::rc::Rc::new(cat_ids.clone());
+            let ids_for_recompute = ids.clone();
+            let recompute = move || {
+                let Some(win) = web_sys::window() else { return };
+                let Some(doc) = win.document() else { return };
+                // Probe line below the sticky admin shell bar + admin
+                // page-bar + admin-menu-nav (~150px on desktop).
+                let probe: f64 = 160.0;
+                let mut best: Option<(String, f64)> = None;
+                for id in ids_for_recompute.iter() {
+                    let sel = format!("#admin-cat-{id}");
+                    let Some(el) = doc.query_selector(&sel).ok().flatten() else {
+                        continue;
+                    };
+                    let rect = el.get_bounding_client_rect();
+                    let top = rect.top();
+                    if top <= probe && best.as_ref().map(|(_, t)| top > *t).unwrap_or(true) {
+                        best = Some((id.clone(), top));
+                    }
+                }
+                let active_cat = best
+                    .map(|(id, _)| id)
+                    .or_else(|| ids_for_recompute.first().cloned());
+                let Some(active_cat) = active_cat else { return };
+                let Some(strip) = doc
+                    .query_selector(".admin-menu-nav .nav-pills")
+                    .ok()
+                    .flatten()
+                else {
+                    return;
+                };
+                let Ok(pills) = strip.query_selector_all("a[data-cat]") else {
+                    return;
+                };
+                for i in 0..pills.length() {
+                    let Some(node) = pills.item(i) else { continue };
+                    let Ok(el) = node.dyn_into::<web_sys::Element>() else {
+                        continue;
+                    };
+                    let is_match = el
+                        .get_attribute("data-cat")
+                        .map(|v| v == active_cat)
+                        .unwrap_or(false);
+                    if is_match {
+                        if !el.class_list().contains("active") {
+                            el.class_list().add_1("active").ok();
+                            let opts = web_sys::ScrollIntoViewOptions::new();
+                            opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+                            opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
+                            opts.set_inline(web_sys::ScrollLogicalPosition::Center);
+                            el.scroll_into_view_with_scroll_into_view_options(&opts);
+                        }
+                    } else {
+                        el.class_list().remove_1("active").ok();
+                    }
+                }
+            };
+            recompute();
+            let pending = std::rc::Rc::new(std::cell::Cell::new(false));
+            let recompute_rc = std::rc::Rc::new(recompute);
+            let pending_for_cb = pending.clone();
+            let recompute_for_cb = recompute_rc.clone();
+            let cb = Closure::<dyn Fn()>::new(move || {
+                if pending_for_cb.get() {
+                    return;
+                }
+                pending_for_cb.set(true);
+                let pending_inner = pending_for_cb.clone();
+                let recompute_inner = recompute_for_cb.clone();
+                let raf_cb = Closure::once_into_js(move || {
+                    pending_inner.set(false);
+                    recompute_inner();
+                });
+                if let Some(win) = web_sys::window() {
+                    let _ = win.request_animation_frame(raf_cb.as_ref().unchecked_ref());
+                }
+            });
+            win.add_event_listener_with_callback("scroll", cb.as_ref().unchecked_ref())
+                .ok();
+            win.add_event_listener_with_callback("resize", cb.as_ref().unchecked_ref())
+                .ok();
+            cb.forget();
+        });
+    }
+
+    // Bulk-open / bulk-close handlers. Walk every <details.cat-block>
+    // and flip its `open` attribute. Pills that ALSO need to open
+    // their target use this same machinery through the anchor href.
+    let on_open_all = move |_| {
+        #[cfg(feature = "hydrate")]
+        {
+            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                if let Ok(nodes) = doc.query_selector_all("details.cat-block") {
+                    for i in 0..nodes.length() {
+                        if let Some(node) = nodes.item(i) {
+                            use leptos::wasm_bindgen::JsCast;
+                            if let Ok(el) = node.dyn_into::<web_sys::Element>() {
+                                el.set_attribute("open", "").ok();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+    let on_close_all = move |_| {
+        #[cfg(feature = "hydrate")]
+        {
+            if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                if let Ok(nodes) = doc.query_selector_all("details.cat-block") {
+                    for i in 0..nodes.length() {
+                        if let Some(node) = nodes.item(i) {
+                            use leptos::wasm_bindgen::JsCast;
+                            if let Ok(el) = node.dyn_into::<web_sys::Element>() {
+                                el.remove_attribute("open").ok();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    // Pill click: open the target <details> before the anchor jump
+    // scrolls the page so we land on an expanded section, not a
+    // collapsed header.
+    #[cfg(feature = "hydrate")]
+    let on_pill_click = move |ev: leptos::ev::MouseEvent| {
+        use leptos::wasm_bindgen::JsCast;
+        let Some(target) = ev.target() else { return };
+        let Ok(anchor) = target.dyn_into::<web_sys::Element>() else {
+            return;
+        };
+        let Some(cat_id) = anchor.get_attribute("data-cat") else {
+            return;
+        };
+        let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
+        let sel = format!("#admin-cat-{cat_id}");
+        if let Some(node) = doc.query_selector(&sel).ok().flatten() {
+            node.set_attribute("open", "").ok();
+        }
+    };
+    #[cfg(not(feature = "hydrate"))]
+    let on_pill_click = move |_: leptos::ev::MouseEvent| {};
 
     view! {
         <div class="admin-menu-editor">
+            <nav class="admin-menu-nav">
+                <div class="nav-actions">
+                    <button class="btn ghost" type="button" on:click=on_open_all>
+                        "▾ Alle ausklappen"
+                    </button>
+                    <button class="btn ghost" type="button" on:click=on_close_all>
+                        "▴ Alle einklappen"
+                    </button>
+                </div>
+                <div class="nav-pills">
+                    {cats_for_nav.into_iter().map(|c| {
+                        let href = format!("#admin-cat-{}", c.id);
+                        let cat_id_attr = c.id.clone();
+                        view! {
+                            <a class="pill" href=href data-cat=cat_id_attr on:click=on_pill_click>
+                                {c.name}
+                            </a>
+                        }
+                    }).collect_view()}
+                </div>
+            </nav>
+
             {categories.into_iter().map(|cat| {
                 let cat_items = items.iter()
                     .filter(|it| it.category_id == cat.id)
@@ -372,9 +554,14 @@ fn CategoryBlock(
     let count = cat_items.len();
     let cat_id = cat.id.clone();
     let cat_name = cat.name.clone();
+    // Anchor target for the sticky-nav pills. <details> starts
+    // collapsed; on pill click we set the `open` attribute imperatively
+    // (see Editor::on_pill_click) so the anchor scroll lands on an
+    // expanded section.
+    let details_id = format!("admin-cat-{cat_id}");
 
     view! {
-        <details class="cat-block" open>
+        <details class="cat-block" id=details_id>
             <summary>
                 <strong>{cat_name}</strong>
                 <span class="muted">" (" {count} ")"</span>
