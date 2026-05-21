@@ -1773,14 +1773,25 @@ pub async fn place_order(
         None
     };
 
+    // Snapshot the active Stripe mode at order-creation time. Orders
+    // that pay through Stripe later overwrite this from the payment-
+    // intent's mode; voucher_paid and cash_on_pickup orders never
+    // go through that path, so without this snapshot they'd inherit
+    // the schema's `DEFAULT 'sandbox'` and get flagged as TEST
+    // everywhere (kitchen ticket banner, admin order list, stats
+    // exclusion in Buchhaltung) — even when the shop is in live mode.
+    let stripe_mode_snapshot: String = use_context::<crate::stripe::StripeModeHandle>()
+        .map(|h| h.get().as_setting().to_string())
+        .unwrap_or_else(|| "sandbox".to_string());
+
     sqlx::query(
         "INSERT INTO orders (id, order_number, order_type, status,
             contact_name, contact_phone, contact_email,
             delivery_address_json, scheduled_for,
             subtotal_cents, delivery_fee_cents, tax_cents, total_cents,
             payment_status, notes,
-            customer_id, address_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, NULL, ?14, ?15)",
+            customer_id, address_id, stripe_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, NULL, ?14, ?15, ?16)",
     )
     .bind(&order_id)
     .bind(&order_number)
@@ -1797,6 +1808,7 @@ pub async fn place_order(
     .bind(initial_payment_status)
     .bind(&customer_id)
     .bind(address_id.as_deref())
+    .bind(&stripe_mode_snapshot)
     .execute(&mut *tx)
     .await
     .map_err(|e| ServerFnError::new(format!("insert order: {e}")))?;
