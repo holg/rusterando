@@ -574,9 +574,19 @@ async fn read_setting_lines(db: &SqlitePool, key: &str) -> Option<Vec<String>> {
 /// Load template source + admin-uploaded image bytes referenced by
 /// `app_settings`. Falls back to bundled defaults silently when a
 /// setting is missing or the upload file is unreadable.
+///
+/// The "cover" and "template_source" sides resolve through the
+/// `pdf_cover_images` / `pdf_themes` library tables introduced by
+/// migration 20260522000001. Each has an active-pointer setting
+/// (`pdf_cover_active_id`, `pdf_theme_active_id`); empty pointer →
+/// no override → renderer uses the compiled-in factory.
+///
+/// The ad-slot images (cover/center/back) are independent — they
+/// still read directly from their single-value `pdf_ad_*_image`
+/// settings. They're overlays, not the main cover.
 pub async fn load_pdf_overrides(db: &SqlitePool) -> PdfOverrides {
-    let template_source = read_setting(db, "pdf_template_source").await;
-    let cover_image = read_image_setting(db, "pdf_cover_image").await;
+    let template_source = read_active_theme_source(db).await;
+    let cover_image = read_active_cover_bytes(db).await;
     let ad_cover_image = read_image_setting(db, "pdf_ad_cover_image").await;
     let ad_center_image = read_image_setting(db, "pdf_ad_center_image").await;
     let ad_back_image = read_image_setting(db, "pdf_ad_back_image").await;
@@ -587,6 +597,60 @@ pub async fn load_pdf_overrides(db: &SqlitePool) -> PdfOverrides {
         ad_center_image,
         ad_back_image,
     }
+}
+
+/// Resolve `pdf_theme_active_id` → `pdf_themes.source`. Returns
+/// `None` if no theme is active or the active row was deleted out
+/// from under the pointer.
+async fn read_active_theme_source(db: &SqlitePool) -> Option<String> {
+    let id: i64 = read_setting(db, "pdf_theme_active_id")
+        .await?
+        .trim()
+        .parse()
+        .ok()?;
+    sqlx::query_scalar::<_, String>("SELECT source FROM pdf_themes WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// Resolve `pdf_cover_active_id` → `pdf_cover_images.filename` →
+/// bytes under `data/uploads/covers/<filename>`. Falls back to
+/// `data/uploads/<filename>` so rows imported from the legacy
+/// `pdf_cover_image` setting (where files lived in the parent
+/// dir, not the `covers/` subdir) still resolve. Returns `None`
+/// for any failure — the renderer then uses the bundled
+/// `ASSET_LADENFRONT`.
+async fn read_active_cover_bytes(db: &SqlitePool) -> Option<Vec<u8>> {
+    let id: i64 = read_setting(db, "pdf_cover_active_id")
+        .await?
+        .trim()
+        .parse()
+        .ok()?;
+    let filename: String =
+        sqlx::query_scalar("SELECT filename FROM pdf_cover_images WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()?;
+    // Defence-in-depth: reject path traversal even though the upload
+    // route only writes hash-derived names. Belt-and-suspenders for
+    // legacy imports too.
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return None;
+    }
+    let primary = std::path::Path::new("data/uploads/covers").join(&filename);
+    if let Ok(bytes) = std::fs::read(&primary) {
+        return Some(bytes);
+    }
+    // Legacy: rows imported from the old single-value pdf_cover_image
+    // setting reference files that live under data/uploads/ directly.
+    let legacy = std::path::Path::new("data/uploads").join(&filename);
+    std::fs::read(&legacy).ok()
 }
 
 /// Resolve a `/img/uploads/<hash>.<ext>` setting to its on-disk bytes.
@@ -615,4 +679,68 @@ pub async fn build_menu_pdf(
     let payload = load_menu_payload(db, site_url, shop_branding).await?;
     let overrides = load_pdf_overrides(db).await;
     tokio::task::spawn_blocking(move || render_menu_pdf(&payload, &overrides)).await?
+}
+
+// ---------------------------------------------------------------------------
+// Boot-time seed: ensure the PDF cover + theme libraries have at least
+// one row on first run, so a fresh deployment doesn't show the admin
+// an empty switcher. Called from main.rs right after migrations.
+// ---------------------------------------------------------------------------
+
+/// Idempotent. If `pdf_themes` is empty, insert one row with the
+/// bundled `TEMPLATE_SRC` and set it active. If `pdf_cover_images`
+/// is empty AND we can find `public/img/cover.jpg`, copy it into
+/// `data/uploads/covers/cover.jpg` and seed a row + activate it.
+pub async fn seed_pdf_library_if_empty(db: &SqlitePool) -> anyhow::Result<()> {
+    // Theme side.
+    let theme_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pdf_themes")
+        .fetch_one(db)
+        .await?;
+    if theme_count == 0 {
+        let row: (i64,) =
+            sqlx::query_as("INSERT INTO pdf_themes (name, source) VALUES (?1, ?2) RETURNING id")
+                .bind("Werks-Vorlage")
+                .bind(TEMPLATE_SRC)
+                .fetch_one(db)
+                .await?;
+        sqlx::query("UPDATE app_settings SET value = ?1 WHERE key = 'pdf_theme_active_id'")
+            .bind(row.0.to_string())
+            .execute(db)
+            .await?;
+    }
+
+    // Cover side.
+    let cover_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pdf_cover_images")
+        .fetch_one(db)
+        .await?;
+    if cover_count == 0 {
+        // Try the bundled public/img/cover.jpg as the seed image.
+        let src_path = std::path::Path::new("public/img/cover.jpg");
+        if let Ok(bytes) = std::fs::read(src_path) {
+            let dst_dir = std::path::Path::new("data/uploads/covers");
+            std::fs::create_dir_all(dst_dir).ok();
+            let dst_path = dst_dir.join("cover.jpg");
+            if std::fs::write(&dst_path, &bytes).is_ok() {
+                let row: (i64,) = sqlx::query_as(
+                    "INSERT INTO pdf_cover_images (label, filename, mime_type, size_bytes)
+                     VALUES (?1, ?2, ?3, ?4) RETURNING id",
+                )
+                .bind("Werks-Cover (cover.jpg)")
+                .bind("cover.jpg")
+                .bind("image/jpeg")
+                .bind(bytes.len() as i64)
+                .fetch_one(db)
+                .await?;
+                sqlx::query("UPDATE app_settings SET value = ?1 WHERE key = 'pdf_cover_active_id'")
+                    .bind(row.0.to_string())
+                    .execute(db)
+                    .await?;
+            }
+        }
+        // If public/img/cover.jpg isn't present, the library stays
+        // empty. The renderer falls back to the compiled-in
+        // ASSET_LADENFRONT (the old shop-photo seed) — no crash.
+    }
+
+    Ok(())
 }

@@ -137,6 +137,15 @@ async fn main() {
         }
     }
 
+    // Seed the PDF cover + theme libraries if they're still empty
+    // (fresh deploy, or first run after the 20260522 migration on a
+    // shop that never set the legacy single-value overrides). This
+    // makes sure the admin sees at least one theme + one cover in the
+    // /admin/pdf switcher instead of an empty list. Idempotent.
+    if let Err(e) = rusterando_server::pdf::seed_pdf_library_if_empty(&db).await {
+        tracing::warn!("seed_pdf_library_if_empty failed (non-fatal): {e}");
+    }
+
     let admin_password = std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| {
         tracing::warn!("ADMIN_PASSWORD not set — defaulting to 'admin' for local dev");
         "admin".to_string()
@@ -355,6 +364,12 @@ async fn main() {
         .route(
             "/api/admin/pdf/test_render",
             axum::routing::post(pdf_test_render_handler),
+        )
+        // Cover library: multipart upload of a new entry into
+        // pdf_cover_images. Returns JSON {id, filename}.
+        .route(
+            "/api/admin/pdf/cover/upload",
+            axum::routing::post(pdf_cover_upload_handler),
         )
         // Serve uploaded photos from the persistent data dir (lives
         // outside target/site so cargo-leptos rebuilds don't wipe them
@@ -603,6 +618,141 @@ async fn upload_image_handler(
         body,
     )
         .into_response()
+}
+
+/// `/api/admin/pdf/cover/upload` — multipart POST that adds a new entry
+/// to the `pdf_cover_images` library. Two fields:
+///   `file`  — the image bytes (JPEG or PNG only; max 5 MB)
+///   `label` — short human-readable label, e.g. "Sommer-Aktion"
+///
+/// Writes to `data/uploads/covers/<sha256>.<ext>` and inserts a row,
+/// returning `{ "id": <new row id>, "filename": "<sha256>.<ext>" }`.
+/// The new cover is NOT auto-activated — admin clicks the radio in
+/// the UI to switch.
+async fn pdf_cover_upload_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: axum::http::HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use sha2::{Digest, Sha256};
+
+    let admin_ok = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(';')
+                .any(|c| c.trim().eq_ignore_ascii_case("admin_session=ok"))
+        })
+        .unwrap_or(false);
+    if !admin_ok {
+        return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
+    }
+
+    let mut buf: Option<Vec<u8>> = None;
+    let mut label: Option<String> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name() {
+            Some("file") => match field.bytes().await {
+                Ok(b) => {
+                    if b.len() > MAX_UPLOAD_BYTES {
+                        return (StatusCode::PAYLOAD_TOO_LARGE, "Datei zu groß (max. 5 MB).")
+                            .into_response();
+                    }
+                    buf = Some(b.to_vec());
+                }
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        format!("Upload fehlgeschlagen: {e}"),
+                    )
+                        .into_response();
+                }
+            },
+            Some("label") => {
+                if let Ok(s) = field.text().await {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        label = Some(trimmed.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(bytes) = buf else {
+        return (StatusCode::BAD_REQUEST, "Kein 'file' Feld.").into_response();
+    };
+    let label = label.unwrap_or_else(|| "Cover".to_string());
+
+    // Cover-only image whitelist: JPEG and PNG. WebP is fine for
+    // hero/gallery images (the /api/admin/upload_image route) but not
+    // worth the print-pipeline risk for cover photos.
+    let (ext, mime) = match bytes.as_slice() {
+        b if b.starts_with(b"\x89PNG\r\n\x1a\n") => ("png", "image/png"),
+        b if b.starts_with(&[0xFF, 0xD8, 0xFF]) => ("jpg", "image/jpeg"),
+        _ => {
+            return (StatusCode::BAD_REQUEST, "Nur JPEG oder PNG unterstützt.").into_response();
+        }
+    };
+
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    let hex = h
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    let filename = format!("{hex}.{ext}");
+
+    let dir = std::path::Path::new("data/uploads/covers");
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("mkdir covers: {e}"),
+        )
+            .into_response();
+    }
+    let path = dir.join(&filename);
+    let size = bytes.len() as i64;
+    if !path.exists() {
+        if let Err(e) = std::fs::write(&path, &bytes) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("write upload: {e}"),
+            )
+                .into_response();
+        }
+    }
+
+    let row: Result<(i64,), _> = sqlx::query_as(
+        "INSERT INTO pdf_cover_images (label, filename, mime_type, size_bytes)
+         VALUES (?1, ?2, ?3, ?4) RETURNING id",
+    )
+    .bind(&label)
+    .bind(&filename)
+    .bind(mime)
+    .bind(size)
+    .fetch_one(&state.db)
+    .await;
+
+    match row {
+        Ok((id,)) => {
+            let body = format!(r#"{{"id":{id},"filename":"{filename}"}}"#);
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("db insert cover: {e}"),
+        )
+            .into_response(),
+    }
 }
 
 /// `/api/admin/pdf/test_render` — test-compile a Typst source against

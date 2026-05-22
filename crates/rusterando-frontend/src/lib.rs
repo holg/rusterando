@@ -61,8 +61,14 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::admin::zones::CreateZone>();
     leptos::server_fn::axum::register_explicit::<pages::admin::zones::UpdateZone>();
     leptos::server_fn::axum::register_explicit::<pages::admin::zones::DeleteZone>();
-    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::SavePdfTemplate>();
     leptos::server_fn::axum::register_explicit::<pages::admin::pdf::GetPdfDefaults>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::ListPdfCovers>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::ActivatePdfCover>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::DeletePdfCover>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::ListPdfThemes>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::SavePdfTheme>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::ActivatePdfTheme>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::pdf::DeletePdfTheme>();
     leptos::server_fn::axum::register_explicit::<pages::admin::pricing::AnalyzePricing>();
     leptos::server_fn::axum::register_explicit::<pages::admin::options_admin::ListOptionGroupsAdmin>(
     );
