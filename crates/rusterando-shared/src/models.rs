@@ -204,6 +204,13 @@ pub struct CartView {
     /// bis kostenlose Lieferung" without a separate fetch.
     #[serde(default)]
     pub free_delivery_threshold_cents: i64,
+    /// `true` when online ordering is currently off (manual pause or
+    /// outside opening hours). Lets the cart drawer disable "Weiter zur
+    /// Kasse" and show a note without a separate fetch. Mirrors the
+    /// authoritative `place_order` gate; the checkout page repeats the
+    /// check via CheckoutContext.
+    #[serde(default)]
+    pub orders_closed: bool,
 }
 
 /// Format a cent amount as a German euro string: 1234 -> "12,34 €".

@@ -115,6 +115,7 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
     let is_stripe_mode = key == "stripe_mode";
     let is_i18n_toggle = key == "i18n_enabled";
     let is_category_overlay = key == "menu_category_overlay";
+    let is_orders_paused = key == "orders_paused";
     let preview_eur = Memo::new(move |_| {
         value
             .get()
@@ -169,6 +170,16 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
                 on:change=move |ev| value.set(event_target_value(&ev))>
                 <option value="0">"Aus — nur Tab-Leiste oben"</option>
                 <option value="1">"An — zusätzliche Kategorie-Liste am Rand"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_orders_paused {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="0">"Aus — Online-Bestellungen normal (nach Öffnungszeiten)"</option>
+                <option value="1">"An — KEINE Online-Bestellungen (Shop pausiert)"</option>
             </select>
         }
         .into_any()

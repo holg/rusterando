@@ -453,6 +453,30 @@ body:has(.test-mode-banner) {
   .add-on { color: rgba(255, 255, 255, 0.85); opacity: 1; }
 }
 
+// "Online ordering off" banner — shown on home, checkout, and (as a
+// compact note) in the cart drawer when the shop is paused or closed.
+.order-closed-banner {
+  background: #fdecea;
+  border: 1px solid #f5b5ae;
+  border-left: 4px solid #c62828;
+  color: #8e1c14;
+  padding: 0.8rem 1rem;
+  border-radius: 6px;
+  margin: 0 0 1rem;
+  strong { display: block; font-size: 1.02rem; margin-bottom: 0.15rem; }
+  p { margin: 0; font-size: 0.92rem; }
+}
+.order-closed-note {
+  background: #fdecea;
+  border-left: 3px solid #c62828;
+  color: #8e1c14;
+  padding: 0.45rem 0.7rem;
+  border-radius: 4px;
+  margin: 0 0 0.6rem;
+  font-size: 0.88rem;
+  &.hidden { display: none; }
+}
+
 .delivery {
   max-width: 72rem;
   margin: 0 auto 2.5rem;
@@ -1545,6 +1569,7 @@ main { display: block; width: 100%; }
     margin-bottom: 0.3rem;
   }
   .order-num { font-size: 1.05rem; color: var(--primary); }
+  .order-time { color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .contact { margin: 0.1rem 0; color: var(--muted); font-size: 0.85rem; }
   .pickup { margin: 0.1rem 0; }
   .items { margin: 0.4rem 0; font-size: 0.9rem; }
@@ -1810,6 +1835,51 @@ main { display: block; width: 100%; }
     td.muted { color: var(--muted); }
     td.items-cell { color: var(--muted); font-size: 0.85rem; }
     a { color: var(--primary); font-weight: 700; }
+  }
+
+  // ----- Ersparnis-Simulation (Lieferando vs. eigene Seite) -----
+  .savings-grid {
+    display: grid;
+    gap: 0.8rem;
+    grid-template-columns: 1fr;
+    margin-bottom: 1rem;
+    @media (min-width: 48rem) { grid-template-columns: 1fr 1fr; }
+  }
+  .savings-col {
+    background: white;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    h3 { margin: 0 0 0.6rem; font-size: 0.95rem; }
+    &.lieferando { border-top: 3px solid #fa4f1e; } // Lieferando-Orange
+    &.own        { border-top: 3px solid var(--primary); }
+  }
+  .savings-table {
+    width: 100%;
+    border-collapse: collapse;
+    td { padding: 0.35rem 0; font-size: 0.88rem; border-bottom: 1px solid var(--border); }
+    td.amt { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    tr.total td { border-bottom: none; padding-top: 0.55rem; font-weight: 700; }
+  }
+  .savings-headline {
+    background: linear-gradient(135deg, #f0fff4, #e6f7ec);
+    border: 1px solid #b7e4c7;
+    border-radius: 0.5rem;
+    padding: 1rem 1.2rem;
+    text-align: center;
+    margin-bottom: 1rem;
+    .label { color: var(--muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; display: block; }
+    .value { color: #1b7a3d; font-size: 2rem; font-weight: 900; display: block; margin: 0.15rem 0; font-variant-numeric: tabular-nums; }
+    .sub { color: #2f7d4e; font-size: 0.85rem; font-weight: 600; }
+
+    // Kumulierte Gesamtersparnis: der Hero-Wert, größer + kräftiger.
+    &.lifetime {
+      background: linear-gradient(135deg, #1b7a3d, #2f9c54);
+      border-color: #15632f;
+      .label { color: rgba(255, 255, 255, 0.85); }
+      .value { color: white; font-size: 2.8rem; }
+      .sub { color: rgba(255, 255, 255, 0.92); }
+    }
   }
 }
 
@@ -3653,4 +3723,76 @@ button.add-item {
 
   .actions { display: flex; gap: 0.7rem; align-items: center; margin-top: 0.8rem; }
   .actions .ok { color: #1b7a3a; }
+}
+
+// ----- /admin/hours -----
+.admin-hours {
+  .quick-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem 1.2rem;
+    border-radius: 8px;
+    margin: 0.5rem 0 0.4rem;
+    border: 1px solid var(--border, #e7e1d5);
+
+    .state { display: flex; align-items: center; gap: 0.6rem; }
+    .state .dot { width: 0.8rem; height: 0.8rem; border-radius: 50%; }
+
+    &.open  { background: #f0fff4; border-color: #b7e4c7; }
+    &.open  .dot { background: #1b7a3d; }
+    &.paused { background: #fdecea; border-color: #f5b5ae; }
+    &.paused .dot { background: #c62828; }
+  }
+  .btn.big { padding: 0.7rem 1.4rem; font-size: 1.05rem; font-weight: 700; }
+
+  .snooze-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin: 0.5rem 0 0.3rem;
+    .snooze-label { font-size: 0.88rem; color: #555; margin-right: 0.2rem; }
+    .btn.ghost { padding: 0.4rem 0.9rem; }
+  }
+
+  .week-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 0.8rem;
+    margin: 0.6rem 0 1.4rem;
+  }
+  .day-block {
+    background: #fff;
+    border: 1px solid var(--border, #e7e1d5);
+    border-radius: 8px;
+    padding: 0.7rem 0.85rem;
+    h3 { margin: 0 0 0.5rem; font-size: 0.95rem; color: var(--primary); }
+    .muted { color: #999; }
+  }
+  .shift-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-bottom: 0.45rem;
+    flex-wrap: wrap;
+    .t { width: 6.5rem; padding: 0.3rem 0.4rem; border: 1px solid var(--border, #d6cfc4); border-radius: 5px; font: inherit; }
+    .t:disabled { background: #f1f1f1; color: #aaa; }
+    .closed-check { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.82rem; }
+  }
+  .btn.small { padding: 0.3rem 0.6rem; font-size: 0.82rem; }
+
+  .special-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border: 1px solid var(--border, #e7e1d5);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-top: 0.6rem;
+    th, td { padding: 0.5rem 0.7rem; text-align: left; border-bottom: 1px solid var(--border, #eee); font-size: 0.9rem; }
+    th { background: #fdfaf6; color: #666; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
+    td.muted { color: #888; }
+  }
 }

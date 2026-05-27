@@ -54,6 +54,11 @@ struct AppState {
     /// write-through pattern as the other handles.
     #[allow(dead_code)]
     i18n: rusterando_frontend::pages::settings::I18nHandle,
+    /// Manual "pause online orders" switch. `true` = reject all online
+    /// orders regardless of opening hours and show a closed banner.
+    /// Same boot-read + write-through pattern as the other handles.
+    #[allow(dead_code)]
+    orders_paused: rusterando_frontend::pages::settings::OrdersPausedHandle,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
@@ -205,6 +210,14 @@ async fn main() {
     let i18n = rusterando_frontend::pages::settings::I18nHandle::new(i18n_initial);
     tracing::info!(enabled = i18n_initial, "i18n toggle at boot");
 
+    // Online-order pause switch — same boot read + write-through pattern.
+    // Default false (orders follow opening hours only).
+    let orders_paused_initial =
+        rusterando_frontend::pages::settings::ssr::orders_paused(&db).await;
+    let orders_paused =
+        rusterando_frontend::pages::settings::OrdersPausedHandle::new(orders_paused_initial);
+    tracing::info!(paused = orders_paused_initial, "orders-paused toggle at boot");
+
     // Kitchen-printer subsystem (see src/kitchen.rs). Spun up only
     // when KITCHEN_LISTEN_ADDR is set in .env so printerless deploys
     // skip the outbox writes entirely. Always loopback in production
@@ -250,6 +263,7 @@ async fn main() {
         kitchen,
         stripe_mode,
         i18n,
+        orders_paused,
     };
 
     let routes = generate_route_list(App);
@@ -305,6 +319,7 @@ async fn main() {
                 let kitchen_sink = kitchen_sink.clone();
                 let stripe_mode = state.stripe_mode.clone();
                 let i18n = state.i18n.clone();
+                let orders_paused = state.orders_paused.clone();
                 move || {
                     provide_context(db.clone());
                     provide_context(pwd.clone());
@@ -317,6 +332,7 @@ async fn main() {
                     provide_context(kitchen_sink.clone());
                     provide_context(stripe_mode.clone());
                     provide_context(i18n.clone());
+                    provide_context(orders_paused.clone());
                 }
             },
             {
@@ -394,6 +410,12 @@ async fn main() {
         .route("/api/{*fn_name}", axum::routing::any(server_fn_handler))
         .route("/qr.svg", axum::routing::get(qr_svg_handler))
         .route("/menu.pdf", axum::routing::get(menu_pdf_handler))
+        // SEO: let crawlers discover the public pages and steer clear of
+        // the transactional/admin/kitchen/driver areas. Both read
+        // PUBLIC_URL + the live i18n toggle at request time so no rebuild
+        // is needed when either changes.
+        .route("/sitemap.xml", axum::routing::get(sitemap_handler))
+        .route("/robots.txt", axum::routing::get(robots_handler))
         .route(
             "/admin/history.csv",
             axum::routing::get(history_csv_handler),
@@ -466,6 +488,129 @@ async fn apple_app_site_association_handler() -> impl axum::response::IntoRespon
             (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         APPLE_APP_SITE_ASSOCIATION,
+    )
+}
+
+/// The only crawlable, indexable pages. Everything else the app serves
+/// is transactional (`/checkout`, `/orders/{id}`) or staff-only
+/// (`/admin/*`, `/kitchen/*`, `/driver/*`) — those are excluded from the
+/// sitemap and `Disallow`ed in robots.txt below. Paths are relative to
+/// the site root, no trailing slash except the empty home path.
+const PUBLIC_PAGES: &[&str] = &["", "menu", "datenschutz", "impressum"];
+
+/// Non-default locale prefixes, mirrored 1:1 from `expand_locale_routes`.
+/// The default locale (de) is served un-prefixed and acts as `x-default`.
+const SITEMAP_LOCALES: &[&str] = &["en", "fr", "it", "es", "pt", "ru", "cn"];
+
+/// `/sitemap.xml` — lists the public pages so Google et al. can find and
+/// index them. The base URL comes from `PUBLIC_URL` (so dev/staging/prod
+/// each advertise their own origin) and the per-page `<xhtml:link
+/// hreflang>` alternates are emitted only when i18n is enabled, matching
+/// exactly which `/<lang>/*` URLs the router will actually serve.
+async fn sitemap_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::header;
+
+    let base = rusterando_frontend::pages::home::site_url();
+    let base = base.trim_end_matches('/');
+    let i18n_on = state.i18n.get();
+
+    // Helper: full absolute URL for a page in a given locale prefix.
+    // `prefix == ""` is the default-locale (de), un-prefixed URL.
+    let url_for = |prefix: &str, page: &str| match (prefix, page) {
+        ("", "") => base.to_string(),
+        ("", p) => format!("{base}/{p}"),
+        (lang, "") => format!("{base}/{lang}"),
+        (lang, p) => format!("{base}/{lang}/{p}"),
+    };
+
+    let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?>"#);
+    xml.push('\n');
+    xml.push_str(
+        r#"<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">"#,
+    );
+    xml.push('\n');
+
+    for &page in PUBLIC_PAGES {
+        // Locales to emit a <url> entry for: always the default; the 7
+        // others only when i18n is live.
+        let locales: Vec<&str> = if i18n_on {
+            std::iter::once("")
+                .chain(SITEMAP_LOCALES.iter().copied())
+                .collect()
+        } else {
+            vec![""]
+        };
+
+        for &loc in &locales {
+            xml.push_str("  <url>\n");
+            xml.push_str(&format!("    <loc>{}</loc>\n", url_for(loc, page)));
+
+            // hreflang alternates link the locale variants together so
+            // Google serves the right language per visitor. Only meaningful
+            // when there's more than one variant, i.e. i18n on.
+            if i18n_on {
+                // x-default points at the un-prefixed (de) URL.
+                xml.push_str(&format!(
+                    r#"    <xhtml:link rel="alternate" hreflang="x-default" href="{}"/>"#,
+                    url_for("", page)
+                ));
+                xml.push('\n');
+                xml.push_str(&format!(
+                    r#"    <xhtml:link rel="alternate" hreflang="de" href="{}"/>"#,
+                    url_for("", page)
+                ));
+                xml.push('\n');
+                for &lang in SITEMAP_LOCALES {
+                    xml.push_str(&format!(
+                        r#"    <xhtml:link rel="alternate" hreflang="{lang}" href="{}"/>"#,
+                        url_for(lang, page)
+                    ));
+                    xml.push('\n');
+                }
+            }
+            xml.push_str("  </url>\n");
+        }
+    }
+    xml.push_str("</urlset>\n");
+
+    (
+        [
+            (header::CONTENT_TYPE, "application/xml; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        xml,
+    )
+}
+
+/// `/robots.txt` — allows the public site, blocks the staff and
+/// transactional areas from being crawled or indexed, and points
+/// crawlers at the sitemap (absolute URL, as the spec requires).
+async fn robots_handler() -> impl axum::response::IntoResponse {
+    use axum::http::header;
+
+    let base = rusterando_frontend::pages::home::site_url();
+    let base = base.trim_end_matches('/');
+
+    let body = format!(
+        "User-agent: *\n\
+         Disallow: /admin\n\
+         Disallow: /kitchen\n\
+         Disallow: /driver\n\
+         Disallow: /checkout\n\
+         Disallow: /orders/\n\
+         Allow: /\n\
+         \n\
+         Sitemap: {base}/sitemap.xml\n"
+    );
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        body,
     )
 }
 
@@ -1476,6 +1621,7 @@ async fn server_fn_handler(
             let branding = state.branding.clone();
             let stripe_mode = state.stripe_mode.clone();
             let i18n = state.i18n.clone();
+            let orders_paused = state.orders_paused.clone();
             move || {
                 provide_context(db.clone());
                 provide_context(pwd.clone());
@@ -1487,6 +1633,7 @@ async fn server_fn_handler(
                 provide_context(kitchen_sink.clone());
                 provide_context(stripe_mode.clone());
                 provide_context(i18n.clone());
+                provide_context(orders_paused.clone());
             }
         },
         req,

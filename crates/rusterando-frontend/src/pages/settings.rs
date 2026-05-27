@@ -66,6 +66,34 @@ impl I18nHandle {
     }
 }
 
+/// Runtime "pause online orders" switch. `'1'` = reject all online
+/// orders (independent of opening hours) and show a closed banner;
+/// `'0'` = normal operation gated only by opening hours. Same
+/// write-through pattern as I18nHandle: seeded at boot from
+/// `app_settings.orders_paused`, rewritten when the admin toggles via
+/// `update_setting`. The optional customer-facing message
+/// (`orders_paused_message`) is read from the DB on demand rather than
+/// cached — it changes rarely and is only read on the low-traffic
+/// closed path.
+#[cfg(feature = "ssr")]
+#[derive(Clone, Default)]
+pub struct OrdersPausedHandle(pub Arc<RwLock<bool>>);
+
+#[cfg(feature = "ssr")]
+impl OrdersPausedHandle {
+    pub fn new(initial: bool) -> Self {
+        Self(Arc::new(RwLock::new(initial)))
+    }
+    pub fn get(&self) -> bool {
+        self.0.read().map(|g| *g).unwrap_or(false)
+    }
+    pub fn set(&self, v: bool) {
+        if let Ok(mut g) = self.0.write() {
+            *g = v;
+        }
+    }
+}
+
 /// Public-facing snapshot — what the menu/checkout/home pages need to
 /// render. Cached in checkout context so the form picks it up via the
 /// existing `load_checkout_context` server fn.
@@ -148,6 +176,24 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
             "menu_category_overlay muss '0' / '1' (oder 'true' / 'false') sein.",
         ));
     }
+    if key == "orders_paused" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
+        return Err(ServerFnError::new(
+            "orders_paused muss '0' / '1' (oder 'true' / 'false') sein.",
+        ));
+    }
+    if key == "orders_paused_message" && value.trim().chars().count() > 200 {
+        return Err(ServerFnError::new(
+            "Hinweistext darf höchstens 200 Zeichen lang sein.",
+        ));
+    }
+    // orders_paused_until: empty (clear) or a UTC 'YYYY-MM-DD HH:MM:SS'.
+    if key == "orders_paused_until" && !value.trim().is_empty() {
+        if chrono::NaiveDateTime::parse_from_str(value.trim(), "%Y-%m-%d %H:%M:%S").is_err() {
+            return Err(ServerFnError::new(
+                "orders_paused_until muss leer oder ein Zeitstempel 'YYYY-MM-DD HH:MM:SS' (UTC) sein.",
+            ));
+        }
+    }
     if key == "stripe_mode" {
         // Only the two literal values are accepted. Refuse 'live'
         // when the matching env vars aren't set so the admin can't
@@ -225,6 +271,24 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
             h.set(matches!(value.trim(), "1" | "true"));
         }
     }
+    // Pause toggle — flip the runtime handle so the next order attempt
+    // and the next page render immediately see the new state.
+    if key == "orders_paused" {
+        let on = matches!(value.trim(), "1" | "true");
+        if let Some(h) = use_context::<OrdersPausedHandle>() {
+            h.set(on);
+        }
+        // Turning the indefinite switch OFF also cancels any active
+        // timed snooze, so "Wieder öffnen" fully reopens in one click.
+        if !on {
+            let _ = sqlx::query(
+                "UPDATE app_settings SET value = '', updated_at = CURRENT_TIMESTAMP
+                 WHERE key = 'orders_paused_until'",
+            )
+            .execute(&db)
+            .await;
+        }
+    }
     Ok(())
 }
 
@@ -281,5 +345,71 @@ pub mod ssr {
                 .ok()
                 .flatten();
         matches!(row.as_ref().map(|(v,)| v.as_str()), Some("1" | "true"))
+    }
+
+    /// Whether online orders are manually paused. Defaults to `false`
+    /// (normal operation) on missing rows or invalid values — matches
+    /// the migration default.
+    pub async fn orders_paused(db: &SqlitePool) -> bool {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = 'orders_paused'")
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        matches!(row.as_ref().map(|(v,)| v.as_str()), Some("1" | "true"))
+    }
+
+    /// Optional customer-facing message shown when orders are paused.
+    /// Empty string when unset — callers fall back to a generic text.
+    pub async fn orders_paused_message(db: &SqlitePool) -> String {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = 'orders_paused_message'")
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        row.map(|(v,)| v.trim().to_string()).unwrap_or_default()
+    }
+
+    /// Active timed-snooze deadline, parsed from `orders_paused_until`
+    /// (stored as a UTC `'YYYY-MM-DD HH:MM:SS'` string). Returns `None`
+    /// when unset, unparseable, or already in the past — so an expired
+    /// snooze simply stops blocking with no cleanup needed.
+    pub async fn orders_paused_until(db: &SqlitePool) -> Option<chrono::DateTime<chrono::Utc>> {
+        use chrono::{NaiveDateTime, TimeZone, Utc};
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = 'orders_paused_until'")
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        let s = row.map(|(v,)| v.trim().to_string()).unwrap_or_default();
+        if s.is_empty() {
+            return None;
+        }
+        let dt = NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok()?;
+        let until = Utc.from_utc_datetime(&dt);
+        (until > Utc::now()).then_some(until)
+    }
+
+    /// The single source of truth for "are online orders paused right
+    /// now?" — used by `place_order` and every customer-facing surface
+    /// so they never disagree. Returns `(paused, resume_label)`:
+    ///   * `paused`        — indefinite switch on, OR an unexpired snooze.
+    ///   * `resume_label`  — local "HH:MM" the snooze ends, when the
+    ///                       pause is purely timed (None for indefinite,
+    ///                       so the UI shows the generic/custom message).
+    pub async fn order_pause_state(db: &SqlitePool) -> (bool, Option<String>) {
+        let indefinite = orders_paused(db).await;
+        let until = orders_paused_until(db).await;
+        match (indefinite, until) {
+            (true, _) => (true, None),
+            (false, Some(until)) => {
+                let local = until.with_timezone(&chrono::Local);
+                (true, Some(local.format("%H:%M").to_string()))
+            }
+            (false, None) => (false, None),
+        }
     }
 }

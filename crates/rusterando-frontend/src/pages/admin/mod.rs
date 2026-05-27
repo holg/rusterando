@@ -3,6 +3,7 @@ pub mod customers;
 pub mod extras_admin;
 pub mod history;
 pub mod home;
+pub mod hours;
 pub mod home_admin;
 pub mod login;
 pub mod menu_admin;

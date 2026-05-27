@@ -13,6 +13,42 @@ pub struct HomeDeliveryInfo {
     pub zones: Vec<DeliveryZoneSummary>,
     /// Free-delivery threshold in cents. 0 = promo disabled.
     pub free_delivery_threshold_cents: i64,
+    /// `true` when online ordering is currently off (manual pause or
+    /// outside opening hours). The home page shows a closed banner.
+    #[serde(default)]
+    pub orders_closed: bool,
+    /// Customer-facing reason shown in the banner when `orders_closed`.
+    #[serde(default)]
+    pub closed_reason: String,
+    /// Weekly opening hours for the public table, Mon-first. Built from
+    /// the DB so the displayed hours always match what gates ordering.
+    #[serde(default)]
+    pub hours_rows: Vec<DayHours>,
+}
+
+/// Localized weekday label for the public hours table. Maps the DB
+/// weekday number (0=Sun..6=Sat) to the existing i18n `t!` key so the
+/// table stays translated.
+fn home_weekday_label(weekday: i64) -> String {
+    match weekday {
+        0 => crate::t!("home.day_sun"),
+        1 => crate::t!("home.day_mon"),
+        2 => crate::t!("home.day_tue"),
+        3 => crate::t!("home.day_wed"),
+        4 => crate::t!("home.day_thu"),
+        5 => crate::t!("home.day_fri"),
+        6 => crate::t!("home.day_sat"),
+        _ => String::new(),
+    }
+}
+
+/// One row of the public opening-hours table. `weekday` (0=Sun..6=Sat)
+/// lets the view pick the localized label via `t!`; `windows` is the
+/// collapsed time string ("11:30–14:30 · 17:00–22:00"), empty = closed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DayHours {
+    pub weekday: i64,
+    pub windows: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,9 +90,64 @@ pub async fn home_delivery_info() -> Result<HomeDeliveryInfo, ServerFnError> {
 
     let threshold = crate::pages::settings::ssr::free_delivery_threshold_cents(&db).await;
 
+    // Closed state mirrors the place_order gate (manual pause or outside
+    // opening hours) so the home page can warn before the customer even
+    // opens the menu.
+    let (paused, resume_at) = crate::pages::settings::ssr::order_pause_state(&db).await;
+    let no_slots = crate::pages::order::ssr::today_slots(&db).await.is_empty();
+    let orders_closed = paused || no_slots;
+    let closed_reason = if paused {
+        match resume_at {
+            Some(t) => format!("Wir sind ab {t} Uhr wieder für Bestellungen da."),
+            None => {
+                let msg = crate::pages::settings::ssr::orders_paused_message(&db).await;
+                if msg.is_empty() {
+                    "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
+                } else {
+                    msg
+                }
+            }
+        }
+    } else if no_slots {
+        "Wir haben gerade geschlossen. Bestellungen sind während unserer Öffnungszeiten möglich.".to_string()
+    } else {
+        String::new()
+    };
+
+    // Weekly hours for the public table — built from the DB so what's
+    // shown always matches what gates ordering. Multiple shift rows per
+    // weekday are collapsed into one "A–B · C–D" string; a day with no
+    // open rows (or all closed) renders as Ruhetag (empty windows).
+    let raw = sqlx::query_as::<_, (i64, String, String, i64)>(
+        "SELECT weekday, open_time, close_time, is_closed
+         FROM opening_hours ORDER BY weekday, open_time",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap_or_default();
+    let week_order = [1_i64, 2, 3, 4, 5, 6, 0]; // Mon-first display
+    let hours_rows = week_order
+        .into_iter()
+        .map(|wd| {
+            let windows = raw
+                .iter()
+                .filter(|(w, _, _, closed)| *w == wd && *closed == 0)
+                .map(|(_, o, c, _)| format!("{o}–{c}"))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            DayHours {
+                weekday: wd,
+                windows,
+            }
+        })
+        .collect();
+
     Ok(HomeDeliveryInfo {
         zones,
         free_delivery_threshold_cents: threshold,
+        orders_closed,
+        closed_reason,
+        hours_rows,
     })
 }
 
@@ -114,6 +205,13 @@ pub fn Home() -> impl IntoView {
     // two `<Suspense>` blocks intermittently trips tachys's hydration
     // walker with `entered unreachable code` — collapsing into one
     // tuple-future avoids it (same pattern as MenuPage).
+    //
+    // MUST stay `OnceResource`: it owns the SSR→hydrate value handoff.
+    // A plain `Resource` keyed on a client signal hydrates differently
+    // and reintroduced the tachys hydration.rs:163 panic. The home
+    // banner is informational and correct on load/reload; the live
+    // pause refresh that matters for ordering lives on the cart drawer
+    // (a `Resource` that already polls safely).
     let combined = OnceResource::new(async move {
         let h = get_home_content().await;
         let d = home_delivery_info().await;
@@ -147,6 +245,15 @@ pub fn Home() -> impl IntoView {
                     }.into_any(),
                     Ok(info) => {
                         let threshold = info.free_delivery_threshold_cents;
+                        let closed_banner = info.orders_closed.then(|| {
+                            let reason = info.closed_reason.clone();
+                            view! {
+                                <div class="order-closed-banner" role="alert">
+                                    <strong>"🔴 Online-Bestellung derzeit nicht möglich"</strong>
+                                    <p>{reason}</p>
+                                </div>
+                            }
+                        });
                         let banner = (threshold > 0).then(|| {
                             let label = format_eur(threshold);
                             let template = crate::t!("home.free_delivery_banner");
@@ -155,6 +262,7 @@ pub fn Home() -> impl IntoView {
                             }
                         });
                         view! {
+                            {closed_banner}
                             {banner}
                             <ul>
                                 {info.zones.into_iter().map(|z| view! {
@@ -223,13 +331,29 @@ pub fn Home() -> impl IntoView {
             // sides agree.
             <table>
                 <tbody>
-                    <tr><th>{crate::t!("home.day_mon")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                    <tr><th>{crate::t!("home.day_tue")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                    <tr><th>{crate::t!("home.day_wed")}</th><td class="closed">{crate::t!("home.day_closed")}</td></tr>
-                    <tr><th>{crate::t!("home.day_thu")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
-                    <tr><th>{crate::t!("home.day_fri")}</th><td>"16:00–22:00"</td></tr>
-                    <tr><th>{crate::t!("home.day_sat")}</th><td>"16:00–22:00"</td></tr>
-                    <tr><th>{crate::t!("home.day_sun")}</th><td>"11:30–14:30 · 17:00–22:00"</td></tr>
+                    // The rows come from `combined` (a resource). A resource
+                    // read MUST happen inside <Suspense>, otherwise SSR (not
+                    // yet resolved → empty) and hydrate (resolved → 7 rows)
+                    // produce different DOM at this node and tachys panics at
+                    // hydration.rs:163. The fallback emits nothing so the
+                    // <tbody>'s child shape matches on both sides.
+                    <Suspense fallback=|| ().into_view()>
+                        {move || combined.get().map(|(_, delivery_res)| {
+                            let rows = delivery_res.map(|info| info.hours_rows).unwrap_or_default();
+                            rows.into_iter().map(|row| {
+                                let label = home_weekday_label(row.weekday);
+                                if row.windows.is_empty() {
+                                    view! {
+                                        <tr><th>{label}</th><td class="closed">{crate::t!("home.day_closed")}</td></tr>
+                                    }.into_any()
+                                } else {
+                                    view! {
+                                        <tr><th>{label}</th><td>{row.windows}</td></tr>
+                                    }.into_any()
+                                }
+                            }).collect_view()
+                        })}
+                    </Suspense>
                 </tbody>
             </table>
         </section>

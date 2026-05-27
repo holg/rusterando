@@ -156,11 +156,19 @@ pub mod ssr {
         let free_delivery_threshold_cents =
             crate::pages::settings::ssr::free_delivery_threshold_cents(db).await;
 
+        // Closed state mirrors the place_order gate: manually paused /
+        // timed-snoozed OR no valid slot left today. Lets the cart drawer
+        // disable checkout.
+        let (paused, _) = crate::pages::settings::ssr::order_pause_state(db).await;
+        let orders_closed =
+            paused || crate::pages::order::ssr::today_slots(db).await.is_empty();
+
         Ok(CartView {
             lines,
             subtotal_cents: subtotal,
             item_count,
             free_delivery_threshold_cents,
+            orders_closed,
         })
     }
 

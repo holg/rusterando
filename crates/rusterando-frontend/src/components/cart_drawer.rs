@@ -158,6 +158,7 @@ pub fn CartDrawer() -> impl IntoView {
                         <strong>"…"</strong>
                     </div>
                     <p class="free-delivery hidden"></p>
+                    <p class="order-closed-note hidden"></p>
                     <p class="hint">{crate::t!("cart.payment_hint")}</p>
                     <a class="btn primary disabled" href="/checkout">{crate::t!("cart.proceed")}</a>
                     <button class="btn ghost" disabled=true>{crate::t!("cart.clear")}</button>
@@ -166,6 +167,7 @@ pub fn CartDrawer() -> impl IntoView {
                         let cart = ctx.cart.get().and_then(|r| r.ok()).unwrap_or_default();
                         let total = format_eur(cart.subtotal_cents);
                         let has_items = !cart.lines.is_empty();
+                        let orders_closed = cart.orders_closed;
                         let threshold = cart.free_delivery_threshold_cents;
                         let unlocked = threshold > 0 && cart.subtotal_cents >= threshold;
                         let missing = (threshold - cart.subtotal_cents).max(0);
@@ -180,13 +182,25 @@ pub fn CartDrawer() -> impl IntoView {
                         } else {
                             ("free-delivery hidden", String::new())
                         };
-                        let cta_cls = if has_items { "btn primary" } else { "btn primary disabled" };
+                        // Closed (paused / outside hours) wins over the
+                        // empty-cart state for disabling checkout.
+                        let cta_cls = if has_items && !orders_closed {
+                            "btn primary"
+                        } else {
+                            "btn primary disabled"
+                        };
+                        let (closed_note_cls, closed_note_text) = if orders_closed {
+                            ("order-closed-note", "Wir nehmen gerade keine Online-Bestellungen an.")
+                        } else {
+                            ("order-closed-note hidden", "")
+                        };
                         view! {
                             <div class="row">
                                 <span>{crate::t!("cart.subtotal")}</span>
                                 <strong>{total}</strong>
                             </div>
                             <p class=banner_cls>{banner_text}</p>
+                            <p class=closed_note_cls>{closed_note_text}</p>
                             <p class="hint">{crate::t!("cart.payment_hint")}</p>
                             <a class=cta_cls href="/checkout" on:click=close>{crate::t!("cart.proceed")}</a>
                             <button class="btn ghost"

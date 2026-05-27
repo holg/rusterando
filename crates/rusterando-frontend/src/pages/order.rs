@@ -45,6 +45,18 @@ pub struct CheckoutContext {
     /// produce the same `<input value="...">` attribute.
     #[serde(default)]
     pub shop_city: String,
+    /// `true` when online ordering is currently off — either manually
+    /// paused by the admin or no valid slot remains today (outside
+    /// opening hours). The checkout form shows a banner and disables
+    /// submission. Travels through the resource so SSR and hydrate
+    /// render the same DOM.
+    #[serde(default)]
+    pub orders_closed: bool,
+    /// Customer-facing reason for the closed state — the admin's custom
+    /// message if set, otherwise a generic German text. Only meaningful
+    /// when `orders_closed` is true.
+    #[serde(default)]
+    pub closed_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -603,29 +615,57 @@ pub mod ssr {
     }
 
     /// Generate today's pickup time slots in 15-min increments, starting from
-    /// `now + PREP_BUFFER_MIN`, bounded by the rows in `opening_hours` that
-    /// match today's weekday and are not closed. Slots from past hours are
-    /// dropped automatically because their start time is < now.
+    /// `now + PREP_BUFFER_MIN`, bounded by today's open windows. Slots from
+    /// past hours are dropped automatically because their start time is < now.
+    ///
+    /// A `special_hours` row for today's date overrides the weekday schedule:
+    /// `is_closed = 1` forces the shop closed (no slots, even on a normally-
+    /// open day); otherwise its single open/close window replaces the weekday
+    /// rows (lets the shop open on a normally-closed day, e.g. a busy holiday).
+    /// With no override, the weekday rows in `opening_hours` apply as before.
     pub async fn today_slots(db: &sqlx::SqlitePool) -> Vec<PickupSlot> {
         let now = now_local();
-        // SQLite weekday: 0=Sun..6=Sat — same convention as our seed.
-        let weekday = now.weekday().num_days_from_sunday() as i64;
+        let today = now.date_naive().format("%Y-%m-%d").to_string();
 
-        let rows = sqlx::query_as::<_, (String, String, i64)>(
-            "SELECT open_time, close_time, is_closed FROM opening_hours WHERE weekday = ?1",
+        // Date override wins over the weekday schedule.
+        let special = sqlx::query_as::<_, (i64, Option<String>, Option<String>)>(
+            "SELECT is_closed, open_time, close_time FROM special_hours WHERE date = ?1",
         )
-        .bind(weekday)
-        .fetch_all(db)
+        .bind(&today)
+        .fetch_optional(db)
         .await
-        .unwrap_or_default();
+        .ok()
+        .flatten();
+
+        // Build the list of open windows (open_str, close_str) for today.
+        let windows: Vec<(String, String)> = match special {
+            // Forced closed for this date.
+            Some((closed, _, _)) if closed != 0 => Vec::new(),
+            // Forced open for this date with a single window.
+            Some((_, Some(open_s), Some(close_s))) => vec![(open_s, close_s)],
+            // Override row exists but has no usable window — treat as closed.
+            Some(_) => Vec::new(),
+            // No override → the weekday schedule (may be multiple shifts).
+            None => {
+                let weekday = now.weekday().num_days_from_sunday() as i64;
+                sqlx::query_as::<_, (String, String, i64)>(
+                    "SELECT open_time, close_time, is_closed FROM opening_hours WHERE weekday = ?1",
+                )
+                .bind(weekday)
+                .fetch_all(db)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, _, closed)| *closed == 0)
+                .map(|(open_s, close_s, _)| (open_s, close_s))
+                .collect()
+            }
+        };
 
         let earliest = now + chrono::Duration::minutes(PREP_BUFFER_MIN);
         let mut slots = Vec::new();
 
-        for (open_s, close_s, closed) in rows {
-            if closed != 0 {
-                continue;
-            }
+        for (open_s, close_s) in windows {
             let Ok(open_t) = NaiveTime::parse_from_str(&open_s, "%H:%M") else {
                 continue;
             };
@@ -1457,6 +1497,30 @@ pub async fn load_checkout_context() -> Result<CheckoutContext, ServerFnError> {
     let free_delivery_threshold_cents =
         crate::pages::settings::ssr::free_delivery_threshold_cents(&db).await;
 
+    // Closed state mirrors the `place_order` gate exactly so the UI never
+    // disagrees with the server: manually paused / timed-snoozed, OR no
+    // valid slot left today (outside opening hours). Pause wins.
+    let (paused, resume_at) = crate::pages::settings::ssr::order_pause_state(&db).await;
+    let no_slots = slots.is_empty();
+    let orders_closed = paused || no_slots;
+    let closed_reason = if paused {
+        match resume_at {
+            Some(t) => format!("Wir sind ab {t} Uhr wieder für Bestellungen da."),
+            None => {
+                let msg = crate::pages::settings::ssr::orders_paused_message(&db).await;
+                if msg.is_empty() {
+                    "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
+                } else {
+                    msg
+                }
+            }
+        }
+    } else if no_slots {
+        "Wir haben gerade geschlossen. Bestellungen sind während unserer Öffnungszeiten möglich.".to_string()
+    } else {
+        String::new()
+    };
+
     // Snapshot the bits of branding we need into the resource payload so
     // the form's SSR + hydrate render identical DOM. Reading
     // `BrandingHandle` directly inside the component would diverge —
@@ -1477,6 +1541,8 @@ pub async fn load_checkout_context() -> Result<CheckoutContext, ServerFnError> {
         free_delivery_threshold_cents,
         shop_address_line: branding.full_address(),
         shop_city: branding.shop_city,
+        orders_closed,
+        closed_reason,
     })
 }
 
@@ -1535,6 +1601,43 @@ pub async fn place_order(
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
     let notifier = use_context::<NotifierHandle>()
         .ok_or_else(|| ServerFnError::new("notifier missing from context"))?;
+
+    // Hard gate: refuse the order when online ordering is off. This is
+    // the authoritative check — it runs no matter how the request
+    // arrives (form submit, a stale cached page, or a direct API call),
+    // so a customer can never slip an order through while we're closed.
+    //
+    //   * orders_paused           — admin's manual "we're closed now"
+    //                               switch (overrides opening hours).
+    //   * today_slots().is_empty — no valid pickup/delivery slot is left
+    //                               today (outside opening hours and no
+    //                               later slot to pre-order for). Slots
+    //                               include future windows today, so a
+    //                               pre-order during a midday break is
+    //                               still allowed as long as a slot
+    //                               remains.
+    let (paused, resume_at) = crate::pages::settings::ssr::order_pause_state(&db).await;
+    if paused {
+        // Timed snooze → tell the customer when we're back. Indefinite
+        // pause → the admin's custom message, else a generic one.
+        let err = match resume_at {
+            Some(t) => format!("Wir sind ab {t} Uhr wieder für Bestellungen da."),
+            None => {
+                let msg = crate::pages::settings::ssr::orders_paused_message(&db).await;
+                if msg.is_empty() {
+                    "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
+                } else {
+                    msg
+                }
+            }
+        };
+        return Err(ServerFnError::new(err));
+    }
+    if ssr::today_slots(&db).await.is_empty() {
+        return Err(ServerFnError::new(
+            "Wir haben gerade geschlossen. Bitte versuchen Sie es während unserer Öffnungszeiten erneut.",
+        ));
+    }
 
     if payment_method == "cash" {
         let phone_norm = ssr::normalize_phone(&phone);
@@ -3280,6 +3383,12 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
 
 #[component]
 pub fn CheckoutPage() -> impl IntoView {
+    // NOTE: intentionally NOT keyed on the poll tick. Re-fetching here
+    // re-mounts <Form> and would wipe the customer's half-typed
+    // name/phone/address every 30s. The closed-banner staleness on
+    // checkout is acceptable because `place_order` hard-rejects on submit
+    // if the shop paused meanwhile (server-enforced), and the home + cart
+    // surfaces (which DO poll) already signal the closure beforehand.
     let ctx = Resource::new(|| (), |_| async move { load_checkout_context().await });
     let placer = ServerAction::<PlaceOrder>::new();
     let cart_ctx = crate::components::cart_drawer::use_cart_ctx();
@@ -3398,6 +3507,8 @@ fn Form(
         free_delivery_threshold_cents,
         shop_address_line: checkout_address_line,
         shop_city: default_city_from_ctx,
+        orders_closed,
+        closed_reason,
     } = ctx;
 
     let slots_for_dropdown = slots.clone();
@@ -3698,8 +3809,20 @@ fn Form(
         validator.pending().get()
     });
 
+    // Closed state from the server (manual pause or outside opening
+    // hours). Plain values from the resource — kept in StoredValue so the
+    // banner and the submit-disable closure can both read them.
+    let orders_closed_sv = StoredValue::new(orders_closed);
+    let closed_reason_sv = StoredValue::new(closed_reason);
+
     view! {
         <div class="checkout-grid" class:hide-form=in_card_flow>
+            {move || orders_closed_sv.get_value().then(|| view! {
+                <div class="order-closed-banner" role="alert">
+                    <strong>"🔴 Online-Bestellung derzeit nicht möglich"</strong>
+                    <p>{closed_reason_sv.get_value()}</p>
+                </div>
+            })}
             <div class="summary-side">
                 <h2>{crate::t!("checkout.summary")}</h2>
                 <p>{line_count} " " {crate::t!("checkout.items")}</p>
@@ -3977,10 +4100,12 @@ fn Form(
                 </fieldset>
 
                 <button type="submit" class="btn primary"
-                        disabled=move || pending.get() || below_min.get()
+                        disabled=move || orders_closed_sv.get_value() || pending.get()
+                                       || below_min.get()
                                        || validating.get() || !address_valid.get()>
                     {move || {
-                        if pending.get() { crate::t!("checkout.please_wait") }
+                        if orders_closed_sv.get_value() { "Bestellung pausiert".to_string() }
+                        else if pending.get() { crate::t!("checkout.please_wait") }
                         else if validating.get() { crate::t!("checkout.address_checking") }
                         else if !address_valid.get() {
                             // Pull the reason out of the validation if any.

@@ -286,6 +286,23 @@ pub async fn reprint_order(id: String) -> Result<(), ServerFnError> {
 // Component
 // ---------------------------------------------------------------------------
 
+/// `created_at` kommt als UTC-String `'YYYY-MM-DD HH:MM:SS'` aus SQLite
+/// (CURRENT_TIMESTAMP). Für die Karte in lokale Zeit umrechnen und kompakt
+/// als `TT.MM. HH:MM` anzeigen. chrono läuft mit `wasmbind` auch im Browser,
+/// also funktioniert die Local-Konvertierung bei SSR und nach der Hydration.
+/// Fällt auf den Rohstring zurück, falls das Parsen scheitert (defensiv —
+/// historische Zeilen in abweichendem Format sollen nicht verschwinden).
+fn fmt_created_local(utc: &str) -> String {
+    use chrono::{Local, NaiveDateTime, TimeZone, Utc};
+    match NaiveDateTime::parse_from_str(utc, "%Y-%m-%d %H:%M:%S") {
+        Ok(naive) => {
+            let local = Utc.from_utc_datetime(&naive).with_timezone(&Local);
+            local.format("%d.%m. %H:%M").to_string()
+        }
+        Err(_) => utc.to_string(),
+    }
+}
+
 #[component]
 pub fn AdminOrdersPage() -> impl IntoView {
     let updater = ServerAction::<UpdateOrderStatus>::new();
@@ -405,10 +422,12 @@ fn OrderCard(
     } else {
         "order-card"
     };
+    let created_label = fmt_created_local(&r.created_at);
     view! {
         <li class=card_cls>
             <div class="order-head">
                 <a class="order-num" href=detail_href>{r.order_number}</a>
+                <span class="order-time" title="Bestelleingang">{created_label}</span>
                 {is_test.then(|| view! {
                     <span class="test-pill" title="Sandbox/Test-Bestellung">"TEST"</span>
                 })}
