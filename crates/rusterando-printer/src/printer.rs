@@ -6,7 +6,9 @@ use chrono::{Local, TimeZone};
 use escpos::driver::FileDriver;
 use escpos::printer::Printer as EscposPrinter;
 use escpos::printer_options::PrinterOptions;
-use escpos::utils::{JustifyMode, PageCode, Protocol};
+use escpos::utils::{
+    JustifyMode, PageCode, Protocol, QRCodeCorrectionLevel, QRCodeModel, QRCodeOption,
+};
 use kitchen_protocol::{OrderChannel, OrderForKitchen, PaymentStatus};
 
 /// ESC/POS receipt printers don't speak UTF-8. They ship with a
@@ -235,7 +237,15 @@ fn render(
             p.writeln(&pad_line("Karte / Online", &format_euro(order.total_cents)))?;
         }
         PaymentStatus::CollectOnDelivery { amount_cents } => {
-            p.bold(true)?.writeln("Bei Lieferung kassieren:")?.bold(false)?;
+            // Bei Abholung wird an der Theke kassiert, nicht beim Fahrer —
+            // die Kopfzeile muss zum Kanal passen, sonst steht auf dem
+            // Abhol-Bon fälschlich "Bei Lieferung kassieren".
+            let header = match order.channel {
+                OrderChannel::Delivery { .. } => "Bei Lieferung kassieren:",
+                OrderChannel::Pickup => "Bei Abholung kassieren:",
+                OrderChannel::DineIn { .. } => "Am Tisch kassieren:",
+            };
+            p.bold(true)?.writeln(header)?.bold(false)?;
             p.writeln(&pad_line("Bar", &format_euro(amount_cents)))?;
         }
     }
@@ -312,9 +322,17 @@ fn render(
     // ===== QR code → order detail URL =====
     if let Some(url) = order.qr_url.as_deref() {
         if !url.is_empty() {
+            // Der Default (.qrcode) druckt mit Modulgröße 4 — auf 80-mm-
+            // Thermopapier zu klein, selbst ein iPhone 15 Pro scannt das
+            // nicht zuverlässig. Modulgröße 8 verdoppelt die Punktgröße
+            // (Code ~22 mm breit), Model2 ist der von Telefonen erwartete
+            // moderne Standard, Korrekturstufe H verträgt Druckschlieren.
             p.feed()?
                 .justify(JustifyMode::CENTER)?
-                .qrcode(url)?
+                .qrcode_option(
+                    url,
+                    QRCodeOption::new(QRCodeModel::Model2, 8, QRCodeCorrectionLevel::H),
+                )?
                 .writeln("Zum Bestelldetail scannen")?
                 .justify(JustifyMode::LEFT)?;
         }
