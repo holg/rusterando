@@ -75,6 +75,12 @@ pub fn AdminHomePage() -> impl IntoView {
             <section class="admin-dashboard">
                 <h1>"Übersicht"</h1>
 
+                // Live shop-status banner — same 3-level status (and exact
+                // text) the CUSTOMER sees, so staff aren't misled by a green
+                // "open" while the shop is actually closed-until-16:00. Click
+                // → /admin/hours to change it.
+                <ShopStatusPanel/>
+
                 // Fallback wraps in a <div> matching the resolved
                 // <div class="stats-row"> shape. Mixing <p> with <div>
                 // makes tachys' walker panic at the Suspense boundary
@@ -122,6 +128,56 @@ pub fn AdminHomePage() -> impl IntoView {
                 </div>
             </section>
         </AdminShell>
+    }
+}
+
+/// Full-width shop open/closed banner for the dashboard. Three-level colour
+/// + the exact customer-facing reason text, linking to /admin/hours. Initial
+/// value from the `shop_status` server fn (OnceResource, hydration-safe in
+/// its own <Suspense> with a matching fallback shape — same pattern as the
+/// AdminShell chip); the `/api/live/shop` SSE flips it live.
+#[component]
+fn ShopStatusPanel() -> impl IntoView {
+    use rusterando_shared::models::ShopLevel;
+
+    let init = OnceResource::new(crate::pages::menu::shop_status());
+    let (live, set_live) = signal::<Option<(ShopLevel, String)>>(None);
+    crate::utils::subscribe_shop_status(set_live);
+
+    view! {
+        <Suspense fallback=|| view! {
+            <a class="shop-status-panel opens-soon" href="/admin/hours">
+                <span class="dot"></span>
+                <span class="txt">"…"</span>
+            </a>
+        }>
+            {move || {
+                // Live SSE override wins over the initial resource value.
+                let (level, reason) = live.get().unwrap_or_else(|| {
+                    init.get()
+                        .and_then(|r| r.ok())
+                        .unwrap_or((ShopLevel::Open, String::new()))
+                });
+                let (cls, label) = match level {
+                    ShopLevel::Open => ("shop-status-panel open", "🟢 Online-Bestellung läuft".to_string()),
+                    ShopLevel::OpensLater => {
+                        let r = if reason.is_empty() { "Öffnet später".to_string() } else { reason.clone() };
+                        ("shop-status-panel opens-soon", format!("🟡 {r}"))
+                    }
+                    ShopLevel::Closed => {
+                        let r = if reason.is_empty() { "Geschlossen".to_string() } else { reason.clone() };
+                        ("shop-status-panel closed", format!("🔴 {r}"))
+                    }
+                };
+                view! {
+                    <a class=cls href="/admin/hours" title="Öffnungszeiten verwalten">
+                        <span class="dot"></span>
+                        <span class="txt">{label}</span>
+                        <span class="go">"Öffnungszeiten →"</span>
+                    </a>
+                }
+            }}
+        </Suspense>
     }
 }
 

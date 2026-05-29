@@ -1,0 +1,11 @@
+-- Free-text message from the restaurant to the customer for a specific
+-- order (e.g. "Deine Bestellung braucht 10 Min länger" or "Heute leider
+-- keine Pommes mehr — durch Salat ersetzt, ok?").
+--
+-- Set by the admin on /admin/orders/{id}; shown live on the customer's
+-- /orders/{id} page via the SSE channel AND persisted here so it survives
+-- a page reload or a dropped stream. NULL = no message.
+--
+-- Additive column with a default of NULL — safe to apply to the live DB
+-- (no data rewrite, existing rows get NULL).
+ALTER TABLE orders ADD COLUMN admin_message TEXT;

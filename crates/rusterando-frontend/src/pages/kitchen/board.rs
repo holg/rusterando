@@ -218,6 +218,14 @@ pub async fn kitchen_advance(id: String, status: String) -> Result<(), ServerFnE
         .execute(&db)
         .await
         .map_err(|e| ServerFnError::new(format!("update status: {e}")))?;
+    // Live pill flip + timestamped entry in the customer's message log.
+    if let Some(hub) = use_context::<crate::live::LiveHub>() {
+        hub.send(rusterando_shared::models::LiveEvent {
+            order_id: id.clone(),
+            kind: rusterando_shared::models::LiveKind::Status(status.clone()),
+        });
+    }
+    crate::pages::order::ssr::log_status_change(&db, &id, &status).await;
     Ok(())
 }
 

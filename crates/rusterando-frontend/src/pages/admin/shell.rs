@@ -29,6 +29,16 @@ pub fn AdminShell(children: Children) -> impl IntoView {
     // which mode they're in.
     let mode = OnceResource::new(get_stripe_mode());
 
+    // Shop online/offline chip — visible on EVERY admin page so staff
+    // always see whether online ordering is live. Initial state from the
+    // `shop_status` server fn (OnceResource, same hydration-safe pattern
+    // as the mode chip); the SSE `/api/live/shop` channel flips it live
+    // via a post-hydration Effect (so no reload needed after a toggle).
+    let shop_status = OnceResource::new(crate::pages::menu::shop_status());
+    let (shop_live, set_shop_live) =
+        signal::<Option<(rusterando_shared::models::ShopLevel, String)>>(None);
+    crate::utils::subscribe_shop_status(set_shop_live);
+
     view! {
         <div class="admin-shell">
             <header class="admin-shell-bar no-print">
@@ -74,6 +84,41 @@ pub fn AdminShell(children: Children) -> impl IntoView {
                                 <span class="dot"></span>
                                 <span class="label">{label}</span>
                                 <span class="hint">{hint}</span>
+                            </a>
+                        }
+                    }}
+                </Suspense>
+                // Shop online/offline chip — links to /admin/hours to toggle.
+                // Own <Suspense> with a matching fallback shape (same as the
+                // mode chip) so SSR + hydrate agree; SSE flips it live.
+                <Suspense fallback=|| view! {
+                    <a class="shop-online-chip" href="/admin/hours" title="Öffnungszeiten">
+                        <span class="dot"></span>
+                        <span class="label">"…"</span>
+                    </a>
+                }>
+                    {move || {
+                        use rusterando_shared::models::ShopLevel;
+                        // Live override wins over the initial resource value.
+                        let (level, reason) = shop_live.get().unwrap_or_else(|| {
+                            shop_status
+                                .get()
+                                .and_then(|r| r.ok())
+                                .unwrap_or((ShopLevel::Open, String::new()))
+                        });
+                        // Three states mirror the customer banner: green
+                        // Online, amber "Öffnet später" (opens-later / pause),
+                        // red Offline (Ruhetag / hard closed).
+                        let (cls, label) = match level {
+                            ShopLevel::Open => ("shop-online-chip online", "Online"),
+                            ShopLevel::OpensLater => ("shop-online-chip opens-soon", "Öffnet später"),
+                            ShopLevel::Closed => ("shop-online-chip offline", "Offline"),
+                        };
+                        let title = if reason.is_empty() { "Öffnungszeiten".to_string() } else { reason };
+                        view! {
+                            <a class=cls href="/admin/hours" title=title>
+                                <span class="dot"></span>
+                                <span class="label">{label}</span>
                             </a>
                         }
                     }}

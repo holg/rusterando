@@ -10,6 +10,13 @@ use rusterando_shared::models::{CartExtra, CartLine, CartSelectedOption, SizeCho
 #[cfg(feature = "ssr")]
 const CART_COOKIE: &str = "dp_cart";
 
+/// The free-giveaway item: "Pizzabrötchen (6 Stück)" (seeded as mi-400) and
+/// its required Sauce option group (Knoblauchsauce / Kräuterbutter, both 0 €),
+/// both created by migration 20260529000002. Referenced when offering /
+/// validating the giveaway line.
+pub const GIVEAWAY_ITEM_ID: &str = "mi-400";
+pub const GIVEAWAY_SAUCE_GROUP_ID: &str = "og-sauce-giveaway";
+
 #[cfg(feature = "ssr")]
 pub mod ssr {
     use super::*;
@@ -72,6 +79,7 @@ pub mod ssr {
                 i64,
                 Option<String>,
                 Option<String>,
+                i64,
             ),
         >(
             // Locale-aware item name: COALESCE(mi.name_<lang>, mi.name)
@@ -94,7 +102,8 @@ pub mod ssr {
                             ci.quantity,
                             ci.unit_price_cents,
                             ci.extras_json,
-                            ci.selected_options_json
+                            ci.selected_options_json,
+                            ci.is_giveaway
                      FROM cart_items ci
                      JOIN menu_items mi ON mi.id = ci.menu_item_id
                      WHERE ci.cart_id = ?1
@@ -109,7 +118,11 @@ pub mod ssr {
 
         let mut lines = Vec::with_capacity(rows.len());
         let mut subtotal = 0_i64;
+        // Subtotal of PAID lines only — the giveaway line (0 €) must not count
+        // toward its own qualifying threshold.
+        let mut paid_subtotal = 0_i64;
         let mut item_count = 0_i64;
+        let mut has_giveaway_line = false;
 
         for (
             id,
@@ -121,6 +134,7 @@ pub mod ssr {
             unit_price_cents,
             extras_json,
             selected_options_json,
+            is_giveaway_i,
         ) in rows
         {
             let opts: Options = serde_json::from_str(&options_json).unwrap_or_default();
@@ -132,10 +146,21 @@ pub mod ssr {
                 .as_deref()
                 .and_then(|j| serde_json::from_str(j).ok())
                 .unwrap_or_default();
+            let is_giveaway = is_giveaway_i != 0;
             let extras_unit_cents: i64 = extras.iter().map(|e| e.price_cents).sum();
             let options_unit_cents: i64 = selected_options.iter().map(|o| o.price_cents).sum();
-            let line_total = (unit_price_cents + extras_unit_cents + options_unit_cents) * quantity;
+            // A giveaway line is free regardless of the item's catalog price.
+            let line_total = if is_giveaway {
+                0
+            } else {
+                (unit_price_cents + extras_unit_cents + options_unit_cents) * quantity
+            };
             subtotal += line_total;
+            if is_giveaway {
+                has_giveaway_line = true;
+            } else {
+                paid_subtotal += line_total;
+            }
             item_count += quantity;
             lines.push(CartLine {
                 id,
@@ -145,23 +170,35 @@ pub mod ssr {
                 size: opts.size,
                 size_label: opts.size_label,
                 quantity,
-                unit_price_cents,
+                unit_price_cents: if is_giveaway { 0 } else { unit_price_cents },
                 extras_unit_cents,
                 extras,
                 selected_options,
                 line_total_cents: line_total,
+                is_giveaway,
             });
         }
 
         let free_delivery_threshold_cents =
             crate::pages::settings::ssr::free_delivery_threshold_cents(db).await;
 
-        // Closed state mirrors the place_order gate: manually paused /
-        // timed-snoozed OR no valid slot left today. Lets the cart drawer
-        // disable checkout.
-        let (paused, _) = crate::pages::settings::ssr::order_pause_state(db).await;
-        let orders_closed =
-            paused || crate::pages::order::ssr::today_slots(db).await.is_empty();
+        // Closed state via the canonical helper (pause/snooze/Ruhetag/hours).
+        let (orders_closed, _) = crate::pages::order::ssr::shop_closed_state(db).await;
+
+        // Giveaway offer state. The cart can't know the order type yet (chosen
+        // at checkout), so we gate only on enabled + paid subtotal here; the
+        // order-type restriction is enforced authoritatively in place_order.
+        let gcfg = crate::pages::settings::ssr::giveaway_config(db).await;
+        let giveaway = if gcfg.enabled {
+            Some(rusterando_shared::models::GiveawayOffer {
+                min_order_cents: gcfg.min_order_cents,
+                qualifies: paid_subtotal >= gcfg.min_order_cents,
+                claimed: has_giveaway_line,
+                item_id: GIVEAWAY_ITEM_ID.to_string(),
+            })
+        } else {
+            None
+        };
 
         Ok(CartView {
             lines,
@@ -169,6 +206,7 @@ pub mod ssr {
             item_count,
             free_delivery_threshold_cents,
             orders_closed,
+            giveaway,
         })
     }
 
@@ -502,6 +540,141 @@ pub async fn add_to_cart(
         .await
         .map_err(|e| ServerFnError::new(format!("insert line: {e}")))?;
     }
+
+    sqlx::query("UPDATE carts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1")
+        .bind(&cart_id)
+        .execute(&db)
+        .await
+        .ok();
+
+    ssr::load_cart(&db, &cart_id).await
+}
+
+/// Claim the free Pizzabrötchen giveaway. Adds ONE giveaway line (mi-400,
+/// price 0, is_giveaway=1) with the chosen sauce. Fully server-validated:
+/// the promo must be enabled, the cart's PAID subtotal must meet the
+/// threshold, the sauce must belong to the giveaway Sauce group, and only one
+/// giveaway line is allowed. A client cannot fabricate a free item by any
+/// other route — this is the only path that sets is_giveaway. (Order-type is
+/// only known at checkout, so it's enforced again in place_order.)
+#[server(
+    name = ClaimGiveaway,
+    prefix = "/api",
+    endpoint = "claim_giveaway"
+)]
+pub async fn claim_giveaway(sauce_option_id: String) -> Result<CartView, ServerFnError> {
+    use sqlx::SqlitePool;
+    let cart_id = ssr::current_cart_id().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    // 1) Promo enabled?
+    let gcfg = crate::pages::settings::ssr::giveaway_config(&db).await;
+    if !gcfg.enabled {
+        return Err(ServerFnError::new("Die Gratis-Beigabe ist derzeit nicht verfügbar."));
+    }
+
+    // 2) Recompute the PAID subtotal from the DB (authoritative — never trust
+    //    a client number) and check the threshold. Also detect an existing
+    //    giveaway line so we never add a second.
+    let rows: Vec<(i64, i64, Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT ci.quantity, ci.unit_price_cents, ci.extras_json,
+                ci.selected_options_json, ci.is_giveaway
+         FROM cart_items ci WHERE ci.cart_id = ?1",
+    )
+    .bind(&cart_id)
+    .fetch_all(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load cart: {e}")))?;
+
+    let mut paid_subtotal = 0_i64;
+    let mut already_claimed = false;
+    for (qty, unit, extras_json, opts_json, is_give) in &rows {
+        if *is_give != 0 {
+            already_claimed = true;
+            continue;
+        }
+        let extras_unit: i64 = extras_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<Vec<CartExtra>>(j).ok())
+            .map(|v| v.iter().map(|e| e.price_cents).sum())
+            .unwrap_or(0);
+        let opts_unit: i64 = opts_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<Vec<CartSelectedOption>>(j).ok())
+            .map(|v| v.iter().map(|o| o.price_cents).sum())
+            .unwrap_or(0);
+        paid_subtotal += (unit + extras_unit + opts_unit) * qty;
+    }
+
+    if already_claimed {
+        // Idempotent: just return the current cart.
+        return ssr::load_cart(&db, &cart_id).await;
+    }
+    if paid_subtotal < gcfg.min_order_cents {
+        return Err(ServerFnError::new(
+            "Der Mindestbestellwert für die Gratis-Beigabe ist noch nicht erreicht.",
+        ));
+    }
+
+    // 3) Validate the chosen sauce belongs to the giveaway Sauce group and
+    //    snapshot its (locale-aware) label. Reject anything else.
+    let loc = crate::i18n::current_locale();
+    let (opt_label, grp_label) = if loc == crate::i18n::Locale::DEFAULT {
+        ("o.label".to_string(), "g.label".to_string())
+    } else {
+        let lang = loc.code();
+        (
+            format!("COALESCE(o.label_{lang}, o.label)"),
+            format!("COALESCE(g.label_{lang}, g.label)"),
+        )
+    };
+    let sauce: Option<(String, String, i64, String)> = sqlx::query_as(&format!(
+        "SELECT o.id, {opt_label} AS label, o.price_cents, {grp_label} AS group_label
+         FROM item_options o
+         JOIN item_option_groups g ON g.id = o.group_id
+         WHERE o.id = ?1 AND o.group_id = ?2 AND o.is_active = 1 AND g.is_active = 1",
+    ))
+    .bind(&sauce_option_id)
+    .bind(GIVEAWAY_SAUCE_GROUP_ID)
+    .fetch_optional(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("resolve sauce: {e}")))?;
+
+    let (oid, olabel, oprice, glabel) =
+        sauce.ok_or_else(|| ServerFnError::new("Bitte eine gültige Sauce wählen."))?;
+
+    let selected = vec![CartSelectedOption {
+        group_id: GIVEAWAY_SAUCE_GROUP_ID.to_string(),
+        group_label: glabel,
+        option_id: oid,
+        option_label: olabel,
+        price_cents: oprice, // 0 € — sauce never adds cost
+    }];
+    let selected_json = serde_json::to_string(&selected)
+        .map_err(|e| ServerFnError::new(format!("serialise sauce: {e}")))?;
+    let opts_json = serde_json::to_string(&ssr::Options {
+        size: SizeChoice::Single,
+        size_label: None,
+    })
+    .map_err(|e| ServerFnError::new(format!("serialise opts: {e}")))?;
+
+    // 4) Insert the single free line. unit_price 0, is_giveaway 1.
+    let line_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO cart_items
+            (id, cart_id, menu_item_id, quantity, options_json,
+             unit_price_cents, extras_json, selected_options_json, is_giveaway)
+         VALUES (?1, ?2, ?3, 1, ?4, 0, NULL, ?5, 1)",
+    )
+    .bind(&line_id)
+    .bind(&cart_id)
+    .bind(GIVEAWAY_ITEM_ID)
+    .bind(&opts_json)
+    .bind(&selected_json)
+    .execute(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("insert giveaway: {e}")))?;
 
     sqlx::query("UPDATE carts SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1")
         .bind(&cart_id)

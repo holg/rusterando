@@ -13,11 +13,12 @@ pub struct HomeDeliveryInfo {
     pub zones: Vec<DeliveryZoneSummary>,
     /// Free-delivery threshold in cents. 0 = promo disabled.
     pub free_delivery_threshold_cents: i64,
-    /// `true` when online ordering is currently off (manual pause or
-    /// outside opening hours). The home page shows a closed banner.
+    /// Three-level shop status driving the banner colour (green / amber /
+    /// red). `OpensLater` (amber) = closed now but opens later today or a
+    /// pause/snooze is on; `Closed` (red) = Ruhetag / nothing more today.
     #[serde(default)]
-    pub orders_closed: bool,
-    /// Customer-facing reason shown in the banner when `orders_closed`.
+    pub shop_level: rusterando_shared::models::ShopLevel,
+    /// Customer-facing reason shown in the banner when not plainly open.
     #[serde(default)]
     pub closed_reason: String,
     /// Weekly opening hours for the public table, Mon-first. Built from
@@ -93,26 +94,7 @@ pub async fn home_delivery_info() -> Result<HomeDeliveryInfo, ServerFnError> {
     // Closed state mirrors the place_order gate (manual pause or outside
     // opening hours) so the home page can warn before the customer even
     // opens the menu.
-    let (paused, resume_at) = crate::pages::settings::ssr::order_pause_state(&db).await;
-    let no_slots = crate::pages::order::ssr::today_slots(&db).await.is_empty();
-    let orders_closed = paused || no_slots;
-    let closed_reason = if paused {
-        match resume_at {
-            Some(t) => format!("Wir sind ab {t} Uhr wieder für Bestellungen da."),
-            None => {
-                let msg = crate::pages::settings::ssr::orders_paused_message(&db).await;
-                if msg.is_empty() {
-                    "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
-                } else {
-                    msg
-                }
-            }
-        }
-    } else if no_slots {
-        "Wir haben gerade geschlossen. Bestellungen sind während unserer Öffnungszeiten möglich.".to_string()
-    } else {
-        String::new()
-    };
+    let (shop_level, closed_reason) = crate::pages::order::ssr::shop_open_state(&db).await;
 
     // Weekly hours for the public table — built from the DB so what's
     // shown always matches what gates ordering. Multiple shift rows per
@@ -145,7 +127,7 @@ pub async fn home_delivery_info() -> Result<HomeDeliveryInfo, ServerFnError> {
     Ok(HomeDeliveryInfo {
         zones,
         free_delivery_threshold_cents: threshold,
-        orders_closed,
+        shop_level,
         closed_reason,
         hours_rows,
     })
@@ -183,7 +165,7 @@ fn qr_svg(_url: &str) -> String {
 }
 
 #[cfg(not(feature = "ssr"))]
-fn site_url() -> String {
+pub fn site_url() -> String {
     DEFAULT_SITE_URL.to_string()
 }
 
@@ -208,10 +190,10 @@ pub fn Home() -> impl IntoView {
     //
     // MUST stay `OnceResource`: it owns the SSR→hydrate value handoff.
     // A plain `Resource` keyed on a client signal hydrates differently
-    // and reintroduced the tachys hydration.rs:163 panic. The home
-    // banner is informational and correct on load/reload; the live
-    // pause refresh that matters for ordering lives on the cart drawer
-    // (a `Resource` that already polls safely).
+    // and reintroduced the tachys hydration.rs:163 panic. The initial
+    // open/closed banner comes from this resource (correct on load); the
+    // LIVE flip comes from the SSE shop-status signal below, applied
+    // reactively in the view — never altering SSR/hydrate DOM shape.
     let combined = OnceResource::new(async move {
         let h = get_home_content().await;
         let d = home_delivery_info().await;
@@ -239,21 +221,25 @@ pub fn Home() -> impl IntoView {
                     }.into_any(),
                     Ok(content) => view! { <HomeBody content/> }.into_any(),
                 };
+                // Prominent shop-status bar at the very top of the page (above
+                // the hero), so 🟢 open / 🔴 closed / Heute Ruhetag is the first
+                // thing seen. Initial state from the resource; the SSE
+                // `shop_override` signal flips it live (read inside the closure
+                // → reactive, no reload, hydration-safe).
+                let (init_level, init_reason) = match &delivery_res {
+                    Ok(info) => (info.shop_level, info.closed_reason.clone()),
+                    Err(_) => (rusterando_shared::models::ShopLevel::Open, String::new()),
+                };
+                let top_status_bar = view! {
+                    <crate::components::shop_status_bar::ShopStatusBar
+                        init_level init_reason/>
+                };
                 let delivery_body = match delivery_res {
                     Err(_) => view! {
                         <p class="muted">{crate::t!("home.delivery_unavailable")}</p>
                     }.into_any(),
                     Ok(info) => {
                         let threshold = info.free_delivery_threshold_cents;
-                        let closed_banner = info.orders_closed.then(|| {
-                            let reason = info.closed_reason.clone();
-                            view! {
-                                <div class="order-closed-banner" role="alert">
-                                    <strong>"🔴 Online-Bestellung derzeit nicht möglich"</strong>
-                                    <p>{reason}</p>
-                                </div>
-                            }
-                        });
                         let banner = (threshold > 0).then(|| {
                             let label = format_eur(threshold);
                             let template = crate::t!("home.free_delivery_banner");
@@ -262,7 +248,6 @@ pub fn Home() -> impl IntoView {
                             }
                         });
                         view! {
-                            {closed_banner}
                             {banner}
                             <ul>
                                 {info.zones.into_iter().map(|z| view! {
@@ -277,6 +262,7 @@ pub fn Home() -> impl IntoView {
                     }
                 };
                 view! {
+                    {top_status_bar}
                     {hero}
                     <section id="delivery" class="delivery">
                         <h2>{crate::t!("home.delivery_title")}</h2>
@@ -315,6 +301,13 @@ pub fn Home() -> impl IntoView {
             <p class="qr-actions">
                 <a class="btn ghost" href="/menu.pdf" target="_blank" rel="noopener">
                     {format!("📄 {}", crate::t!("home.pdf_download"))}
+                </a>
+                // Downloadable QR for the shop URL. Points at the cached
+                // /qr.svg endpoint (Cache-Control 1h, defaults to site_url),
+                // size=1024 so the saved vector has a large min-dimension for
+                // print. `download` names the saved file.
+                <a class="btn ghost" href="/qr.svg?size=1024" download="davidspizzeria-qr.svg">
+                    {format!("⬇ {}", crate::t!("home.qr_download"))}
                 </a>
             </p>
         </section>

@@ -159,7 +159,13 @@ pub async fn delete_pdf_cover(id: i64) -> Result<(), ServerFnError> {
             .await
             .unwrap_or(0);
     if still_referenced == 0 && !filename.contains('/') && !filename.contains('\\') {
-        let _ = std::fs::remove_file(format!("data/uploads/covers/{filename}"));
+        // Resolve the uploads base from context (same dir the axum upload
+        // handler writes to: <site_root>/img/uploads). Fall back to the
+        // historical relative path if the context isn't present.
+        let base = use_context::<crate::pages::settings::UploadsDir>()
+            .map(|u| u.as_str().to_string())
+            .unwrap_or_else(|| "data/uploads".to_string());
+        let _ = std::fs::remove_file(format!("{base}/covers/{filename}"));
     }
     Ok(())
 }

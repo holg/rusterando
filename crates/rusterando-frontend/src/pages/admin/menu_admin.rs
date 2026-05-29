@@ -141,6 +141,8 @@ pub async fn update_menu_item(
         .await
         .map_err(|e| ServerFnError::new(format!("commit: {e}")))?;
 
+    // Menu changed → refresh the cached Restaurant JSON-LD (prices/names).
+    crate::pages::seo::rebuild_jsonld_cache().await;
     Ok(())
 }
 
@@ -235,6 +237,8 @@ pub async fn create_menu_item(
     .await
     .map_err(|e| ServerFnError::new(format!("create item: {e}")))?;
 
+    // New item → refresh the cached Restaurant JSON-LD.
+    crate::pages::seo::rebuild_jsonld_cache().await;
     Ok(id)
 }
 

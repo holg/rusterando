@@ -73,25 +73,26 @@
 #let col-cyan   = rgb("#1eaedb")
 #let col-orange = rgb("#f4a261")
 
-// ----- Page setup ----------------------------------------------------------
-// Sheet: 21cm × 44,3cm landscape (measured from David's existing print).
-// Folded into thirds → three 147.67mm panels.
-#set page(
-  width: 443mm,
-  height: 210mm,
-  margin: 0mm,
-  fill: col-bg,
-)
-
+// ----- Theme style wrapper --------------------------------------------------
+// THEME CONTRACT: this file is a *styling* module — palette + render fns. It
+// does NOT set the page or emit the final layout; the geometry layer
+// (geometry.typ, owned by the Rust handler) does that, per `?format=`, and
+// imports this module. `#set` rules don't cross an `#import`, so the page text
+// styling is exposed as a wrapper fn the geometry layer wraps its content in.
+//
 // Fonts come from the binary itself (build.rs + pdf.rs) so Mac/Linux render
 // identically. Inter handles Latin; Noto Color Emoji covers 🌶 etc.
-#set text(
-  font: ("Inter", "Noto Color Emoji"),
-  size: 8pt,
-  fill: col-text,
-)
-#set par(leading: 0.45em)
-#set block(spacing: 0.55em)
+#let theme-bg = col-bg
+#let theme-styles(body) = {
+  set text(
+    font: ("Inter", "Noto Color Emoji"),
+    size: 8pt,
+    fill: col-text,
+  )
+  set par(leading: 0.45em)
+  set block(spacing: 0.55em)
+  body
+}
 
 // ----- Side panel ---------------------------------------------------------
 
@@ -517,33 +518,17 @@
   ]
 }
 
-// Page 1: cover image (left panel) + menu spanning the right 2 panels.
-// Menu is laid out as ONE 4-column flow across the right two-thirds
-// of the page — fold lines fall between cols 2 and 3, which is a
-// natural break, not a layout boundary. Typst balances columns
-// automatically so we get even fill without empty bottoms.
-#grid(
-  columns: (panel-w, 2 * panel-w),
-  gutter: 0mm,
-  cover-panel,
-  pad(x: 3mm, y: 6mm,
-    columns(4, gutter: 3mm, cards-to-content(p1-cards))
-  ),
-)
-
-#pagebreak()
-
-// Page 2: QR (left panel) + menu spanning the right 2 panels as a
-// 4-column flow. Legend appended at the very end so it lands in the
-// last column.
-#grid(
-  columns: (panel-w, 2 * panel-w),
-  gutter: 0mm,
-  // QR scan card only. The old dark side-panel (brand wordmark +
-  // Ladenfront + promo boxes + hours + address) is dropped entirely
-  // — David didn't want it carried over to the new design.
-  pad(x: 3mm, y: 6mm)[#qr-panel],
-  pad(x: 3mm, y: 6mm,
-    columns(4, gutter: 3mm, cards-to-content(p2-cards) + v(2mm) + legend)
-  ),
-)
+// THEME CONTRACT ENDS HERE.
+//
+// This module exposes (via `#import "/theme.typ": *`) everything the geometry
+// layer needs to arrange the page(s) per `?format=`:
+//   styling : theme-styles(body), theme-bg, col-* palette
+//   pieces  : cover-panel, side-panel, qr-panel, legend
+//   menu    : card-list (all category/extras cards + item counts),
+//             p1-cards / p2-cards (the trifold 57/43 split),
+//             cards-to-content(cards), panel-w
+//   data    : data, display-url
+//
+// It deliberately does NOT call `#set page` or emit the final layout — that's
+// the geometry layer's job (templates/geometry.typ), so page geometry / fold
+// format is independent of the styling theme.

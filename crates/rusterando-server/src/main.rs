@@ -59,6 +59,21 @@ struct AppState {
     /// Same boot-read + write-through pattern as the other handles.
     #[allow(dead_code)]
     orders_paused: rusterando_frontend::pages::settings::OrdersPausedHandle,
+    /// Live customer channel hub (SSE). Server fns publish order events
+    /// (admin messages, status changes); the `/api/live/orders/{id}` SSE
+    /// route subscribes and streams matching events to the customer.
+    live: rusterando_frontend::live::LiveHub,
+    /// Base directory for admin-uploaded images, `<site_root>/img/uploads`.
+    /// Uploads live INSIDE the static site root so nginx serves them from
+    /// `html/img/uploads/` directly (the `data/` dir — DB included — is
+    /// never web-reachable). The deploy script excludes `img/uploads/`
+    /// from its `rsync --delete` so uploads survive releases.
+    uploads_dir: Arc<str>,
+    /// Cached Restaurant JSON-LD string, built at boot + rebuilt at the admin
+    /// edit paths that change its inputs (menu, branding, weekly hours). Read
+    /// synchronously during SSR so `/` and `/menu` carry structured data in
+    /// the first byte with no per-request query; never emitted on the client.
+    jsonld: rusterando_frontend::pages::seo::JsonLdHandle,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
@@ -82,6 +97,15 @@ async fn main() {
     let conf = get_configuration(None).expect("read Leptos config");
     let leptos_options = conf.leptos_options;
     let addr = leptos_options.site_addr;
+
+    // Admin uploads land under the static site root (`target/site` in dev,
+    // `html` on prod) so nginx serves them from `/img/uploads/` directly —
+    // the `data/` dir stays off the web root. `site_root` is leptos's own
+    // notion of that directory, so we always agree with whatever serves
+    // `/img/`. The deploy script's `rsync --delete` excludes `img/uploads/`
+    // so these runtime files aren't wiped on release.
+    let uploads_dir: Arc<str> =
+        Arc::from(format!("{}/img/uploads", leptos_options.site_root).as_str());
 
     let db_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:./data/rusterando.db".into());
@@ -147,8 +171,15 @@ async fn main() {
     // shop that never set the legacy single-value overrides). This
     // makes sure the admin sees at least one theme + one cover in the
     // /admin/pdf switcher instead of an empty list. Idempotent.
-    if let Err(e) = rusterando_server::pdf::seed_pdf_library_if_empty(&db).await {
+    if let Err(e) = rusterando_server::pdf::seed_pdf_library_if_empty(&db, &uploads_dir).await {
         tracing::warn!("seed_pdf_library_if_empty failed (non-fatal): {e}");
+    }
+
+    // Backfill SEO slugs on menu_categories (added by the 20260528 migration).
+    // Idempotent: only fills rows with a NULL/empty slug, derived from
+    // seo_slug(name), with a -N suffix on collision so /menu/<slug> is unique.
+    if let Err(e) = backfill_category_slugs(&db).await {
+        tracing::warn!("backfill_category_slugs failed (non-fatal): {e}");
     }
 
     let admin_password = std::env::var("ADMIN_PASSWORD").unwrap_or_else(|_| {
@@ -194,6 +225,12 @@ async fn main() {
     let branding_initial = rusterando_frontend::branding::ssr::load_branding(&db).await;
     let branding = rusterando_frontend::branding::BrandingHandle::new(branding_initial);
 
+    // Build the cached Restaurant JSON-LD once at boot (after the category
+    // slug backfill, so menu data is final). Rebuilt by the admin edit paths.
+    let jsonld = rusterando_frontend::pages::seo::JsonLdHandle::new(
+        rusterando_frontend::pages::seo::build_restaurant_jsonld(&db, &branding.get()).await,
+    );
+
     // Stripe mode — sandbox vs live. Same handle pattern: one boot
     // read, write-through on `update_setting('stripe_mode', …)`. The
     // S_STRIPE_* / L_STRIPE_* env vars are loaded from .env above;
@@ -217,6 +254,10 @@ async fn main() {
     let orders_paused =
         rusterando_frontend::pages::settings::OrdersPausedHandle::new(orders_paused_initial);
     tracing::info!(paused = orders_paused_initial, "orders-paused toggle at boot");
+
+    // Live customer channel hub (SSE). In-memory broadcast; nothing to
+    // seed from the DB.
+    let live = rusterando_frontend::live::LiveHub::new();
 
     // Kitchen-printer subsystem (see src/kitchen.rs). Spun up only
     // when KITCHEN_LISTEN_ADDR is set in .env so printerless deploys
@@ -264,6 +305,9 @@ async fn main() {
         stripe_mode,
         i18n,
         orders_paused,
+        live,
+        uploads_dir: uploads_dir.clone(),
+        jsonld,
     };
 
     let routes = generate_route_list(App);
@@ -320,6 +364,11 @@ async fn main() {
                 let stripe_mode = state.stripe_mode.clone();
                 let i18n = state.i18n.clone();
                 let orders_paused = state.orders_paused.clone();
+                let live = state.live.clone();
+                let uploads = rusterando_frontend::pages::settings::UploadsDir(
+                    state.uploads_dir.clone(),
+                );
+                let jsonld = state.jsonld.clone();
                 move || {
                     provide_context(db.clone());
                     provide_context(pwd.clone());
@@ -333,6 +382,9 @@ async fn main() {
                     provide_context(stripe_mode.clone());
                     provide_context(i18n.clone());
                     provide_context(orders_paused.clone());
+                    provide_context(live.clone());
+                    provide_context(uploads.clone());
+                    provide_context(jsonld.clone());
                 }
             },
             {
@@ -387,13 +439,15 @@ async fn main() {
             "/api/admin/pdf/cover/upload",
             axum::routing::post(pdf_cover_upload_handler),
         )
-        // Serve uploaded photos from the persistent data dir (lives
-        // outside target/site so cargo-leptos rebuilds don't wipe them
-        // and the deploy script's data/ rsync preserves them across
-        // releases).
+        // Serve uploaded photos. They live under the static site root
+        // (`<site_root>/img/uploads`) so on prod nginx serves them
+        // straight from `html/img/uploads/` — the app's ServeDir here is
+        // the fallback (dev, or if a request slips past nginx). The
+        // deploy script excludes `img/uploads/` from its `rsync --delete`
+        // so cargo-leptos rebuilds / releases don't wipe runtime uploads.
         .nest_service(
             "/img/uploads",
-            tower_http::services::ServeDir::new("data/uploads"),
+            tower_http::services::ServeDir::new(uploads_dir.as_ref()),
         );
 
     // Smoke-test endpoint for the kitchen printer chain. Lets us POST
@@ -416,6 +470,17 @@ async fn main() {
         // is needed when either changes.
         .route("/sitemap.xml", axum::routing::get(sitemap_handler))
         .route("/robots.txt", axum::routing::get(robots_handler))
+        // Live customer channel (SSE): streams order events (admin
+        // messages, status changes) to the customer's open /orders/{id}
+        // page. Registered before the /api/{*fn_name} catch-all so it
+        // isn't swallowed by the server-fn router.
+        .route(
+            "/api/live/orders/{id}",
+            axum::routing::get(live_order_sse_handler),
+        )
+        // Global shop open/closed channel — home + cart subscribe so the
+        // pause/force-open state flips without a reload.
+        .route("/api/live/shop", axum::routing::get(live_shop_sse_handler))
         .route(
             "/admin/history.csv",
             axum::routing::get(history_csv_handler),
@@ -502,6 +567,46 @@ const PUBLIC_PAGES: &[&str] = &["", "menu", "datenschutz", "impressum"];
 /// The default locale (de) is served un-prefixed and acts as `x-default`.
 const SITEMAP_LOCALES: &[&str] = &["en", "fr", "it", "es", "pt", "ru", "cn"];
 
+/// Fill `menu_categories.slug` for any row missing one (NULL/empty), derived
+/// from `seo_slug(name)`. Idempotent: untouched rows keep their slug. On a
+/// slug collision (two categories slugging to the same string) it appends
+/// `-2`, `-3`, … so each `/menu/<slug>` resolves to exactly one category.
+async fn backfill_category_slugs(db: &SqlitePool) -> Result<(), sqlx::Error> {
+    use rusterando_shared::models::seo_slug;
+
+    // Existing non-empty slugs, so generated ones don't collide with them.
+    let mut taken: std::collections::HashSet<String> =
+        sqlx::query_scalar::<_, String>("SELECT slug FROM menu_categories WHERE slug IS NOT NULL AND slug <> ''")
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .collect();
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, name FROM menu_categories WHERE slug IS NULL OR slug = '' ORDER BY sort_order, id",
+    )
+    .fetch_all(db)
+    .await?;
+
+    for (id, name) in rows {
+        let base = seo_slug(&name);
+        let base = if base.is_empty() { "kategorie".to_string() } else { base };
+        let mut slug = base.clone();
+        let mut n = 2;
+        while taken.contains(&slug) {
+            slug = format!("{base}-{n}");
+            n += 1;
+        }
+        sqlx::query("UPDATE menu_categories SET slug = ?1 WHERE id = ?2")
+            .bind(&slug)
+            .bind(&id)
+            .execute(db)
+            .await?;
+        taken.insert(slug);
+    }
+    Ok(())
+}
+
 /// `/sitemap.xml` — lists the public pages so Google et al. can find and
 /// index them. The base URL comes from `PUBLIC_URL` (so dev/staging/prod
 /// each advertise their own origin) and the per-page `<xhtml:link
@@ -532,9 +637,10 @@ async fn sitemap_handler(
     );
     xml.push('\n');
 
-    for &page in PUBLIC_PAGES {
-        // Locales to emit a <url> entry for: always the default; the 7
-        // others only when i18n is live.
+    // Emit one `<url>` per locale for a page path (no leading slash; "" =
+    // home). Shared by the static pages and the DB-driven dynamic pages so
+    // both get identical hreflang treatment.
+    let emit_page = |xml: &mut String, page: &str| {
         let locales: Vec<&str> = if i18n_on {
             std::iter::once("")
                 .chain(SITEMAP_LOCALES.iter().copied())
@@ -542,16 +648,10 @@ async fn sitemap_handler(
         } else {
             vec![""]
         };
-
         for &loc in &locales {
             xml.push_str("  <url>\n");
             xml.push_str(&format!("    <loc>{}</loc>\n", url_for(loc, page)));
-
-            // hreflang alternates link the locale variants together so
-            // Google serves the right language per visitor. Only meaningful
-            // when there's more than one variant, i.e. i18n on.
             if i18n_on {
-                // x-default points at the un-prefixed (de) URL.
                 xml.push_str(&format!(
                     r#"    <xhtml:link rel="alternate" hreflang="x-default" href="{}"/>"#,
                     url_for("", page)
@@ -572,7 +672,41 @@ async fn sitemap_handler(
             }
             xml.push_str("  </url>\n");
         }
+    };
+
+    // 1) Static public pages.
+    for &page in PUBLIC_PAGES {
+        emit_page(&mut xml, page);
     }
+
+    // 2) Dynamic category pages — /menu/<slug> per active category.
+    let cat_slugs: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(slug, '') FROM menu_categories WHERE is_active = 1 AND slug IS NOT NULL AND slug <> '' ORDER BY sort_order",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    for slug in cat_slugs {
+        emit_page(&mut xml, &format!("menu/{slug}"));
+    }
+
+    // 3) Dynamic delivery landing pages — /lieferservice/<slug> per active
+    //    zone (slug derived from the zone name, same fn the page resolves by).
+    let zone_names: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(name, '') FROM delivery_zones WHERE is_active = 1 AND name IS NOT NULL AND name <> '' ORDER BY name",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    for name in zone_names {
+        let slug = rusterando_shared::models::seo_slug(&name);
+        // Several postcodes can share a zone name → one landing page each.
+        if !slug.is_empty() && seen.insert(slug.clone()) {
+            emit_page(&mut xml, &format!("lieferservice/{slug}"));
+        }
+    }
+
     xml.push_str("</urlset>\n");
 
     (
@@ -612,6 +746,67 @@ async fn robots_handler() -> impl axum::response::IntoResponse {
         ],
         body,
     )
+}
+
+/// `/api/live/orders/{id}` — SSE stream of live events for one order.
+/// The customer's `/orders/{id}` page opens an `EventSource` here; the
+/// server fans out `LiveEvent`s (admin messages, status changes) that
+/// match this `order_id`. Each event is sent as a JSON `data:` line.
+///
+/// A keep-alive comment is emitted periodically so reverse proxies don't
+/// reap the idle connection. `EventSource` reconnects automatically if the
+/// stream drops, and the page also has the persisted state, so a missed
+/// event is not fatal.
+async fn live_order_sse_handler(
+    axum::extract::Path(order_id): axum::extract::Path<String>,
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
+{
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+
+    let rx = state.live.subscribe();
+    // BroadcastStream yields Err on lag; we drop those and keep only
+    // events for this order. recv resumes after a lag, so the stream lives on.
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |res| {
+        let want = order_id.clone();
+        async move {
+            let ev = res.ok()?;
+            if ev.order_id != want {
+                return None;
+            }
+            // JSON-encode the LiveEvent as the SSE `data` payload.
+            let json = serde_json::to_string(&ev).ok()?;
+            Some(Ok(Event::default().data(json)))
+        }
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// `/api/live/shop` — SSE stream of global shop open/closed changes. Home +
+/// cart open an `EventSource` here so the pause / force-open state flips
+/// live (no reload). Filters the shared hub to `ShopStatus` events.
+async fn live_shop_sse_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
+{
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+    use rusterando_shared::models::LiveKind;
+
+    let rx = state.live.subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(|res| async move {
+        let ev = res.ok()?;
+        // Only the global shop-status events go on this channel.
+        if !matches!(ev.kind, LiveKind::ShopStatus { .. }) {
+            return None;
+        }
+        let json = serde_json::to_string(&ev).ok()?;
+        Some(Ok(Event::default().data(json)))
+    });
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// Max upload size — keeps decompression bombs out and matches what a
@@ -661,6 +856,7 @@ async fn kitchen_debug_inject_handler(
 /// is cache-stable forever; we never overwrite a file someone is still
 /// linking to.
 async fn upload_image_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
     headers: axum::http::HeaderMap,
     mut multipart: axum::extract::Multipart,
 ) -> axum::response::Response {
@@ -735,8 +931,8 @@ async fn upload_image_handler(
         .collect::<String>();
     let filename = format!("{hex}.{ext}");
 
-    let dir = std::path::Path::new("data/uploads");
-    if let Err(e) = std::fs::create_dir_all(dir) {
+    let dir = std::path::PathBuf::from(state.uploads_dir.as_ref());
+    if let Err(e) = std::fs::create_dir_all(&dir) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("mkdir uploads: {e}"),
@@ -851,8 +1047,8 @@ async fn pdf_cover_upload_handler(
         .collect::<String>();
     let filename = format!("{hex}.{ext}");
 
-    let dir = std::path::Path::new("data/uploads/covers");
-    if let Err(e) = std::fs::create_dir_all(dir) {
+    let dir = std::path::PathBuf::from(state.uploads_dir.as_ref()).join("covers");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("mkdir covers: {e}"),
@@ -938,7 +1134,8 @@ async fn pdf_test_render_handler(
     // Pull live override images so the test-render uses the same
     // assets the real PDF will. Substitute the supplied template
     // source instead of the persisted one.
-    let mut overrides = rusterando_server::pdf::load_pdf_overrides(&state.db).await;
+    let mut overrides =
+        rusterando_server::pdf::load_pdf_overrides(&state.db, &state.uploads_dir).await;
     let source = if body.trim().is_empty() {
         rusterando_server::pdf::TEMPLATE_SRC.to_string()
     } else {
@@ -947,7 +1144,10 @@ async fn pdf_test_render_handler(
     overrides.template_source = Some(source);
 
     let result = tokio::task::spawn_blocking(move || {
-        rusterando_server::pdf::render_menu_pdf(&payload, &overrides)
+        // Editor preview renders the default tri-fold WITH ingredients for
+        // now; a future editor control can pass the chosen format/condensed
+        // flag here.
+        rusterando_server::pdf::render_menu_pdf(&payload, &overrides, "trifold", true)
     })
     .await;
     match result {
@@ -1556,23 +1756,60 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// `?format=` on `/menu.pdf`. Absent / unknown → the default tri-fold.
+#[derive(serde::Deserialize)]
+struct MenuPdfParams {
+    format: Option<String>,
+    /// `?condensed=1` drops the per-item ingredients line for the airy,
+    /// title+price-only in-house menu. Absent / 0 = the full hand-out menu
+    /// with ingredients (the default).
+    condensed: Option<String>,
+}
+
 async fn menu_pdf_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(p): axum::extract::Query<MenuPdfParams>,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    // Only known formats; anything else falls back to the tri-fold default so
+    // a typo in the query never errors the endpoint.
+    let format = match p.format.as_deref() {
+        Some("a5-zickzack") => "a5-zickzack",
+        _ => "trifold",
+    };
+    // Ingredients are ON by default (full hand-out menu). `?condensed=1`
+    // (also accepts "true"/"yes") flips to the title+price-only in-house menu.
+    let condensed = matches!(p.condensed.as_deref(), Some("1") | Some("true") | Some("yes"));
+    let show_ingredients = !condensed;
+    // Distinct download filename per format + variant.
+    let variant = if condensed { "-kompakt" } else { "" };
+    let filename = match format {
+        "a5-zickzack" => format!("davids-pizzeria-speisekarte-a5-zickzack{variant}.pdf"),
+        _ => format!("davids-pizzeria-speisekarte{variant}.pdf"),
+    };
+
     let site_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
 
     let branding = state.branding.get();
-    match rusterando_server::pdf::build_menu_pdf(&state.db, site_url, &branding).await {
+    match rusterando_server::pdf::build_menu_pdf(
+        &state.db,
+        site_url,
+        &branding,
+        &state.uploads_dir,
+        format,
+        show_ingredients,
+    )
+    .await
+    {
         Ok(bytes) => (
             [
                 (header::CONTENT_TYPE, "application/pdf".to_string()),
                 (
                     header::CONTENT_DISPOSITION,
-                    "inline; filename=\"davids-pizzeria-speisekarte.pdf\"".to_string(),
+                    format!("inline; filename=\"{filename}\""),
                 ),
                 (header::CACHE_CONTROL, "public, max-age=300".to_string()),
             ],
@@ -1622,6 +1859,11 @@ async fn server_fn_handler(
             let stripe_mode = state.stripe_mode.clone();
             let i18n = state.i18n.clone();
             let orders_paused = state.orders_paused.clone();
+            let live = state.live.clone();
+            let uploads = rusterando_frontend::pages::settings::UploadsDir(
+                state.uploads_dir.clone(),
+            );
+            let jsonld = state.jsonld.clone();
             move || {
                 provide_context(db.clone());
                 provide_context(pwd.clone());
@@ -1634,6 +1876,9 @@ async fn server_fn_handler(
                 provide_context(stripe_mode.clone());
                 provide_context(i18n.clone());
                 provide_context(orders_paused.clone());
+                provide_context(live.clone());
+                provide_context(uploads.clone());
+                provide_context(jsonld.clone());
             }
         },
         req,

@@ -67,6 +67,14 @@ web-sys = { version = "0.3", features = [
     "ScrollLogicalPosition",
     "DomRect",
     "DomRectReadOnly",
+    # Live customer channel: SSE subscription on the order page.
+    "EventSource",
+    "MessageEvent",
+    # Customer order notifications: fire an OS banner when a message/status
+    # arrives while the order tab is backgrounded (Tier-1 in-tab push).
+    "Notification",
+    "NotificationPermission",
+    "NotificationOptions",
 ], optional = true }
 
 [features]

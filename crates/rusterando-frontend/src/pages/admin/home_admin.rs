@@ -2,7 +2,8 @@
 //! gallery). Backed by the `home_*` tables and the server fns in
 //! `pages/home_content.rs`. Photo uploads go through the
 //! `/api/admin/upload_image` route in main.rs which writes to
-//! `data/uploads/` and returns a `/img/uploads/<hash>.<ext>` path.
+//! `<site_root>/img/uploads/` and returns a `/img/uploads/<hash>.<ext>`
+//! path (served statically by nginx from `html/img/uploads/` on prod).
 
 use leptos::prelude::*;
 #[cfg(feature = "hydrate")]

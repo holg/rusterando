@@ -107,7 +107,7 @@ def test_no_hydration_panic_on_homepage(page: Page):
     page break-tests until someone notices the symptom; this catches
     it on the first run."""
     errors = _capture_console_errors(page)
-    page.goto("/", wait_until="networkidle")
+    page.goto("/", wait_until="domcontentloaded")
     # Give hydrate a moment to actually run after networkidle.
     page.wait_for_timeout(500)
     panics = _hydration_panics(errors)
@@ -127,7 +127,7 @@ def test_jetzt_bestellen_navigates_on_first_click(page: Page):
     inside 3s of a single click — five-tap-retry would blow well past
     that and fail the test."""
     errors = _capture_console_errors(page)
-    page.goto("/", wait_until="networkidle")
+    page.goto("/", wait_until="domcontentloaded")
 
     # The CTA is inside .hero-content .cta on the resolved hero.
     # Wait for the resolved hero (not the SSR placeholder, which has
@@ -152,7 +152,7 @@ def test_speisekarte_header_link_navigates_on_first_click(page: Page):
     click. Same regression shape as the hero CTA but exercises the
     header subtree (where the wordmark resource used to live)."""
     errors = _capture_console_errors(page)
-    page.goto("/", wait_until="networkidle")
+    page.goto("/", wait_until="domcontentloaded")
 
     link = page.locator(".site-header .site-nav a[href='/menu']")
     expect(link).to_be_visible(timeout=10_000)
@@ -173,7 +173,7 @@ def test_no_hydration_panic_on_menu_page(page: Page):
     the scroll/IntersectionObserver Effect. Guard against either
     re-introducing the panic shape."""
     errors = _capture_console_errors(page)
-    page.goto("/menu", wait_until="networkidle")
+    page.goto("/menu", wait_until="domcontentloaded")
     page.wait_for_timeout(500)
     panics = _hydration_panics(errors)
     assert not panics, (

@@ -225,3 +225,71 @@ def admin_page(page: Page, admin_pw: str) -> Page:
     # admin shell instead of guessing a fixed delay.
     expect(page.locator(".admin-shell-bar")).to_be_visible(timeout=10_000)
     return page
+
+
+def admin_login(page: Page, admin_pw: str) -> None:
+    """Imperative version of the `admin_page` fixture, for tests that build
+    their own browser contexts (e.g. the two-browser demo) and can't use
+    the fixture's auto-injected `page`."""
+    page.goto("/admin/login")
+    page.fill("input[name='password']", admin_pw)
+    page.click("button[type='submit']")
+    expect(page.locator(".admin-shell-bar")).to_be_visible(timeout=10_000)
+
+
+# ---------------------------------------------------------------------------
+# Demo recording helpers
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def recordings_dir() -> Path:
+    """Output dir for demo videos (gitignored). One subdir per run keeps
+    the two raw per-context .webm files and the merged .mp4 together."""
+    base = Path(__file__).parent / "recordings"
+    base.mkdir(exist_ok=True)
+    return base
+
+
+def merge_side_by_side(left: Path, right: Path, out: Path) -> Path | None:
+    """Stitch two videos into one side-by-side .mp4 via ffmpeg.
+
+    Playwright writes one .webm per context; the demo records the admin
+    and the customer browser separately, then this lays them out left
+    (customer) | right (admin) at matched height so a single file shows
+    "admin clicks pause → customer banner flips" in one frame.
+
+    Returns the output path on success, or None if ffmpeg is missing or
+    the merge fails — the demo still leaves the two raw .webm files, so a
+    missing ffmpeg degrades gracefully rather than failing the test.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        return None
+    if not (left.exists() and right.exists()):
+        return None
+
+    # Scale both to 720p height, pad widths to even (h264 needs that),
+    # then hstack. -shortest so the merge ends with the shorter clip.
+    filt = (
+        "[0:v]scale=-2:720,setsar=1[l];"
+        "[1:v]scale=-2:720,setsar=1[r];"
+        "[l][r]hstack=inputs=2[v]"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(left),
+        "-i", str(right),
+        "-filter_complex", filt,
+        "-map", "[v]",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-shortest",
+        str(out),
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    return out if out.exists() else None

@@ -35,6 +35,11 @@ pub struct Branding {
     pub shop_bank_name: String,
     pub shop_bank_iban: String,
     pub shop_bank_bic: String,
+    /// Optional Google Search Console verification token. When non-empty the
+    /// shell renders `<meta name="google-site-verification" content="…">` in
+    /// the homepage `<head>`; empty → not rendered. Stored per-shop in
+    /// `app_settings` (the token is confidential, lives only in the shop's DB).
+    pub shop_google_site_verification: String,
 }
 
 impl Branding {
@@ -118,6 +123,9 @@ fn apply_kv_inner(b: &mut Branding, key: &str, value: &str) {
         "shop_bank_name" => b.shop_bank_name = value.to_string(),
         "shop_bank_iban" => b.shop_bank_iban = value.to_string(),
         "shop_bank_bic" => b.shop_bank_bic = value.to_string(),
+        "shop_google_site_verification" => {
+            b.shop_google_site_verification = value.to_string()
+        }
         _ => {}
     }
 }
@@ -138,6 +146,7 @@ pub const BRANDING_KEYS: &[&str] = &[
     "shop_bank_name",
     "shop_bank_iban",
     "shop_bank_bic",
+    "shop_google_site_verification",
 ];
 
 #[cfg(feature = "ssr")]

@@ -51,11 +51,40 @@ pub struct HoursAdmin {
     /// empty when there's no active snooze. (Indefinite pause leaves
     /// this empty — `orders_paused` covers that.)
     pub snooze_until_label: String,
+    /// When an ad-hoc force-open is active, the local "HH:MM" it lapses
+    /// (end of today); empty otherwise.
+    pub force_open_label: String,
+    /// Authoritative "are we taking orders right now?" — pause + snooze +
+    /// force-open + schedule all resolved. Drives the toggle button label.
+    pub effective_open: bool,
+    /// THE customer-facing three-level status (green Open / amber OpensLater
+    /// / red Closed) — identical to what the customer banner shows. The admin
+    /// status line + colour must mirror this so the two never disagree (e.g.
+    /// "closed now, opens at 16:00" reads amber here, not a misleading green).
+    pub shop_level: rusterando_shared::models::ShopLevel,
+    /// The customer-facing reason string for `shop_level` (e.g. "Heute ab
+    /// 16:00 Uhr geöffnet"). Empty when plainly open.
+    pub shop_reason: String,
 }
 
 // ---------------------------------------------------------------------------
 // Server fns
 // ---------------------------------------------------------------------------
+
+/// Recompute + broadcast the shop open/closed state to all live `/api/live/shop`
+/// subscribers (home + cart). Called after any quick-toggle/snooze change so
+/// open customer tabs flip without a reload. No-op if either the DB pool or
+/// the LiveHub isn't in context.
+#[cfg(feature = "ssr")]
+async fn broadcast_shop() {
+    use sqlx::SqlitePool;
+    if let (Some(db), Some(hub)) = (
+        use_context::<SqlitePool>(),
+        use_context::<crate::live::LiveHub>(),
+    ) {
+        crate::live::broadcast_shop_status(&db, &hub).await;
+    }
+}
 
 #[server(name = LoadHoursAdmin, prefix = "/api", endpoint = "load_hours_admin")]
 pub async fn load_hours_admin() -> Result<HoursAdmin, ServerFnError> {
@@ -110,12 +139,42 @@ pub async fn load_hours_admin() -> Result<HoursAdmin, ServerFnError> {
                 .to_string()
         })
         .unwrap_or_default();
+    // Active ad-hoc force-open → local "bis HH:MM" label for the status line.
+    let force_open_label = crate::pages::settings::ssr::force_open_until(&db)
+        .await
+        .map(|until| {
+            until
+                .with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_default();
+    // The authoritative "are we taking orders right now?" — same logic as
+    // place_order's gate: not paused, not in an active timed snooze, AND a
+    // slot exists today (which already accounts for force-open + special
+    // hours + schedule). Without the snooze check the big toggle would
+    // read "Jetzt schließen" during a snooze (because the schedule still
+    // has slots) while the customer banner correctly shows closed — and
+    // clicking it would force-close instead of clearing the snooze.
+    let snoozed = !snooze_until_label.is_empty();
+    let effective_open = !orders_paused
+        && !snoozed
+        && !crate::pages::order::ssr::today_slots(&db).await.is_empty();
+
+    // The exact customer view (green/amber/red + reason). The admin status
+    // line is driven by this so it can never show green while the customer
+    // sees amber/red — e.g. "closed now, opens 16:00".
+    let (shop_level, shop_reason) = crate::pages::order::ssr::shop_open_state(&db).await;
 
     Ok(HoursAdmin {
         weekly,
         special,
         orders_paused,
         snooze_until_label,
+        force_open_label,
+        effective_open,
+        shop_level,
+        shop_reason,
     })
 }
 
@@ -160,6 +219,9 @@ pub async fn update_hour_row(
     if res.rows_affected() == 0 {
         return Err(ServerFnError::new("Zeile nicht gefunden."));
     }
+    // Weekly hours changed → refresh the cached JSON-LD openingHours.
+    // (Special-hours overrides are NOT in the JSON-LD, so their fns skip this.)
+    crate::pages::seo::rebuild_jsonld_cache().await;
     Ok(())
 }
 
@@ -235,16 +297,73 @@ pub async fn delete_special_hours(date: String) -> Result<(), ServerFnError> {
 /// closes online ordering immediately regardless of the schedule.
 /// Reuses the same validated write path + write-through handle as
 /// /admin/settings.
-#[server(name = SetOrdersPaused, prefix = "/api", endpoint = "set_orders_paused")]
-pub async fn set_orders_paused(paused: bool) -> Result<(), ServerFnError> {
-    // update_setting already enforces admin auth + write-through.
-    // Turning OFF also clears any active timed snooze (handled inside
-    // update_setting), so "Wieder öffnen" fully reopens.
-    crate::pages::settings::update_setting(
-        "orders_paused".to_string(),
-        if paused { "1" } else { "0" }.to_string(),
-    )
-    .await
+/// Quick open/close toggle, schedule-aware in BOTH directions.
+///
+/// `open = false` → force CLOSED now (sets `orders_paused=1`; clearing the
+///   timer/force-open happens via update_setting's write-through).
+/// `open = true`  → force OPEN until end of today, even on a Ruhetag /
+///   outside opening hours. Clears the pause, then sets `force_open_until`
+///   to local end-of-day (auto-reverts tomorrow). On a normally-open day
+///   this is harmless (slots already exist). This fixes the bug where
+///   "Jetzt öffnen" did nothing when the closure came from the schedule
+///   rather than the pause flag.
+#[server(name = SetOrdersOpen, prefix = "/api", endpoint = "set_orders_open")]
+pub async fn set_orders_open(open: bool) -> Result<(), ServerFnError> {
+    crate::pages::admin::require_admin().await?;
+    if !open {
+        // Force closed. update_setting clears force_open_until + snooze
+        // when orders_paused flips on? It clears them on OFF; on ON we
+        // clear force-open explicitly so a stale force-open can't linger.
+        crate::pages::settings::update_setting("force_open_until".to_string(), String::new())
+            .await?;
+        crate::pages::settings::update_setting("orders_paused".to_string(), "1".to_string())
+            .await?;
+        log::info!("[orders] CLOSED by admin (manual pause)");
+        broadcast_shop().await;
+        return Ok(());
+    }
+    // Force open until end of the local day, expressed in UTC.
+    use chrono::{Local, TimeZone, Utc};
+    let now_local = Local::now();
+    let end_local = now_local
+        .date_naive()
+        .and_hms_opt(23, 59, 59)
+        .and_then(|naive| Local.from_local_datetime(&naive).single())
+        .unwrap_or(now_local);
+    let until_utc = end_local.with_timezone(&Utc);
+    let stamp = until_utc.format("%Y-%m-%d %H:%M:%S").to_string();
+    // Clear pause + snooze (update_setting wipes orders_paused_until on
+    // orders_paused→0), then set the force-open deadline.
+    crate::pages::settings::update_setting("orders_paused".to_string(), "0".to_string()).await?;
+    crate::pages::settings::update_setting("force_open_until".to_string(), stamp).await?;
+    log::info!(
+        "[orders] FORCE-OPENED by admin until {} (end of day)",
+        end_local.format("%H:%M")
+    );
+    broadcast_shop().await;
+    Ok(())
+}
+
+/// Reset to the weekly plan ("Automatik"): clear every manual override —
+/// indefinite pause, timed snooze, and ad-hoc force-open — so the shop
+/// state is driven purely by the `opening_hours` / `special_hours`
+/// schedule again. This is how the admin gets back to e.g. "Mittwoch
+/// Ruhetag" after having manually toggled open/closed on a rest day:
+/// neither the open nor the close button returns to schedule-driven
+/// state (one force-opens, the other indefinitely pauses), so we need an
+/// explicit "hand control back to the schedule" action.
+#[server(name = SetOrdersSchedule, prefix = "/api", endpoint = "set_orders_schedule")]
+pub async fn set_orders_schedule() -> Result<(), ServerFnError> {
+    crate::pages::admin::require_admin().await?;
+    crate::pages::settings::update_setting("force_open_until".to_string(), String::new()).await?;
+    crate::pages::settings::update_setting("orders_paused_until".to_string(), String::new())
+        .await?;
+    // Set indefinite pause OFF last; update_setting also wipes
+    // orders_paused_until on the OFF transition (belt-and-suspenders).
+    crate::pages::settings::update_setting("orders_paused".to_string(), "0".to_string()).await?;
+    log::info!("[orders] reset to schedule (Automatik) by admin");
+    broadcast_shop().await;
+    Ok(())
 }
 
 /// Snooze online ordering for `minutes` from now — kitchen-overwhelmed
@@ -259,8 +378,11 @@ pub async fn snooze_orders(minutes: i64) -> Result<(), ServerFnError> {
         // Cancel: clear the timer (and make sure indefinite is off too).
         crate::pages::settings::update_setting("orders_paused_until".to_string(), String::new())
             .await?;
-        return crate::pages::settings::update_setting("orders_paused".to_string(), "0".to_string())
-            .await;
+        crate::pages::settings::update_setting("orders_paused".to_string(), "0".to_string())
+            .await?;
+        log::info!("[orders] snooze cancelled by admin");
+        broadcast_shop().await;
+        return Ok(());
     }
     if minutes > 24 * 60 {
         return Err(ServerFnError::new("Pause darf höchstens 24 Stunden sein."));
@@ -269,7 +391,44 @@ pub async fn snooze_orders(minutes: i64) -> Result<(), ServerFnError> {
     let stamp = until.format("%Y-%m-%d %H:%M:%S").to_string();
     // Timer governs → keep the indefinite switch off so it auto-resumes.
     crate::pages::settings::update_setting("orders_paused".to_string(), "0".to_string()).await?;
-    crate::pages::settings::update_setting("orders_paused_until".to_string(), stamp).await
+    crate::pages::settings::update_setting("orders_paused_until".to_string(), stamp.clone())
+        .await?;
+    log::info!(
+        "[orders] snoozed {minutes} min by admin (until {} local)",
+        until.with_timezone(&chrono::Local).format("%H:%M")
+    );
+    broadcast_shop().await;
+
+    // Auto-expiry push: wake when the snooze lapses and re-broadcast the
+    // (recomputed) shop status so home/cart re-open live without a reload.
+    // Superseded-safe: only fire if `orders_paused_until` is STILL this
+    // exact deadline when we wake (a changed/cancelled/re-snooze writes a
+    // different value, so the stale task no-ops). One short-lived task per
+    // snooze; no recurring scheduler.
+    #[cfg(feature = "ssr")]
+    if let (Some(db), Some(hub)) = (
+        use_context::<sqlx::SqlitePool>(),
+        use_context::<crate::live::LiveHub>(),
+    ) {
+        let wait = (minutes as u64) * 60 + 2; // +2s cushion past the deadline
+        let deadline = stamp.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            let current: Option<(String,)> =
+                sqlx::query_as("SELECT value FROM app_settings WHERE key = 'orders_paused_until'")
+                    .fetch_optional(&db)
+                    .await
+                    .ok()
+                    .flatten();
+            // Still the same deadline we scheduled for? Then it just lapsed
+            // (no later snooze/open superseded it) → broadcast the reopen.
+            if current.map(|(v,)| v).as_deref() == Some(deadline.as_str()) {
+                crate::live::broadcast_shop_status(&db, &hub).await;
+                log::info!("[orders] snooze expired — broadcast shop reopen");
+            }
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +453,8 @@ pub fn HoursAdminPage() -> impl IntoView {
     let row_updater = ServerAction::<UpdateHourRow>::new();
     let special_upsert = ServerAction::<UpsertSpecialHours>::new();
     let special_delete = ServerAction::<DeleteSpecialHours>::new();
-    let pause_setter = ServerAction::<SetOrdersPaused>::new();
+    let open_setter = ServerAction::<SetOrdersOpen>::new();
+    let scheduler = ServerAction::<SetOrdersSchedule>::new();
     let snoozer = ServerAction::<SnoozeOrders>::new();
 
     let data = Resource::new(
@@ -303,7 +463,8 @@ pub fn HoursAdminPage() -> impl IntoView {
                 row_updater.version().get(),
                 special_upsert.version().get(),
                 special_delete.version().get(),
-                pause_setter.version().get(),
+                open_setter.version().get(),
+                scheduler.version().get(),
                 snoozer.version().get(),
             )
         },
@@ -320,7 +481,7 @@ pub fn HoursAdminPage() -> impl IntoView {
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
                     {move || data.get().map(|res| match res {
                         Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                        Ok(d) => view! { <HoursBody d row_updater special_upsert special_delete pause_setter snoozer/> }.into_any(),
+                        Ok(d) => view! { <HoursBody d row_updater special_upsert special_delete open_setter scheduler snoozer/> }.into_any(),
                     })}
                 </Suspense>
             </section>
@@ -334,19 +495,54 @@ fn HoursBody(
     row_updater: ServerAction<UpdateHourRow>,
     special_upsert: ServerAction<UpsertSpecialHours>,
     special_delete: ServerAction<DeleteSpecialHours>,
-    pause_setter: ServerAction<SetOrdersPaused>,
+    open_setter: ServerAction<SetOrdersOpen>,
+    scheduler: ServerAction<SetOrdersSchedule>,
     snoozer: ServerAction<SnoozeOrders>,
 ) -> impl IntoView {
+    use rusterando_shared::models::ShopLevel;
+
     let paused = d.orders_paused;
     let snooze_label = d.snooze_until_label.clone();
     let snoozing = !snooze_label.is_empty();
-    // "Closed right now" = indefinite switch OR an active timer.
-    let closed = paused || snoozing;
+    let force_label = d.force_open_label.clone();
+    let forced = !force_label.is_empty();
+
+    // The customer-facing 3-level status, seeded from SSR and kept live via
+    // the same `/api/live/shop` SSE channel the customer banner + shell chip
+    // use — so this status line flips in real time and ALWAYS matches what
+    // the customer sees (no more green-while-closed). The toggle button's
+    // "open" notion is `level == Open` (open right now), so when the shop is
+    // closed-now-but-opens-later the button reads "Jetzt öffnen" (force-open).
+    let (shop_live, set_shop_live) =
+        signal::<Option<(ShopLevel, String)>>(Some((d.shop_level, d.shop_reason.clone())));
+    crate::utils::subscribe_shop_status(set_shop_live);
+    let level = move || {
+        shop_live
+            .get()
+            .map(|(l, _)| l)
+            .unwrap_or(ShopLevel::Open)
+    };
+    let reason = move || {
+        shop_live
+            .get()
+            .map(|(_, r)| r)
+            .unwrap_or_default()
+    };
+    // "Open right now" — drives the toggle direction. NOT `effective_open`
+    // (which counts a future pre-order slot as open).
+    let open = move || level() == ShopLevel::Open;
 
     let on_toggle = move |_| {
-        // The big button: when closed (either reason) → reopen; else
-        // start an indefinite pause.
-        pause_setter.dispatch(SetOrdersPaused { paused: !closed });
+        // Schedule-aware in both directions: open→close pauses; closed→open
+        // FORCE-opens until end of day (works even on a Ruhetag).
+        open_setter.dispatch(SetOrdersOpen { open: !open() });
+    };
+    // Any manual override active? Then "Auf Plan zurücksetzen" is offered so
+    // the admin can hand control back to the weekly schedule (e.g. to get
+    // "Mittwoch Ruhetag" back after manually toggling on a rest day).
+    let overridden = paused || snoozing || forced;
+    let on_reset = move |_| {
+        scheduler.dispatch(SetOrdersSchedule {});
     };
     let snooze = move |mins: i64| {
         move |_| {
@@ -358,25 +554,51 @@ fn HoursBody(
     let weekly = d.weekly.clone();
     let week_order = [1_i64, 2, 3, 4, 5, 6, 0];
 
+    let snooze_label_for_text = snooze_label.clone();
+    let force_label_for_text = force_label.clone();
     view! {
         // ----- Quick open/close + snooze -----
-        <div class=move || if closed { "quick-toggle paused" } else { "quick-toggle open" }>
+        // Colour mirrors the customer banner exactly: green Open, amber
+        // OpensLater (closed now / opens later / pause-with-resume), red
+        // Closed (Ruhetag / hard-closed). Reuses ShopLevel::css_class so the
+        // admin and the customer can't drift apart.
+        <div class=move || format!("quick-toggle {}", level().css_class())>
             <div class="state">
                 <span class="dot"></span>
                 <strong>
-                    {if snoozing {
-                        format!("Pausiert — automatisch wieder offen ab {snooze_label} Uhr")
-                    } else if paused {
-                        "Online-Bestellungen sind PAUSIERT".to_string()
-                    } else {
-                        "Online-Bestellungen laufen (nach Öffnungszeiten)".to_string()
+                    {move || {
+                        // Operational overrides get a precise label; otherwise
+                        // show the EXACT customer-facing reason so the admin
+                        // sees what the customer sees ("Heute ab 16:00 …").
+                        if paused {
+                            "Online-Bestellungen sind PAUSIERT".to_string()
+                        } else if snoozing {
+                            format!("Pausiert — automatisch wieder offen ab {snooze_label_for_text} Uhr")
+                        } else if forced {
+                            format!("Manuell GEÖFFNET (Sonderöffnung bis {force_label_for_text} Uhr)")
+                        } else {
+                            match level() {
+                                ShopLevel::Open => "Online-Bestellungen laufen (geöffnet)".to_string(),
+                                // OpensLater / Closed → the customer's own reason
+                                // string ("Heute ab 16:00 Uhr geöffnet" / Ruhetag …).
+                                _ => reason(),
+                            }
+                        }
                     }}
                 </strong>
             </div>
-            <button class=move || if closed { "btn primary big" } else { "btn danger big" }
-                    on:click=on_toggle>
-                {if closed { "Wieder öffnen" } else { "Jetzt schließen" }}
-            </button>
+            <div class="toggle-actions">
+                <button class=move || if open() { "btn danger big" } else { "btn primary big" }
+                        on:click=on_toggle>
+                    {move || if open() { "Jetzt schließen" } else { "Jetzt öffnen" }}
+                </button>
+                {overridden.then(|| view! {
+                    <button class="btn ghost" on:click=on_reset
+                            title="Manuelle Übersteuerung aufheben — wieder nach Wochenplan (inkl. Ruhetag)">
+                        "↺ Auf Plan zurücksetzen"
+                    </button>
+                })}
+            </div>
         </div>
 
         // Snooze buttons: pause for a fixed time, then auto-resume.
@@ -387,9 +609,11 @@ fn HoursBody(
             <button class="btn ghost" on:click=snooze(120)>"2 Std"</button>
         </div>
         <p class="hint">
-            "Schnellpause stoppt eingehende Bestellungen für die gewählte Dauer und gibt sie \
-             danach automatisch wieder frei. \"Jetzt schließen\" pausiert ohne Zeitlimit, \
-             \"Wieder öffnen\" hebt beides sofort auf."
+            "\"Jetzt öffnen\" gibt Bestellungen frei — auch an einem Ruhetag oder außerhalb der \
+             Öffnungszeiten (bis Tagesende, danach gilt wieder der Plan). \"Jetzt schließen\" \
+             pausiert ohne Zeitlimit. Schnellpause stoppt nur für die gewählte Dauer und gibt \
+             danach automatisch wieder frei. \"Auf Plan zurücksetzen\" hebt jede manuelle \
+             Übersteuerung auf, sodass wieder der Wochenplan gilt (inkl. Ruhetag)."
         </p>
 
         // ----- Weekly schedule -----

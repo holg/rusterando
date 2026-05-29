@@ -24,6 +24,10 @@ pub struct ZoneRow {
     pub min_order_cents: i64,
     pub eta_minutes: i64,
     pub is_active: bool,
+    /// Optional admin-written marketing copy for the /lieferservice/<slug>
+    /// SEO landing page. Empty → the page renders a generated fallback.
+    #[serde(default)]
+    pub seo_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +48,8 @@ pub struct UpdateZoneForm {
     pub min_order_cents: i64,
     pub eta_minutes: i64,
     pub is_active: bool,
+    #[serde(default)]
+    pub seo_text: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -65,7 +71,8 @@ pub async fn list_admin_zones() -> Result<Vec<ZoneRow>, ServerFnError> {
 
     let rows = sqlx::query(
         "SELECT id, postcode, COALESCE(name, '') AS name,
-                fee_cents, min_order_cents, eta_minutes, is_active
+                fee_cents, min_order_cents, eta_minutes, is_active,
+                COALESCE(seo_text, '') AS seo_text
          FROM delivery_zones
          ORDER BY is_active DESC, postcode ASC",
     )
@@ -83,6 +90,7 @@ pub async fn list_admin_zones() -> Result<Vec<ZoneRow>, ServerFnError> {
             min_order_cents: r.get("min_order_cents"),
             eta_minutes: r.get("eta_minutes"),
             is_active: r.get::<i64, _>("is_active") != 0,
+            seo_text: r.get("seo_text"),
         });
     }
     Ok(out)
@@ -159,11 +167,13 @@ pub async fn update_zone(form: UpdateZoneForm) -> Result<(), ServerFnError> {
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
+    let seo_text = form.seo_text.trim();
+    let seo_opt: Option<&str> = (!seo_text.is_empty()).then_some(seo_text);
     let res = sqlx::query(
         "UPDATE delivery_zones
            SET postcode = ?2, name = ?3,
                fee_cents = ?4, min_order_cents = ?5,
-               eta_minutes = ?6, is_active = ?7
+               eta_minutes = ?6, is_active = ?7, seo_text = ?8
          WHERE id = ?1",
     )
     .bind(&form.id)
@@ -173,6 +183,7 @@ pub async fn update_zone(form: UpdateZoneForm) -> Result<(), ServerFnError> {
     .bind(form.min_order_cents.max(0))
     .bind(form.eta_minutes.max(0))
     .bind(if form.is_active { 1 } else { 0 })
+    .bind(seo_opt)
     .execute(&db)
     .await;
 
@@ -386,6 +397,7 @@ fn ZoneRowView(
     let min_eur = RwSignal::new(format!("{:.2}", r.min_order_cents as f64 / 100.0));
     let eta = RwSignal::new(r.eta_minutes.to_string());
     let active = RwSignal::new(r.is_active);
+    let seo_text = RwSignal::new(r.seo_text.clone());
 
     let id_save = r.id.clone();
     let id_delete = r.id.clone();
@@ -409,6 +421,7 @@ fn ZoneRowView(
                 min_order_cents: parse_eur(min_eur.get()),
                 eta_minutes: parse_int(eta.get()),
                 is_active: active.get(),
+                seo_text: seo_text.get(),
             },
         });
     };
@@ -456,6 +469,12 @@ fn ZoneRowView(
             <td class="actions">
                 <button class="btn small primary" on:click=on_save>"Speichern"</button>
                 <button class="btn small danger" on:click=on_delete>"Löschen"</button>
+                <details class="zone-seo">
+                    <summary>"SEO-Text (Lieferservice-Seite)"</summary>
+                    <textarea rows="3" placeholder="Optionaler Werbetext für /lieferservice/… — leer = automatischer Text."
+                        prop:value=move || seo_text.get()
+                        on:input=move |ev| seo_text.set(event_target_value(&ev))></textarea>
+                </details>
             </td>
         </tr>
     }

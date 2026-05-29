@@ -476,6 +476,137 @@ body:has(.test-mode-banner) {
   font-size: 0.88rem;
   &.hidden { display: none; }
 }
+// Live personal message log from the restaurant on the customer order page.
+.restaurant-message {
+  background: #fff8e6;
+  border: 1px solid #f3d98a;
+  border-left: 4px solid #d99a00;
+  color: #6b4e00;
+  padding: 0.7rem 1rem;
+  border-radius: 6px;
+  margin: 0.8rem 0;
+  strong { display: block; font-size: 0.95rem; margin-bottom: 0.3rem; }
+  p { margin: 0; }
+}
+// 🔔 opt-in button for browser notifications on the customer order page.
+// Hidden by default (SSR + first hydrate); a post-hydration effect reveals
+// it only when notification permission is still undecided.
+.notify-optin {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.6rem 0;
+  padding: 0.45rem 0.9rem;
+  background: #fff;
+  border: 1px solid #f3d98a;
+  border-radius: 999px;
+  color: #6b4e00;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  &:hover { background: #fff8e6; }
+  &.hidden { display: none; }
+}
+// SEO category page heading (/menu/<slug>).
+.menu-category-head {
+  max-width: 72rem;
+  margin: 1.2rem auto 0;
+  padding: 0 1rem;
+  h1 { color: var(--primary); font-size: 1.5rem; margin: 0; }
+}
+
+// Per-area delivery landing page (/lieferservice/<slug>).
+.lieferservice {
+  max-width: 48rem;
+  margin: 1.5rem auto 3rem;
+  padding: 0 1.2rem;
+  h1 { color: var(--primary); font-size: 1.7rem; margin: 0 0 0.8rem; }
+  h2 { font-size: 1.2rem; margin: 1.4rem 0 0.5rem; }
+  .lead { font-size: 1.05rem; line-height: 1.5; margin: 0 0 1rem; }
+  .liefer-facts {
+    list-style: none; padding: 0; margin: 0 0 1.2rem;
+    li { padding: 0.3rem 0; border-bottom: 1px solid var(--border, #eee); }
+  }
+  .liefer-hours {
+    width: 100%; border-collapse: collapse; margin-top: 0.4rem;
+    th { text-align: left; font-weight: 600; padding: 0.3rem 0.6rem 0.3rem 0; }
+    td { padding: 0.3rem 0; font-variant-numeric: tabular-nums; }
+  }
+  .btn.primary { display: inline-block; margin: 0.3rem 0 0.6rem; }
+}
+
+// Admin /admin/zones — collapsible SEO-text editor inside the row actions.
+.zone-seo {
+  margin-top: 0.4rem;
+  summary { cursor: pointer; font-size: 0.8rem; color: #666; }
+  textarea { width: 100%; margin-top: 0.3rem; padding: 0.4rem; border: 1px solid var(--border, #d6cfc4); border-radius: 4px; font: inherit; font-size: 0.85rem; resize: vertical; }
+}
+
+// Timestamped message log (chat-style, oldest→newest). Used on both the
+// customer order page and the admin order detail.
+.message-log {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  li { margin: 0.25rem 0; font-size: 0.9rem; line-height: 1.35; }
+  .ts { color: #8a7300; font-variant-numeric: tabular-nums; font-size: 0.82rem; }
+}
+// Admin "message to customer" box on the order detail page.
+.customer-message {
+  margin-top: 1rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--border, #e7e1d5);
+  h3 { margin: 0 0 0.3rem; font-size: 0.95rem; }
+  .hint { margin: 0 0 0.5rem; font-size: 0.82rem; color: #666; }
+  textarea { width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border, #d6cfc4); border-radius: 6px; font: inherit; resize: vertical; }
+  .row { display: flex; gap: 0.7rem; align-items: center; margin-top: 0.5rem; }
+  .row .ok { color: #1b7a3a; }
+}
+
+// Prominent shop open/closed status bar at the very top of the home page.
+.shop-status-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 1.1rem;
+  font-size: 1rem;
+  text-align: center;
+  justify-content: center;
+  strong { font-size: 1.05rem; }
+  span { opacity: 0.92; }
+  &.open {
+    background: #eafaf0;
+    color: #1b5e20;
+    border-bottom: 2px solid #1b7a3d;
+  }
+  // Amber: closed right now but it resolves itself (opens later today, or
+  // a pause/snooze is running). Not an error state.
+  &.opens-soon {
+    background: #fff8e1;
+    color: #8a6100;
+    border-bottom: 2px solid #f0a500;
+  }
+  &.closed {
+    background: #fdecea;
+    color: #8e1c14;
+    border-bottom: 2px solid #c62828;
+  }
+}
+
+// Positive "we're open" badge on the home page.
+.order-open-badge {
+  background: #f0fff4;
+  border: 1px solid #b7e4c7;
+  border-left: 4px solid #1b7a3d;
+  color: #1b5e20;
+  padding: 0.5rem 0.9rem;
+  border-radius: 6px;
+  margin: 0 0 0.8rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
 
 .delivery {
   max-width: 72rem;
@@ -1114,6 +1245,39 @@ main { display: block; width: 100%; }
       &.ok { background: #e8f5e9; color: #1b5e20; border-left: 3px solid #2e7d32; }
       &.hint { background: #fff8e1; color: #6b4d12; border-left: 3px solid #f4a261; }
     }
+    // Giveaway nudge (not yet qualified): same amber hint as free-delivery.
+    .giveaway-hint {
+      margin: 0;
+      padding: 0.35rem 0.55rem;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      background: #fff8e1;
+      color: #6b4d12;
+      border-left: 3px solid #f4a261;
+    }
+    // Giveaway offer (qualified, unclaimed): a small green card with the
+    // required sauce choice + the "Jetzt sichern" button.
+    .giveaway-offer {
+      margin: 0;
+      padding: 0.5rem 0.6rem;
+      border-radius: 6px;
+      background: #e8f5e9;
+      border: 1px solid #a5d6a7;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+      .giveaway-headline { margin: 0; font-weight: 700; color: #1b5e20; }
+      .giveaway-sauce-label { margin: 0.1rem 0 0; font-size: 0.82rem; color: #2e4d2e; }
+      .giveaway-sauce {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+        font-size: 0.9rem;
+        cursor: pointer;
+        input { accent-color: var(--primary); }
+      }
+      .giveaway-claim { margin-top: 0.3rem; align-self: flex-start; }
+    }
     .btn {
       text-align: center;
       padding: 0.7rem 1rem;
@@ -1689,6 +1853,28 @@ main { display: block; width: 100%; }
   padding: 2rem 1rem;
 
   h1 { color: var(--primary); margin: 0 0 1.5rem; }
+
+  // Live shop-status banner. Same 3-level palette as the customer banner /
+  // shell chip / hours toggle so they all agree at a glance. Clickable →
+  // /admin/hours.
+  .shop-status-panel {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.8rem 1.1rem;
+    border-radius: 8px;
+    margin: 0 0 1.3rem;
+    border: 1px solid var(--border, #e7e1d5);
+    text-decoration: none;
+    font-weight: 600;
+    .dot { width: 0.8rem; height: 0.8rem; border-radius: 50%; flex: 0 0 auto; }
+    .txt { flex: 1 1 auto; }
+    .go { font-size: 0.85rem; font-weight: 600; opacity: 0.8; white-space: nowrap; }
+    &.open       { background: #f0fff4; border-color: #b7e4c7; color: #1b5e20; .dot { background: #1b7a3d; } }
+    &.opens-soon { background: #fff8e1; border-color: #f0cf7a; color: #8a6100; .dot { background: #f0a500; } }
+    &.closed     { background: #fdecea; border-color: #f5b5ae; color: #8e1c14; .dot { background: #c62828; } }
+    &:hover { filter: brightness(0.98); }
+  }
 
   .stats-row {
     display: grid;
@@ -2505,14 +2691,31 @@ button.add-item {
     gap: 0.15rem 0.6rem;
     @media (max-width: 480px) { grid-template-columns: 1fr; }
   }
+  // Price sits ABOVE the checkbox+label line so it never gets clipped at the
+  // narrow 2-column edge (e.g. "Knoblauchsauce +0,60 €" used to wrap/cut off).
   .extra-row {
     display: flex;
-    align-items: center;
-    gap: 0.4rem;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.1rem;
     cursor: pointer;
-    padding: 0.15rem 0;
-    .extra-label { flex: 1; }
-    .extra-price { color: var(--muted); font-variant-numeric: tabular-nums; }
+    padding: 0.2rem 0;
+    .extra-price {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      font-size: 0.8em;
+      line-height: 1.1;
+      white-space: nowrap;
+      // Align the price over the label, past the checkbox, so it reads as
+      // belonging to this extra.
+      padding-left: 1.55rem;
+    }
+    .extra-main {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .extra-label { line-height: 1.15; }
   }
 }
 
@@ -3214,6 +3417,28 @@ button.add-item {
   &:hover { filter: brightness(0.97); }
 }
 
+// Shop online/offline chip — same shape as the mode chip, next to it in
+// the admin header on every page. Click → /admin/hours to toggle.
+.shop-online-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .2rem .55rem;
+  border-radius: 999px;
+  font-size: .8rem;
+  font-weight: 700;
+  text-decoration: none;
+  letter-spacing: .03em;
+  border: 1px solid transparent;
+  cursor: pointer;
+  user-select: none;
+  .dot { width: .6rem; height: .6rem; border-radius: 50%; flex: 0 0 auto; }
+  &.online  { background: #e6f6ec; color: #15703a; border-color: #98d5a6; .dot { background: #15703a; } }
+  &.opens-soon { background: #fff8e1; color: #8a6100; border-color: #f0cf7a; .dot { background: #f0a500; } }
+  &.offline { background: #fdecea; color: #8e1c14; border-color: #f3b5ae; .dot { background: #c62828; } }
+  &:hover { filter: brightness(0.97); }
+}
+
 // ---------------------------------------------------------------------------
 // /admin/customers
 // ---------------------------------------------------------------------------
@@ -3740,10 +3965,22 @@ button.add-item {
     .state { display: flex; align-items: center; gap: 0.6rem; }
     .state .dot { width: 0.8rem; height: 0.8rem; border-radius: 50%; }
 
+    // Mirrors the customer banner / shell chip 3-level palette so admin and
+    // customer never disagree: green open, amber opens-later, red closed.
     &.open  { background: #f0fff4; border-color: #b7e4c7; }
     &.open  .dot { background: #1b7a3d; }
-    &.paused { background: #fdecea; border-color: #f5b5ae; }
-    &.paused .dot { background: #c62828; }
+    &.opens-soon { background: #fff8e1; border-color: #f0cf7a; }
+    &.opens-soon .dot { background: #f0a500; }
+    &.closed, &.paused { background: #fdecea; border-color: #f5b5ae; }
+    &.closed .dot, &.paused .dot { background: #c62828; }
+
+    // Toggle + the optional "Auf Plan zurücksetzen" button, stacked tight.
+    .toggle-actions {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.4rem;
+    }
   }
   .btn.big { padding: 0.7rem 1.4rem; font-size: 1.05rem; font-weight: 700; }
 

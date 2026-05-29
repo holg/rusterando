@@ -494,8 +494,13 @@ cmd_upload() {
     fi
 
     # Upload site assets (WASM, JS, CSS, static files)
+    # --exclude img/uploads/: admin-uploaded images (cover library, hero
+    # photos) are written at runtime under html/img/uploads/ and are NOT
+    # in the local build output. Without this exclude, --delete would wipe
+    # every uploaded file on each release. (pkg/ etc. ARE in the build
+    # output, so --delete correctly clean-replaces them.)
     echo "Uploading site assets..."
-    rsync -avz --delete "$LOCAL_SITE_DIR/" "$SSH_HOST:$REMOTE_HTML_DIR/"
+    rsync -avz --delete --exclude 'img/uploads/' "$LOCAL_SITE_DIR/" "$SSH_HOST:$REMOTE_HTML_DIR/"
 
     # Upload .env: ship the locally-loaded $ENV_FILE as .env on the
     # server (systemd's EnvironmentFile= reads from a fixed path per
@@ -552,6 +557,12 @@ cmd_setup() {
     # SHARED_BUILD_OUTPUT_NAME == this profile's LEPTOS_OUTPUT_NAME, so
     # the override is a no-op.
     LEPTOS_OUTPUT_NAME_FOR_UNIT="${SHARED_BUILD_OUTPUT_NAME:-${LEPTOS_OUTPUT_NAME:-rusterando}}"
+    # Shop timezone. The server uses the process-local time (chrono
+    # Local::now()) to decide opening hours / pickup slots. A bare VPS runs
+    # in UTC, which would make a German shop's "17:00–22:00" fire at the
+    # wrong wall-clock. Pin it here (IANA name, so DST MEZ↔MESZ is handled
+    # automatically). Override per shop in .env with TZ=...
+    SHOP_TZ="${TZ:-Europe/Berlin}"
     cat <<EOF | ssh_cmd "sudo tee /etc/systemd/system/$APP_NAME.service > /dev/null"
 [Unit]
 Description=$APP_NAME web server
@@ -566,6 +577,7 @@ ExecStart=$REMOTE_BIN_DIR/$APP_NAME
 Restart=always
 RestartSec=5
 Environment=RUST_LOG=info
+Environment=TZ=$SHOP_TZ
 Environment=LEPTOS_HASH_FILES=true
 Environment=LEPTOS_SITE_ROOT=$REMOTE_HTML_DIR
 Environment=LEPTOS_OUTPUT_NAME=$LEPTOS_OUTPUT_NAME_FOR_UNIT

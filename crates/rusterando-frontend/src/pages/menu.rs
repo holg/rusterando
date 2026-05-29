@@ -332,21 +332,132 @@ pub fn MenuPage() -> impl IntoView {
     let combined = OnceResource::new(async move {
         let m = list_menu().await;
         let e = list_pizza_extras().await.unwrap_or_default();
-        (m, e)
+        // Shop open/closed for the status bar — the menu is the bookmarked
+        // page, so it carries the same live status indicator as the home
+        // page. `(closed, reason)`.
+        let s = shop_status()
+            .await
+            .unwrap_or((rusterando_shared::models::ShopLevel::Open, String::new()));
+        (m, e, s)
     });
 
     view! {
         <Suspense fallback=|| view! { <p class="loading">{crate::t!("menu.loading")}</p> }>
-            {move || combined.get().map(|(menu_res, extras)| match menu_res {
+            {move || combined.get().map(|(menu_res, extras, shop)| match menu_res {
                 Err(e) => view! {
                     <p class="error">{crate::t!("menu.load_error").replace("{err}", &e.to_string())}</p>
                 }.into_any(),
-                Ok(payload) => view! {
-                    <MenuView payload extras=extras.clone()/>
-                }.into_any(),
+                Ok(payload) => {
+                    let (level, reason) = shop;
+                    view! {
+                        <crate::components::shop_status_bar::ShopStatusBar
+                            init_level=level init_reason=reason/>
+                        <MenuView payload extras=extras.clone()/>
+                    }.into_any()
+                }
             })}
         </Suspense>
     }
+}
+
+/// SEO category page payload: the category's display name + a `MenuPayload`
+/// whose `items` are filtered to that category. `None` when no active
+/// category matches the slug (→ the page emits a 404). The slug is matched
+/// against the stored `menu_categories.slug` (backfilled at boot from
+/// `seo_slug(name)`).
+#[server(name = ListMenuCategory, prefix = "/api", endpoint = "list_menu_category")]
+pub async fn list_menu_category(
+    slug: String,
+) -> Result<Option<(String, MenuPayload)>, ServerFnError> {
+    let full = list_menu().await?;
+    // Resolve which category the slug points at. We re-slug the names so a
+    // shop that hasn't run the backfill (or renamed a category) still
+    // resolves — same function the sitemap + backfill use.
+    let want = rusterando_shared::models::seo_slug(&slug);
+    let Some(cat) = full
+        .categories
+        .iter()
+        .find(|c| rusterando_shared::models::seo_slug(&c.name) == want)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let cat_id = cat.id.clone();
+    let items = full
+        .items
+        .into_iter()
+        .filter(|it| it.category_id == cat_id)
+        .collect::<Vec<_>>();
+    let payload = MenuPayload {
+        categories: vec![cat.clone()],
+        items,
+        allergens: full.allergens,
+        additives: full.additives,
+        shop_phone: full.shop_phone,
+        category_overlay: false,
+    };
+    Ok(Some((cat.name, payload)))
+}
+
+/// `/menu/<category_slug>` — an SSR page rendering just one menu category.
+/// Exists for SEO depth ("Pizza-Karte"); `rel=canonical` points back at the
+/// main `/menu` so it doesn't cannibalise it. Unknown slug → HTTP 404.
+#[component]
+pub fn MenuCategoryPage() -> impl IntoView {
+    let params = leptos_router::hooks::use_params_map();
+    let slug = move || params.read().get("category_slug").unwrap_or_default();
+    // Blocking: an unknown slug must set HTTP 404 BEFORE the response head is
+    // flushed (set_status is a no-op once streaming starts). Blocking also
+    // lands the canonical/meta in <head>.
+    let data = Resource::new_blocking(slug, |s| async move { list_menu_category(s).await });
+    let extras = OnceResource::new(async move { list_pizza_extras().await.unwrap_or_default() });
+
+    // Canonical → the main menu page (per the no-cannibalisation decision).
+    let base = crate::pages::home::site_url();
+    let canonical = format!("{}/menu", base.trim_end_matches('/'));
+
+    view! {
+        <leptos_meta::Link rel="canonical" href=canonical/>
+        <Suspense fallback=|| view! { <p class="loading">{crate::t!("menu.loading")}</p> }>
+            {move || {
+                let ex = extras.get().unwrap_or_default();
+                data.get().map(|res| match res {
+                    Err(e) => view! {
+                        <p class="error">{crate::t!("menu.load_error").replace("{err}", &e.to_string())}</p>
+                    }.into_any(),
+                    Ok(None) => {
+                        // Unknown category → real 404 so Google doesn't index it.
+                        #[cfg(feature = "ssr")]
+                        if let Some(resp) = use_context::<leptos_axum::ResponseOptions>() {
+                            resp.set_status(http::StatusCode::NOT_FOUND);
+                        }
+                        view! { <p class="error">{crate::t!("errors.page_not_found")}</p> }.into_any()
+                    }
+                    Ok(Some((cat_name, payload))) => {
+                        view! {
+                            <section class="menu-category-head">
+                                <h1>{format!("{cat_name} — Speisekarte")}</h1>
+                            </section>
+                            <MenuView payload extras=ex.clone()/>
+                        }.into_any()
+                    }
+                })
+            }}
+        </Suspense>
+    }
+}
+
+/// Tiny server fn returning the current `(level, reason)` for the status
+/// bar. Lets pages without delivery-info (the menu) and the admin shell
+/// chip show the same live three-level open/closed indicator. Reuses the
+/// canonical `shop_open_state`.
+#[server(name = ShopStatus, prefix = "/api", endpoint = "shop_status")]
+pub async fn shop_status(
+) -> Result<(rusterando_shared::models::ShopLevel, String), ServerFnError> {
+    use sqlx::SqlitePool;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    Ok(crate::pages::order::ssr::shop_open_state(&db).await)
 }
 
 #[component]
@@ -1082,17 +1193,21 @@ fn ExtrasPicker(
                     view! {
                         <li>
                             <label class="extra-row">
-                                <input type="checkbox"
-                                    prop:checked=move || is_checked.get()
-                                    on:change=move |ev| {
-                                        let on = event_target_checked(&ev);
-                                        selected.update(|v| {
-                                            v.retain(|x| x != &id_for_check);
-                                            if on { v.push(id_for_check.clone()); }
-                                        });
-                                    }/>
-                                <span class="extra-label">{label}</span>
+                                // Price ABOVE the checkbox+label so it never
+                                // gets clipped at the narrow column edge.
                                 <span class="extra-price">{price_label}</span>
+                                <span class="extra-main">
+                                    <input type="checkbox"
+                                        prop:checked=move || is_checked.get()
+                                        on:change=move |ev| {
+                                            let on = event_target_checked(&ev);
+                                            selected.update(|v| {
+                                                v.retain(|x| x != &id_for_check);
+                                                if on { v.push(id_for_check.clone()); }
+                                            });
+                                        }/>
+                                    <span class="extra-label">{label}</span>
+                                </span>
                             </label>
                         </li>
                     }

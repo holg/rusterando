@@ -57,6 +57,14 @@ pub struct CheckoutContext {
     /// when `orders_closed` is true.
     #[serde(default)]
     pub closed_reason: String,
+    /// `true` only when the shop is open *right now* (a window covers this
+    /// minute). When false but `slots` is non-empty, the shop is closed
+    /// now and opens later today — pre-orders for a future slot are fine,
+    /// but the "ASAP (ca. 30 Min.)" option must NOT be offered, since the
+    /// kitchen isn't open yet. The only valid choice then is a scheduled
+    /// slot.
+    #[serde(default)]
+    pub open_now: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +119,11 @@ pub struct OrderDetail {
     /// Parsed back from delivery_address_json. None for pickup.
     #[serde(default)]
     pub delivery_address: Option<DeliveryAddress>,
+    /// Timestamped log of restaurant→customer messages (admin-sent on
+    /// /admin/orders/{id}), oldest first. Shown chat-style on the
+    /// confirmation page; new ones also arrive live via SSE.
+    #[serde(default)]
+    pub messages: Vec<rusterando_shared::models::OrderMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -604,6 +617,28 @@ pub mod ssr {
     pub const ASAP_DEFAULT_MIN: i64 = 30;
     pub const PREP_BUFFER_MIN: i64 = 20;
 
+    /// Format a UTC `'YYYY-MM-DD HH:MM:SS'` timestamp (as SQLite stores
+    /// `CURRENT_TIMESTAMP`) into a local display string for the message
+    /// log: "HH:MM" when it's today, "DD.MM. HH:MM" otherwise. Falls back
+    /// to the raw string if parsing fails.
+    pub fn fmt_msg_time(utc: &str) -> String {
+        use chrono::{NaiveDateTime, TimeZone, Utc};
+        match NaiveDateTime::parse_from_str(utc.trim(), "%Y-%m-%d %H:%M:%S") {
+            Ok(naive) => {
+                let local = Utc.from_utc_datetime(&naive).with_timezone(&Local);
+                if local.date_naive() == Local::now().date_naive() {
+                    local.format("%H:%M").to_string()
+                } else {
+                    local.format("%d.%m. %H:%M").to_string()
+                }
+            }
+            Err(_) => utc.to_string(),
+        }
+    }
+    /// Default closing time for an ad-hoc force-open day ("Jetzt öffnen"
+    /// on a Ruhetag): orders run from now until this local time.
+    pub const DEFAULT_FORCE_CLOSE: &str = "22:00";
+
     pub fn now_local() -> chrono::DateTime<Local> {
         Local::now()
     }
@@ -623,11 +658,17 @@ pub mod ssr {
     /// open day); otherwise its single open/close window replaces the weekday
     /// rows (lets the shop open on a normally-closed day, e.g. a busy holiday).
     /// With no override, the weekday rows in `opening_hours` apply as before.
-    pub async fn today_slots(db: &sqlx::SqlitePool) -> Vec<PickupSlot> {
+    /// Today's open windows as raw `(open "HH:MM", close "HH:MM")` strings,
+    /// with the full precedence: a planned `special_hours` row wins; else an
+    /// ad-hoc force-open synthesises a now→DEFAULT_FORCE_CLOSE window (even
+    /// on a Ruhetag); else the weekday schedule (possibly multiple shifts).
+    /// The manual *pause* is NOT considered here — it's checked separately
+    /// in the gate / `shop_open_state`. Shared by `today_slots` and the
+    /// banner status so both agree on "is there a window, and when".
+    pub async fn today_windows(db: &sqlx::SqlitePool) -> Vec<(String, String)> {
         let now = now_local();
         let today = now.date_naive().format("%Y-%m-%d").to_string();
 
-        // Date override wins over the weekday schedule.
         let special = sqlx::query_as::<_, (i64, Option<String>, Option<String>)>(
             "SELECT is_closed, open_time, close_time FROM special_hours WHERE date = ?1",
         )
@@ -637,30 +678,44 @@ pub mod ssr {
         .ok()
         .flatten();
 
-        // Build the list of open windows (open_str, close_str) for today.
-        let windows: Vec<(String, String)> = match special {
+        match special {
             // Forced closed for this date.
             Some((closed, _, _)) if closed != 0 => Vec::new(),
             // Forced open for this date with a single window.
             Some((_, Some(open_s), Some(close_s))) => vec![(open_s, close_s)],
             // Override row exists but has no usable window — treat as closed.
             Some(_) => Vec::new(),
-            // No override → the weekday schedule (may be multiple shifts).
+            // No planned override.
             None => {
-                let weekday = now.weekday().num_days_from_sunday() as i64;
-                sqlx::query_as::<_, (String, String, i64)>(
-                    "SELECT open_time, close_time, is_closed FROM opening_hours WHERE weekday = ?1",
-                )
-                .bind(weekday)
-                .fetch_all(db)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|(_, _, closed)| *closed == 0)
-                .map(|(open_s, close_s, _)| (open_s, close_s))
-                .collect()
+                if crate::pages::settings::ssr::force_open_until(db).await.is_some() {
+                    // Ad-hoc force-open: open from now until the default
+                    // close time, regardless of the weekday schedule.
+                    vec![(
+                        now.format("%H:%M").to_string(),
+                        DEFAULT_FORCE_CLOSE.to_string(),
+                    )]
+                } else {
+                    // The weekday schedule (may be multiple shifts).
+                    let weekday = now.weekday().num_days_from_sunday() as i64;
+                    sqlx::query_as::<_, (String, String, i64)>(
+                        "SELECT open_time, close_time, is_closed FROM opening_hours WHERE weekday = ?1",
+                    )
+                    .bind(weekday)
+                    .fetch_all(db)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|(_, _, closed)| *closed == 0)
+                    .map(|(open_s, close_s, _)| (open_s, close_s))
+                    .collect()
+                }
             }
-        };
+        }
+    }
+
+    pub async fn today_slots(db: &sqlx::SqlitePool) -> Vec<PickupSlot> {
+        let now = now_local();
+        let windows = today_windows(db).await;
 
         let earliest = now + chrono::Duration::minutes(PREP_BUFFER_MIN);
         let mut slots = Vec::new();
@@ -705,6 +760,197 @@ pub mod ssr {
         }
         slots.sort_by(|a, b| a.value.cmp(&b.value));
         slots
+    }
+
+    /// True when today is a scheduled rest day: there are `opening_hours`
+    /// rows for today's weekday but every one is `is_closed`, AND there's
+    /// no force-open / special-open in effect. Used to say "Heute Ruhetag"
+    /// vs the generic "outside opening hours".
+    pub async fn is_ruhetag_today(db: &sqlx::SqlitePool) -> bool {
+        let now = now_local();
+        let weekday = now.weekday().num_days_from_sunday() as i64;
+        let rows = sqlx::query_as::<_, (i64,)>(
+            "SELECT is_closed FROM opening_hours WHERE weekday = ?1",
+        )
+        .bind(weekday)
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        // Rows exist and all are closed (a true Ruhetag), or no rows at all.
+        rows.iter().all(|(c,)| *c != 0)
+    }
+
+    /// THE canonical "is ordering closed right now, and why?" — the single
+    /// source of truth shared by the gate, the home/cart/checkout banners,
+    /// and the live `ShopStatus` broadcast. Mirrors the `place_order` gate:
+    ///   1. manual pause (indefinite)  → closed, admin message / generic
+    ///   2. timed snooze               → closed, "ab HH:MM Uhr wieder da"
+    ///   3. no slot today              → closed, "Heute Ruhetag" or hours
+    ///   4. else                       → open
+    /// (force-open is already reflected in `today_slots`, so it makes the
+    /// no-slot branch fall through to open.)
+    /// Is the shop within an open window *right now*? (open ≤ now < close
+    /// for some window today.) This is "open at this very moment", distinct
+    /// from "has a bookable future slot today" — at 08:00 with an 11:30
+    /// window there's a pre-order slot but the shop is not open *now*.
+    pub async fn open_right_now(db: &sqlx::SqlitePool) -> bool {
+        let now = now_local().time();
+        today_windows(db).await.into_iter().any(|(open_s, close_s)| {
+            match (
+                NaiveTime::parse_from_str(&open_s, "%H:%M"),
+                NaiveTime::parse_from_str(&close_s, "%H:%M"),
+            ) {
+                (Ok(o), Ok(c)) => o <= now && now < c,
+                _ => false,
+            }
+        })
+    }
+
+    /// Earliest window-open time strictly later than `now` today, as
+    /// "HH:MM" — used for the amber "Heute ab HH:MM geöffnet" caption when
+    /// the shop is closed at this moment but a window still opens today
+    /// (before the first window, or in the lunch→dinner gap). `None` when
+    /// no further window opens today.
+    pub async fn next_open_today(db: &sqlx::SqlitePool) -> Option<String> {
+        let now = now_local().time();
+        let mut candidates: Vec<NaiveTime> = today_windows(db)
+            .await
+            .into_iter()
+            .filter_map(|(open_s, _)| NaiveTime::parse_from_str(&open_s, "%H:%M").ok())
+            .filter(|open_t| *open_t > now)
+            .collect();
+        candidates.sort();
+        candidates.first().map(|t| t.format("%H:%M").to_string())
+    }
+
+    /// THE canonical three-level shop status — the single source of truth for
+    /// the customer banners, the admin chip, and (via `shop_closed_state`)
+    /// the order gate. Precedence:
+    ///   1. timed snooze        → OpensLater (amber) "ab HH:MM wieder da"
+    ///   2. manual pause        → OpensLater (amber) admin message / generic
+    ///   3. a slot exists now   → Open (green)
+    ///   4. opens later today   → OpensLater (amber) "Heute ab HH:MM geöffnet"
+    ///   5. else                → Closed (red) Ruhetag / outside hours
+    /// Any pause is amber (temporary, self-resolving); red is reserved for a
+    /// hard close with nothing more today.
+    pub async fn shop_open_state(
+        db: &sqlx::SqlitePool,
+    ) -> (rusterando_shared::models::ShopLevel, String) {
+        use crate::pages::settings::ssr as sset;
+        use rusterando_shared::models::ShopLevel;
+
+        let (paused, resume_at) = sset::order_pause_state(db).await;
+        if paused {
+            let reason = match resume_at {
+                Some(t) => format!("Pause — ab {t} Uhr wieder für Bestellungen da."),
+                None => {
+                    let msg = sset::orders_paused_message(db).await;
+                    if msg.is_empty() {
+                        "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
+                    } else {
+                        msg
+                    }
+                }
+            };
+            // A pause always resolves itself (snooze auto-expires; a manual
+            // pause is one click to undo) → amber, not red.
+            return (ShopLevel::OpensLater, reason);
+        }
+        // Open *right now* (a window covers this minute) → green.
+        if open_right_now(db).await {
+            return (ShopLevel::Open, String::new());
+        }
+        // Not open now, but a window opens later today → amber, with the
+        // next time. (Pre-orders for that slot are still allowed by the
+        // gate; this just colours the banner honestly.)
+        if let Some(next) = next_open_today(db).await {
+            return (
+                ShopLevel::OpensLater,
+                format!("Heute ab {next} Uhr geöffnet"),
+            );
+        }
+        // Nothing more today → hard red close.
+        let reason = if is_ruhetag_today(db).await {
+            "Heute Ruhetag — bitte an einem anderen Tag bestellen.".to_string()
+        } else {
+            "Wir haben gerade geschlossen. Bestellungen sind während unserer Öffnungszeiten möglich.".to_string()
+        };
+        (ShopLevel::Closed, reason)
+    }
+
+    /// Whether ordering is blocked right now, and why — for the order gate
+    /// and the checkout. NOT derived from the banner level: a future pickup
+    /// slot today (the amber "opens later" banner) still allows pre-orders,
+    /// so the gate stays open as long as a bookable slot exists. Blocked
+    /// only by an active pause/snooze or by having no slot at all today.
+    pub async fn shop_closed_state(db: &sqlx::SqlitePool) -> (bool, String) {
+        use crate::pages::settings::ssr as sset;
+        let (paused, resume_at) = sset::order_pause_state(db).await;
+        if paused {
+            let reason = match resume_at {
+                Some(t) => format!("Wir sind ab {t} Uhr wieder für Bestellungen da."),
+                None => {
+                    let msg = sset::orders_paused_message(db).await;
+                    if msg.is_empty() {
+                        "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
+                    } else {
+                        msg
+                    }
+                }
+            };
+            return (true, reason);
+        }
+        if today_slots(db).await.is_empty() {
+            let reason = if is_ruhetag_today(db).await {
+                "Heute Ruhetag — bitte an einem anderen Tag bestellen.".to_string()
+            } else {
+                "Wir haben gerade geschlossen. Bestellungen sind während unserer Öffnungszeiten möglich.".to_string()
+            };
+            return (true, reason);
+        }
+        (false, String::new())
+    }
+
+    /// Log a customer-meaningful status change into the order's message
+    /// log (timestamped) AND push it live, so the customer's order page
+    /// shows e.g. "Status: Wird zubereitet" in the same chat-style list as
+    /// admin messages. Skips internal/back transitions the customer
+    /// doesn't care about (e.g. a reset to "received"). Call from every
+    /// status-change server fn (admin/kitchen/driver/tour) AFTER the
+    /// `UPDATE orders SET status`.
+    ///
+    /// `db` + the `LiveHub` are pulled from leptos context; no-op if absent.
+    pub async fn log_status_change(db: &sqlx::SqlitePool, order_id: &str, status: &str) {
+        use super::status_label_de;
+        // Log every real status transition (incl. resets/back-steps and
+        // the initial "Eingegangen") so the customer sees the full
+        // timeline. Skip only the internal payment-flow state and any
+        // unknown value — those aren't kitchen statuses worth a log line.
+        if matches!(status, "pending_payment") || status_label_de(status) == "Unbekannt" {
+            return;
+        }
+        let body = format!("Status: {}", status_label_de(status));
+        let inserted: Result<(i64, String), _> = sqlx::query_as(
+            "INSERT INTO order_messages (order_id, body) VALUES (?1, ?2) RETURNING id, created_at",
+        )
+        .bind(order_id)
+        .bind(&body)
+        .fetch_one(db)
+        .await;
+        let Ok((msg_id, created_at)) = inserted else { return };
+        if let Some(hub) = use_context::<crate::live::LiveHub>() {
+            hub.send(rusterando_shared::models::LiveEvent {
+                order_id: order_id.to_string(),
+                kind: rusterando_shared::models::LiveKind::Message(
+                    rusterando_shared::models::OrderMessage {
+                        id: msg_id,
+                        body,
+                        created_at: fmt_msg_time(&created_at),
+                        delivered: false,
+                    },
+                ),
+            });
+        }
     }
 
     /// `DP-DDMM-NNNN` — daily 4-digit sequence, padded.
@@ -1497,29 +1743,13 @@ pub async fn load_checkout_context() -> Result<CheckoutContext, ServerFnError> {
     let free_delivery_threshold_cents =
         crate::pages::settings::ssr::free_delivery_threshold_cents(&db).await;
 
-    // Closed state mirrors the `place_order` gate exactly so the UI never
-    // disagrees with the server: manually paused / timed-snoozed, OR no
-    // valid slot left today (outside opening hours). Pause wins.
-    let (paused, resume_at) = crate::pages::settings::ssr::order_pause_state(&db).await;
-    let no_slots = slots.is_empty();
-    let orders_closed = paused || no_slots;
-    let closed_reason = if paused {
-        match resume_at {
-            Some(t) => format!("Wir sind ab {t} Uhr wieder für Bestellungen da."),
-            None => {
-                let msg = crate::pages::settings::ssr::orders_paused_message(&db).await;
-                if msg.is_empty() {
-                    "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
-                } else {
-                    msg
-                }
-            }
-        }
-    } else if no_slots {
-        "Wir haben gerade geschlossen. Bestellungen sind während unserer Öffnungszeiten möglich.".to_string()
-    } else {
-        String::new()
-    };
+    // Closed state via the canonical helper so the UI never disagrees with
+    // the place_order gate (pause / snooze / Ruhetag / hours all handled).
+    let (orders_closed, closed_reason) = ssr::shop_closed_state(&db).await;
+    // Open *right now*? Gates the "ASAP" pickup option — when the shop only
+    // opens later today (amber state), ASAP must not be offered; the
+    // customer can pre-order, but only for a scheduled slot.
+    let open_now = ssr::open_right_now(&db).await;
 
     // Snapshot the bits of branding we need into the resource payload so
     // the form's SSR + hydrate render identical DOM. Reading
@@ -1543,6 +1773,7 @@ pub async fn load_checkout_context() -> Result<CheckoutContext, ServerFnError> {
         shop_city: branding.shop_city,
         orders_closed,
         closed_reason,
+        open_now,
     })
 }
 
@@ -1616,26 +1847,18 @@ pub async fn place_order(
     //                               pre-order during a midday break is
     //                               still allowed as long as a slot
     //                               remains.
-    let (paused, resume_at) = crate::pages::settings::ssr::order_pause_state(&db).await;
-    if paused {
-        // Timed snooze → tell the customer when we're back. Indefinite
-        // pause → the admin's custom message, else a generic one.
-        let err = match resume_at {
-            Some(t) => format!("Wir sind ab {t} Uhr wieder für Bestellungen da."),
-            None => {
-                let msg = crate::pages::settings::ssr::orders_paused_message(&db).await;
-                if msg.is_empty() {
-                    "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
-                } else {
-                    msg
-                }
-            }
-        };
-        return Err(ServerFnError::new(err));
+    let (closed, reason) = ssr::shop_closed_state(&db).await;
+    if closed {
+        return Err(ServerFnError::new(reason));
     }
-    if ssr::today_slots(&db).await.is_empty() {
+    // ASAP is only valid while the shop is open *right now*. When it merely
+    // opens later today, pre-orders are fine but must carry a scheduled
+    // slot — reject a stray "asap" (e.g. a crafted POST) so an order can't
+    // claim a ~30-min pickup before the kitchen opens. The UI already hides
+    // ASAP in that state; this is the server-side backstop.
+    if (pickup_time == "asap" || pickup_time.is_empty()) && !ssr::open_right_now(&db).await {
         return Err(ServerFnError::new(
-            "Wir haben gerade geschlossen. Bitte versuchen Sie es während unserer Öffnungszeiten erneut.",
+            "Wir sind gerade noch geschlossen — bitte eine Abholzeit nach Öffnung wählen.",
         ));
     }
 
@@ -1656,9 +1879,38 @@ pub async fn place_order(
         }
     }
 
-    let cart = load_cart(&db, &cart_id).await?;
+    let mut cart = load_cart(&db, &cart_id).await?;
     if cart.lines.is_empty() {
         return Err(ServerFnError::new("Warenkorb ist leer"));
+    }
+
+    // Giveaway (free Pizzabrötchen) enforcement — authoritative. The cart may
+    // carry a giveaway line that the customer claimed earlier; re-validate it
+    // here against the LIVE settings + the now-known order type, and strip it
+    // if it no longer qualifies (promo turned off, items removed so the paid
+    // subtotal dropped below the threshold, or the order type isn't eligible).
+    // `cart.subtotal_cents` already excludes giveaway lines (priced 0), so it
+    // is exactly the paid subtotal we gate on. This is the only place the
+    // order-type rule can be checked (it isn't known in the cart drawer).
+    if cart.lines.iter().any(|l| l.is_giveaway) {
+        let gcfg = crate::pages::settings::ssr::giveaway_config(&db).await;
+        let is_delivery = order_type == "delivery";
+        let still_qualifies = gcfg.enabled
+            && cart.subtotal_cents >= gcfg.min_order_cents
+            && gcfg.order_types.allows(is_delivery);
+        if !still_qualifies {
+            // Remove the now-invalid giveaway line(s) from the cart so they
+            // neither persist nor land on the order.
+            sqlx::query("DELETE FROM cart_items WHERE cart_id = ?1 AND is_giveaway = 1")
+                .bind(&cart_id)
+                .execute(&db)
+                .await
+                .map_err(|e| ServerFnError::new(format!("strip giveaway: {e}")))?;
+            cart = load_cart(&db, &cart_id).await?;
+            if cart.lines.is_empty() {
+                return Err(ServerFnError::new("Warenkorb ist leer"));
+            }
+        }
     }
     let subtotal = cart.subtotal_cents;
 
@@ -2013,8 +2265,8 @@ pub async fn place_order(
             "INSERT INTO order_items
                 (id, order_id, menu_item_id, name_snapshot, menu_number_snapshot,
                  quantity, options_json, unit_price_cents, line_total_cents,
-                 extras_json, selected_options_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 extras_json, selected_options_json, is_giveaway)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )
         .bind(&line_id)
         .bind(&order_id)
@@ -2027,6 +2279,7 @@ pub async fn place_order(
         .bind(line.line_total_cents)
         .bind(extras_json.as_deref())
         .bind(selected_options_json.as_deref())
+        .bind(line.is_giveaway as i64)
         .execute(&mut *tx)
         .await
         .map_err(|e| ServerFnError::new(format!("insert order_item: {e}")))?;
@@ -2041,6 +2294,13 @@ pub async fn place_order(
     tx.commit()
         .await
         .map_err(|e| ServerFnError::new(format!("commit: {e}")))?;
+
+    // Seed the customer's status timeline with the initial state (e.g.
+    // "Eingegangen" for a cash order). Card orders start as
+    // 'pending_payment' (skipped); the Stripe webhook's flip to 'received'
+    // is logged there. No live subscriber yet at order time — this just
+    // persists the first line so the confirmation page shows it on load.
+    ssr::log_status_change(&db, &order_id, initial_status).await;
 
     let public_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
     let detail_url = format!("{public_url}/orders/{order_id}");
@@ -2294,6 +2554,25 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
 
     let delivery_address = row.13.as_deref().and_then(parse_delivery_address);
 
+    // Message log, oldest first, with local-formatted timestamps + ack.
+    let msg_rows = sqlx::query_as::<_, (i64, String, String, Option<String>)>(
+        "SELECT id, body, created_at, delivered_at FROM order_messages
+         WHERE order_id = ?1 ORDER BY created_at, id",
+    )
+    .bind(&id)
+    .fetch_all(&db)
+    .await
+    .unwrap_or_default();
+    let messages = msg_rows
+        .into_iter()
+        .map(|(id, body, created_at, delivered_at)| rusterando_shared::models::OrderMessage {
+            id,
+            body,
+            created_at: ssr::fmt_msg_time(&created_at),
+            delivered: delivered_at.is_some(),
+        })
+        .collect();
+
     Ok(OrderDetail {
         id: row.0,
         order_number: row.1,
@@ -2311,7 +2590,108 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
         order_type: row.11,
         delivery_fee_cents: row.12,
         delivery_address,
+        messages,
     })
+}
+
+/// Admin sends a personal message to the customer for one order. Persists
+/// it on the order (so it survives a reload) and broadcasts it live over
+/// the SSE channel so the customer's open `/orders/{id}` page shows it
+/// immediately. Empty message clears it.
+#[server(name = SetOrderMessage, prefix = "/api", endpoint = "set_order_message")]
+pub async fn set_order_message(order_id: String, message: String) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    crate::pages::admin::require_admin().await?;
+    let msg = message.trim();
+    if msg.is_empty() {
+        return Err(ServerFnError::new("Nachricht darf nicht leer sein."));
+    }
+    if msg.chars().count() > 500 {
+        return Err(ServerFnError::new(
+            "Nachricht darf höchstens 500 Zeichen lang sein.",
+        ));
+    }
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    // Order must exist (FK isn't enforced on this table; guard explicitly).
+    let exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM orders WHERE id = ?1")
+        .bind(&order_id)
+        .fetch_optional(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("check order: {e}")))?;
+    if exists.is_none() {
+        return Err(ServerFnError::new("Bestellung nicht gefunden."));
+    }
+
+    // Append to the log and read back the id + server timestamp.
+    let (msg_id, created_at): (i64, String) = sqlx::query_as(
+        "INSERT INTO order_messages (order_id, body) VALUES (?1, ?2)
+         RETURNING id, created_at",
+    )
+    .bind(&order_id)
+    .bind(msg)
+    .fetch_one(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("insert order message: {e}")))?;
+
+    // Push the new entry to the customer's open page (delivered=false until
+    // their browser acks it).
+    if let Some(hub) = use_context::<crate::live::LiveHub>() {
+        hub.send(rusterando_shared::models::LiveEvent {
+            order_id: order_id.clone(),
+            kind: rusterando_shared::models::LiveKind::Message(
+                rusterando_shared::models::OrderMessage {
+                    id: msg_id,
+                    body: msg.to_string(),
+                    created_at: ssr::fmt_msg_time(&created_at),
+                    delivered: false,
+                },
+            ),
+        });
+    }
+    log::info!(
+        "[orders] admin message appended to order {order_id} ({} chars)",
+        msg.chars().count()
+    );
+    Ok(())
+}
+
+/// Delivery ack from the customer's browser: it calls this once it has
+/// rendered a message, stamping `delivered_at` and broadcasting a
+/// `MessageAck` so the admin's open order page flips that line to
+/// "✓ Zugestellt" live. No admin auth — the message id (only knowable by
+/// a browser that received it on the order's stream) is the capability,
+/// consistent with the unauthenticated `/orders/{id}` page. Idempotent:
+/// only stamps the first time. Needs `order_id` to route the ack event.
+#[server(name = AckOrderMessage, prefix = "/api", endpoint = "ack_order_message")]
+pub async fn ack_order_message(order_id: String, message_id: i64) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let res = sqlx::query(
+        "UPDATE order_messages SET delivered_at = CURRENT_TIMESTAMP
+         WHERE id = ?1 AND order_id = ?2 AND delivered_at IS NULL",
+    )
+    .bind(message_id)
+    .bind(&order_id)
+    .execute(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("ack message: {e}")))?;
+
+    // Only broadcast on the first ack (rows_affected == 1) to avoid noise.
+    if res.rows_affected() == 1 {
+        if let Some(hub) = use_context::<crate::live::LiveHub>() {
+            hub.send(rusterando_shared::models::LiveEvent {
+                order_id,
+                kind: rusterando_shared::models::LiveKind::MessageAck { message_id },
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Phase 1 — phone recall. Looks up a customer by exact phone match and
@@ -2952,6 +3332,15 @@ pub async fn tour_stop_delivered(
         .await
         .map_err(|e| ServerFnError::new(format!("commit: {e}")))?;
 
+    // Live pill flip + timestamped "Status: Geliefert" in the message log.
+    if let Some(hub) = use_context::<crate::live::LiveHub>() {
+        hub.send(rusterando_shared::models::LiveEvent {
+            order_id: order_id.clone(),
+            kind: rusterando_shared::models::LiveKind::Status("delivered".to_string()),
+        });
+    }
+    ssr::log_status_change(&db, &order_id, "delivered").await;
+
     get_tour(tour_id).await
 }
 
@@ -3243,10 +3632,56 @@ pub fn OrderConfirmationPage() -> impl IntoView {
     }
 }
 
+/// 🔔 opt-in button for browser notifications on this order page.
+///
+/// Hydration-safe by construction: `show` starts `false`, so SSR and the
+/// first hydrate paint render the button hidden (identical DOM). A
+/// post-hydration `Effect` reveals it only when the browser permission is
+/// still `Default` (undecided) — already-granted/denied stays hidden.
+/// Visibility toggles via a class, never by adding/removing the node, so the
+/// tachys walker stays in sync. Clicking requests permission (must be from
+/// the gesture) and then hides the button regardless of the answer.
+#[component]
+fn NotifyOptIn() -> impl IntoView {
+    let show = RwSignal::new(false);
+
+    #[cfg(feature = "hydrate")]
+    {
+        use web_sys::{Notification, NotificationPermission};
+        // Reveal only if the user hasn't decided yet.
+        Effect::new(move |_| {
+            if Notification::permission() == NotificationPermission::Default {
+                show.set(true);
+            }
+        });
+    }
+
+    let on_click = move |_| {
+        #[cfg(feature = "hydrate")]
+        {
+            // Request from the click gesture; hide whatever the answer is.
+            if let Ok(promise) = web_sys::Notification::request_permission() {
+                leptos::task::spawn_local(async move {
+                    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+                });
+            }
+        }
+        show.set(false);
+    };
+
+    view! {
+        <button
+            class="notify-optin"
+            class:hidden=move || !show.get()
+            on:click=on_click
+            title="Bei neuen Nachrichten / Statusänderungen benachrichtigt werden">
+            "🔔 Benachrichtigungen aktivieren"
+        </button>
+    }
+}
+
 #[component]
 fn ConfirmationView(o: OrderDetail) -> impl IntoView {
-    let status_label = status_label_de(&o.status).to_string();
-    let status_attr = o.status.clone();
     let payment_label = payment_status_label_de(&o.payment_status);
     let payment_attr = o.payment_status.clone();
     let is_delivery = o.order_type == "delivery";
@@ -3290,6 +3725,45 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
         _ => String::new(),
     };
 
+    // Live channel: seed from the persisted/SSR values, then subscribe
+    // post-hydration. The signals are read in the view so updates render
+    // in place (no reload). Seeding from `o.*` means SSR + the initial
+    // hydrate render identical DOM — the SSE subscription only mutates
+    // these signals afterwards, never the DOM shape.
+    let initial_status = o.status.clone();
+    let messages = RwSignal::new(o.messages.clone());
+    let (live_status, set_live_status) = signal(Some(initial_status.clone()));
+    // Customer side: ack each message on receive (delivery receipt) AND
+    // fire an OS notification when a message/status arrives while the tab is
+    // backgrounded (opt-in via the 🔔 button below).
+    crate::utils::subscribe_order_live(o.id.clone(), messages, set_live_status, true, true);
+    // Ack the messages already present on initial load (persisted, not yet
+    // delivered) so a reopened page also confirms delivery.
+    {
+        let oid = o.id.clone();
+        let initial = o.messages.clone();
+        Effect::new(move |_| {
+            #[cfg(feature = "hydrate")]
+            for m in initial.iter().filter(|m| !m.delivered) {
+                let oid = oid.clone();
+                let id = m.id;
+                leptos::task::spawn_local(async move {
+                    let _ = ack_order_message(oid, id).await;
+                });
+            }
+            #[cfg(not(feature = "hydrate"))]
+            let _ = (&oid, &initial);
+        });
+    }
+    // Status label/attr derive reactively from the live status signal,
+    // falling back to the initial status when the signal is somehow empty.
+    let live_status_label = move || {
+        let s = live_status.get().unwrap_or_else(|| initial_status.clone());
+        status_label_de(&s).to_string()
+    };
+    let init2 = o.status.clone();
+    let live_status_attr = move || live_status.get().unwrap_or_else(|| init2.clone());
+
     view! {
         <div class="confirm-card">
             <h1>"Vielen Dank für Ihre Bestellung!"</h1>
@@ -3298,9 +3772,31 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                 <div class="status-pill" data-order-type={o.order_type.clone()}>
                     {if is_delivery { "🛵 Lieferung" } else { "🏪 Abholung" }}
                 </div>
-                <div class="status-pill" data-status=status_attr>{status_label}</div>
+                <div class="status-pill" data-status=live_status_attr>{live_status_label}</div>
                 <div class="status-pill" data-payment=payment_attr>{payment_label}</div>
             </div>
+
+            // Opt-in for OS notifications (fires when this tab is backgrounded
+            // and a message/status arrives). Always present; reveals itself
+            // post-hydration only if permission is still undecided.
+            <NotifyOptIn/>
+
+            // Live message log from the restaurant (admin-sent), chat-style
+            // oldest→newest. New messages append via SSE; the list persists
+            // across reloads (seeded from the DB). Hidden when empty.
+            {move || {
+                let msgs = messages.get();
+                (!msgs.is_empty()).then(|| view! {
+                    <div class="restaurant-message" role="status">
+                        <strong>"📣 Nachrichten vom Restaurant"</strong>
+                        <ul class="message-log">
+                            {msgs.into_iter().map(|m| view! {
+                                <li><span class="ts">"🕒 " {m.created_at} " — "</span>{m.body}</li>
+                            }).collect_view()}
+                        </ul>
+                    </div>
+                })
+            }}
 
             <dl class="confirm-meta">
                 <dt>{pickup_label_de}</dt><dd>{o.pickup_time_label.clone()}</dd>
@@ -3509,10 +4005,21 @@ fn Form(
         shop_city: default_city_from_ctx,
         orders_closed,
         closed_reason,
+        open_now,
     } = ctx;
 
     let slots_for_dropdown = slots.clone();
     let has_slots = !slots.is_empty();
+    // ASAP is only valid when the shop is open right now. When it opens
+    // later today (amber), the customer can still pre-order — but only for a
+    // scheduled slot, so hide ASAP and default the choice to "scheduled".
+    let asap_allowed = open_now;
+    if !asap_allowed {
+        // The signal is created with "asap" in the parent; correct it here
+        // so the (hidden) ASAP radio isn't the active selection and the
+        // scheduled <select> is enabled with the first future slot.
+        pickup_choice.set("scheduled".to_string());
+    }
     // zones_for_select removed — Phase 2 derives the zone via geocoder feedback;
     // the dropdown is gone and the hidden delivery_zone_id is mirrored from
     // the validation result. Kept this line as a marker so the diff is clear.
@@ -4039,17 +4546,30 @@ fn Form(
 
                 <fieldset>
                     <legend>{move || if is_delivery.get() { crate::t!("checkout.delivery_time") } else { crate::t!("checkout.pickup_time") }}</legend>
-                    <label class="radio">
-                        <input type="radio" name="pickup_time" value="asap"
-                               prop:checked=move || pickup_choice.get() == "asap"
-                               on:change=move |_| pickup_choice.set("asap".to_string())/>
-                        <span>{crate::t!("checkout.asap").replace("{n}", &asap_minutes.to_string())}</span>
-                    </label>
+                    // ASAP only when the shop is open *now*. When it opens
+                    // later today, the kitchen can't start immediately, so
+                    // ASAP is suppressed and a hint explains why; the only
+                    // valid choice is a scheduled slot below.
+                    {if asap_allowed {
+                        view! {
+                            <label class="radio">
+                                <input type="radio" name="pickup_time" value="asap"
+                                       prop:checked=move || pickup_choice.get() == "asap"
+                                       on:change=move |_| pickup_choice.set("asap".to_string())/>
+                                <span>{crate::t!("checkout.asap").replace("{n}", &asap_minutes.to_string())}</span>
+                            </label>
+                        }.into_any()
+                    } else {
+                        view! {
+                            <p class="hint">"Wir sind gerade noch geschlossen — bitte eine Abholzeit nach Öffnung wählen."</p>
+                        }.into_any()
+                    }}
 
                     {if has_slots {
                         view! {
                             <label class="radio">
                                 <input type="radio" name="pickup_time" value="scheduled"
+                                       prop:checked=move || pickup_choice.get() == "scheduled"
                                        on:change=move |_| pickup_choice.set("scheduled".to_string())/>
                                 <span>{crate::t!("checkout.pick_later")}</span>
                             </label>

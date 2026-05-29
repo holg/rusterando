@@ -94,6 +94,23 @@ impl OrdersPausedHandle {
     }
 }
 
+/// On-disk base directory for admin uploads, `<site_root>/img/uploads`
+/// (e.g. `html/img/uploads` on prod, `target/site/img/uploads` in dev).
+/// Provided into server-fn context so server fns that touch upload files
+/// — e.g. `delete_pdf_cover` unlinking a cover — resolve the same path the
+/// axum upload handlers write to. Immutable for the process lifetime, so a
+/// plain `Arc<str>` (no lock) is enough.
+#[cfg(feature = "ssr")]
+#[derive(Clone)]
+pub struct UploadsDir(pub std::sync::Arc<str>);
+
+#[cfg(feature = "ssr")]
+impl UploadsDir {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Public-facing snapshot — what the menu/checkout/home pages need to
 /// render. Cached in checkout context so the form picks it up via the
 /// existing `load_checkout_context` server fn.
@@ -154,7 +171,10 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
         return Err(ServerFnError::new("Schlüssel fehlt."));
     }
     // Per-key validation.
-    if key == "free_delivery_threshold_cents" {
+    if matches!(
+        key.as_str(),
+        "free_delivery_threshold_cents" | "giveaway_min_order_cents"
+    ) {
         let n: i64 = value
             .trim()
             .parse()
@@ -162,6 +182,18 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
         if n < 0 {
             return Err(ServerFnError::new("Wert darf nicht negativ sein."));
         }
+    }
+    // Giveaway master toggle: 0/1 (true/false also accepted).
+    if key == "giveaway_enabled" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
+        return Err(ServerFnError::new(
+            "giveaway_enabled muss '0' / '1' (oder 'true' / 'false') sein.",
+        ));
+    }
+    // Which order types the giveaway applies to.
+    if key == "giveaway_order_types" && !matches!(value.trim(), "both" | "pickup" | "delivery") {
+        return Err(ServerFnError::new(
+            "giveaway_order_types muss 'both', 'pickup' oder 'delivery' sein.",
+        ));
     }
     if key == "theme" && !ALLOWED_THEMES.contains(&value.trim()) {
         return Err(ServerFnError::new("Thema muss 'warm' oder 'dark' sein."));
@@ -186,13 +218,15 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
             "Hinweistext darf höchstens 200 Zeichen lang sein.",
         ));
     }
-    // orders_paused_until: empty (clear) or a UTC 'YYYY-MM-DD HH:MM:SS'.
-    if key == "orders_paused_until" && !value.trim().is_empty() {
-        if chrono::NaiveDateTime::parse_from_str(value.trim(), "%Y-%m-%d %H:%M:%S").is_err() {
-            return Err(ServerFnError::new(
-                "orders_paused_until muss leer oder ein Zeitstempel 'YYYY-MM-DD HH:MM:SS' (UTC) sein.",
-            ));
-        }
+    // orders_paused_until / force_open_until: empty (clear) or a UTC
+    // 'YYYY-MM-DD HH:MM:SS' timestamp.
+    if matches!(key.as_str(), "orders_paused_until" | "force_open_until")
+        && !value.trim().is_empty()
+        && chrono::NaiveDateTime::parse_from_str(value.trim(), "%Y-%m-%d %H:%M:%S").is_err()
+    {
+        return Err(ServerFnError::new(
+            "Zeitstempel muss leer oder im Format 'YYYY-MM-DD HH:MM:SS' (UTC) sein.",
+        ));
     }
     if key == "stripe_mode" {
         // Only the two literal values are accepted. Refuse 'live'
@@ -254,6 +288,9 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
         if let Some(h) = use_context::<crate::branding::BrandingHandle>() {
             h.apply_kv(&key, value.trim());
         }
+        // Branding feeds the Restaurant JSON-LD (name/phone/email/address/geo)
+        // — rebuild the cache so structured data reflects the edit.
+        crate::pages::seo::rebuild_jsonld_cache().await;
     }
     // Stripe mode flip is write-through too: the next checkout (and
     // the next webhook validation via the Active legacy route) sees
@@ -317,6 +354,73 @@ pub mod ssr {
             .unwrap_or(0)
     }
 
+    /// Resolved giveaway (free-Pizzabrötchen) configuration, read from the
+    /// three `giveaway_*` app_settings rows. The single source of truth for
+    /// "does this order qualify" — used by both the cart (to gate the offer
+    /// button + nudge) and place_order (to enforce server-side). Defaults are
+    /// the migration defaults: disabled, 20 € threshold, both order types, so
+    /// a DB missing the rows behaves as "off".
+    #[derive(Debug, Clone, Copy)]
+    pub struct GiveawayConfig {
+        pub enabled: bool,
+        pub min_order_cents: i64,
+        /// 'both' | 'pickup' | 'delivery' — which order types qualify.
+        pub order_types: GiveawayOrderTypes,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum GiveawayOrderTypes {
+        Both,
+        Pickup,
+        Delivery,
+    }
+
+    impl GiveawayOrderTypes {
+        fn parse(s: &str) -> Self {
+            match s.trim() {
+                "pickup" => Self::Pickup,
+                "delivery" => Self::Delivery,
+                _ => Self::Both,
+            }
+        }
+        /// Does this setting allow the given order type? `is_delivery` is the
+        /// order's type (true = delivery, false = pickup).
+        pub fn allows(&self, is_delivery: bool) -> bool {
+            match self {
+                Self::Both => true,
+                Self::Pickup => !is_delivery,
+                Self::Delivery => is_delivery,
+            }
+        }
+    }
+
+    pub async fn giveaway_config(db: &SqlitePool) -> GiveawayConfig {
+        let enabled = {
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT value FROM app_settings WHERE key = 'giveaway_enabled'")
+                    .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten();
+            matches!(row.as_ref().map(|(v,)| v.as_str()), Some("1" | "true"))
+        };
+        let min_order_cents = get_int(db, "giveaway_min_order_cents").await.unwrap_or(0);
+        let order_types = {
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT value FROM app_settings WHERE key = 'giveaway_order_types'")
+                    .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten();
+            GiveawayOrderTypes::parse(row.as_ref().map(|(v,)| v.as_str()).unwrap_or("both"))
+        };
+        GiveawayConfig {
+            enabled,
+            min_order_cents,
+            order_types,
+        }
+    }
+
     /// Boot-time theme read. Defaults to `"warm"` when the row is missing
     /// (fresh DBs without the theme migration applied) or when the value
     /// is anything other than the two allowed names.
@@ -372,14 +476,15 @@ pub mod ssr {
         row.map(|(v,)| v.trim().to_string()).unwrap_or_default()
     }
 
-    /// Active timed-snooze deadline, parsed from `orders_paused_until`
-    /// (stored as a UTC `'YYYY-MM-DD HH:MM:SS'` string). Returns `None`
-    /// when unset, unparseable, or already in the past — so an expired
-    /// snooze simply stops blocking with no cleanup needed.
-    pub async fn orders_paused_until(db: &SqlitePool) -> Option<chrono::DateTime<chrono::Utc>> {
+    /// Parse a setting holding a UTC `'YYYY-MM-DD HH:MM:SS'` deadline,
+    /// returning it only if it's still in the future. Unset / unparseable
+    /// / past all yield `None` — so expired deadlines stop applying with
+    /// no cleanup needed. Shared by the snooze + force-open settings.
+    async fn future_deadline(db: &SqlitePool, key: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         use chrono::{NaiveDateTime, TimeZone, Utc};
         let row: Option<(String,)> =
-            sqlx::query_as("SELECT value FROM app_settings WHERE key = 'orders_paused_until'")
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = ?1")
+                .bind(key)
                 .fetch_optional(db)
                 .await
                 .ok()
@@ -391,6 +496,19 @@ pub mod ssr {
         let dt = NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S").ok()?;
         let until = Utc.from_utc_datetime(&dt);
         (until > Utc::now()).then_some(until)
+    }
+
+    /// Active timed-snooze deadline (`orders_paused_until`).
+    pub async fn orders_paused_until(db: &SqlitePool) -> Option<chrono::DateTime<chrono::Utc>> {
+        future_deadline(db, "orders_paused_until").await
+    }
+
+    /// Active ad-hoc force-open deadline (`force_open_until`). While this
+    /// is in the future, ordering is open regardless of the weekly
+    /// schedule (the "Jetzt öffnen on a Ruhetag" override). `today_slots`
+    /// reads this; the manual pause/snooze still beats it.
+    pub async fn force_open_until(db: &SqlitePool) -> Option<chrono::DateTime<chrono::Utc>> {
+        future_deadline(db, "force_open_until").await
     }
 
     /// The single source of truth for "are online orders paused right

@@ -139,6 +139,12 @@ pub struct CartLine {
     #[serde(default)]
     pub selected_options: Vec<CartSelectedOption>,
     pub line_total_cents: i64,
+    /// `true` when this line is the free giveaway (Gratis-Pizzabrötchen):
+    /// priced at 0 and added only because the order qualified. Lets the UI
+    /// badge it "Gratis" and the kitchen ticket flag it, without inferring
+    /// "free" from a 0 price. Server-enforced at `place_order`.
+    #[serde(default)]
+    pub is_giveaway: bool,
 }
 
 /// One picked extra on a cart/order line. Snapshotted with label + price so
@@ -211,6 +217,105 @@ pub struct CartView {
     /// check via CheckoutContext.
     #[serde(default)]
     pub orders_closed: bool,
+    /// Giveaway (free-Pizzabrötchen) offer state for THIS cart, resolved
+    /// server-side from the `giveaway_*` settings + the current subtotal and
+    /// (when known) order type. Drives the cart's "noch X € bis zum gratis
+    /// Pizzabrötchen" nudge and the "Jetzt sichern" offer button. None when
+    /// the promo is disabled or the order type doesn't qualify.
+    #[serde(default)]
+    pub giveaway: Option<GiveawayOffer>,
+}
+
+/// The cart-facing view of the giveaway promo. Computed in `load_cart`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GiveawayOffer {
+    /// Qualifying subtotal threshold in cents (0 = every order).
+    pub min_order_cents: i64,
+    /// `true` once the paid subtotal (excluding the giveaway line itself)
+    /// reaches the threshold — the customer may claim the free item.
+    pub qualifies: bool,
+    /// `true` when a giveaway line is already in the cart, so the UI shows
+    /// "claimed" instead of the "Jetzt sichern" offer.
+    pub claimed: bool,
+    /// The menu item id of the free item (the Pizzabrötchen) so the cart can
+    /// dispatch the existing add-to-cart action for the offer button.
+    pub item_id: String,
+}
+
+/// A live event pushed to a customer's open `/orders/{id}` page over the
+/// SSE channel. Keyed by `order_id` so the server can fan it out only to
+/// the browser(s) watching that order. Serialized as JSON on the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LiveEvent {
+    pub order_id: String,
+    pub kind: LiveKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "t", content = "v")]
+pub enum LiveKind {
+    /// A new restaurant→customer message (appended to the order's log).
+    Message(OrderMessage),
+    /// Order status changed (e.g. "preparing", "out_for_delivery").
+    Status(String),
+    /// A message was delivered (rendered) in a customer browser — flips
+    /// the admin's view of that message to "✓ Zugestellt". Order-keyed.
+    MessageAck { message_id: i64 },
+    /// Global shop open/closed state changed (pause/snooze/force-open or
+    /// a snooze expiring). Broadcast to all clients via `/api/live/shop`;
+    /// `order_id` is empty/ignored for these. `level` drives the banner
+    /// colour (green/amber/red); `reason` is the German caption.
+    ShopStatus { level: ShopLevel, reason: String },
+}
+
+/// Three-level shop status, driving the colour of the customer banner and
+/// the admin chip. Distinct from the binary order-gate (which only cares
+/// about Open vs not-Open): a *temporary* closure that resolves on its own
+/// (opens later today, or a timed/manual pause) is amber, not red — red is
+/// reserved for a hard close with nothing more today (Ruhetag / past the
+/// last window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ShopLevel {
+    /// Taking orders right now — green.
+    #[default]
+    Open,
+    /// Closed at this moment but it resolves itself: opens later today, or
+    /// a snooze/manual pause is in effect — amber.
+    OpensLater,
+    /// Hard closed with nothing more today (Ruhetag, or after the last
+    /// window) — red.
+    Closed,
+}
+
+impl ShopLevel {
+    /// True when ordering is blocked (anything other than `Open`). Lets the
+    /// order gate keep its simple boolean view.
+    pub fn is_closed(self) -> bool {
+        !matches!(self, ShopLevel::Open)
+    }
+    /// CSS modifier class for the banner / chip.
+    pub fn css_class(self) -> &'static str {
+        match self {
+            ShopLevel::Open => "open",
+            ShopLevel::OpensLater => "opens-soon",
+            ShopLevel::Closed => "closed",
+        }
+    }
+}
+
+/// One restaurant→customer message with its server-side timestamp.
+/// `created_at` is a display-ready local string ("HH:MM" / "DD.MM. HH:MM").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrderMessage {
+    /// `order_messages.id` — used by the customer page to ack delivery.
+    #[serde(default)]
+    pub id: i64,
+    pub body: String,
+    pub created_at: String,
+    /// Delivered (rendered in a browser) yet? Drives the admin "✓
+    /// Zugestellt" vs "gesendet" indicator.
+    #[serde(default)]
+    pub delivered: bool,
 }
 
 /// Format a cent amount as a German euro string: 1234 -> "12,34 €".
@@ -218,4 +323,71 @@ pub fn format_eur(cents: i64) -> String {
     let euros = cents / 100;
     let rest = (cents % 100).abs();
     format!("{euros},{rest:02} €")
+}
+
+/// URL slug for SEO pages (category + delivery-area URLs). German-aware:
+/// transliterates umlauts/ß to their ASCII digraphs FIRST (ü→ue, ö→oe,
+/// ä→ae, ß→ss), so "Lüdinghausen" → "luedinghausen" rather than dropping
+/// the umlaut. Then lowercases, keeps ASCII alphanumerics, and collapses
+/// every other run into a single dash (no leading/trailing dash). Empty
+/// input (or all-punctuation) yields "" — callers treat that as "no slug".
+pub fn seo_slug(s: &str) -> String {
+    // 1) Transliterate German specials into ASCII digraphs.
+    let mut translit = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        match c {
+            'ä' => translit.push_str("ae"),
+            'ö' => translit.push_str("oe"),
+            'ü' => translit.push_str("ue"),
+            'Ä' => translit.push_str("Ae"),
+            'Ö' => translit.push_str("Oe"),
+            'Ü' => translit.push_str("Ue"),
+            'ß' => translit.push_str("ss"),
+            other => translit.push(other),
+        }
+    }
+    // 2) Lowercase ASCII alphanumerics; collapse the rest into single dashes.
+    let mut out = String::with_capacity(translit.len());
+    let mut prev_dash = false;
+    for c in translit.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seo_slug;
+
+    #[test]
+    fn slug_transliterates_german() {
+        assert_eq!(seo_slug("Lüdinghausen"), "luedinghausen");
+        assert_eq!(seo_slug("Münster"), "muenster");
+        assert_eq!(seo_slug("Straße"), "strasse");
+        assert_eq!(seo_slug("Größer"), "groesser");
+    }
+
+    #[test]
+    fn slug_basics() {
+        assert_eq!(seo_slug("Pizza"), "pizza");
+        assert_eq!(seo_slug("Pizza & Pasta"), "pizza-pasta");
+        assert_eq!(seo_slug("  Seppenrade  "), "seppenrade");
+        assert_eq!(seo_slug("Antipasti / Salate"), "antipasti-salate");
+    }
+
+    #[test]
+    fn slug_empty_and_punctuation() {
+        assert_eq!(seo_slug(""), "");
+        assert_eq!(seo_slug("---"), "");
+        assert_eq!(seo_slug("&&&"), "");
+    }
 }

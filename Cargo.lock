@@ -4416,6 +4416,7 @@ dependencies = [
  "ecow",
  "futures",
  "http 1.4.0",
+ "image",
  "kitchen-protocol",
  "leptos",
  "leptos_axum",
@@ -4431,6 +4432,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tower",
  "tower-cookies",
@@ -5737,6 +5739,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

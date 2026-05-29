@@ -116,6 +116,8 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
     let is_i18n_toggle = key == "i18n_enabled";
     let is_category_overlay = key == "menu_category_overlay";
     let is_orders_paused = key == "orders_paused";
+    let is_giveaway_enabled = key == "giveaway_enabled";
+    let is_giveaway_order_types = key == "giveaway_order_types";
     let preview_eur = Memo::new(move |_| {
         value
             .get()
@@ -180,6 +182,27 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
                 on:change=move |ev| value.set(event_target_value(&ev))>
                 <option value="0">"Aus — Online-Bestellungen normal (nach Öffnungszeiten)"</option>
                 <option value="1">"An — KEINE Online-Bestellungen (Shop pausiert)"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_giveaway_enabled {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="0">"Aus — keine Gratis-Beigabe"</option>
+                <option value="1">"An — gratis Pizzabrötchen als Beigabe"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_giveaway_order_types {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="both">"Abholung + Lieferung"</option>
+                <option value="pickup">"Nur Abholung"</option>
+                <option value="delivery">"Nur Lieferung"</option>
             </select>
         }
         .into_any()

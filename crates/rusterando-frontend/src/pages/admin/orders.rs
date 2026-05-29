@@ -237,6 +237,15 @@ pub async fn update_order_status(id: String, status: String) -> Result<(), Serve
         .await
         .map_err(|e| ServerFnError::new(format!("update status: {e}")))?;
 
+    // Push the new status live (pill flip) + log it to the message list.
+    if let Some(hub) = use_context::<crate::live::LiveHub>() {
+        hub.send(rusterando_shared::models::LiveEvent {
+            order_id: id.clone(),
+            kind: rusterando_shared::models::LiveKind::Status(status.clone()),
+        });
+    }
+    crate::pages::order::ssr::log_status_change(&db, &id, &status).await;
+
     Ok(())
 }
 
@@ -507,6 +516,7 @@ fn DetailCard(
         order_type,
         delivery_fee_cents,
         delivery_address,
+        messages,
     } = o;
 
     let status_label = status_label_de(&status).to_string();
@@ -531,6 +541,27 @@ fn DetailCard(
     let id_advance = id.clone();
     let id_cancel = id.clone();
     let id_received = id.clone();
+
+    // Personal messages to the customer (append-only log, live via SSE +
+    // persisted). The textarea always adds a NEW message; existing ones
+    // show above it with per-message delivery state ("✓ Zugestellt" once
+    // the customer's browser acks, else "gesendet"). The admin subscribes
+    // to the SAME order stream (ack_on_receive=false) so new sends appear
+    // AND acks flip live.
+    let messenger = ServerAction::<crate::pages::order::SetOrderMessage>::new();
+    let msg_text = RwSignal::new(String::new());
+    let msg_history = RwSignal::new(messages.clone());
+    let (_admin_status, set_admin_status) = signal(None::<String>);
+    // Admin side: no customer notifications (notify=false).
+    crate::utils::subscribe_order_live(id.clone(), msg_history, set_admin_status, false, false);
+    let id_msg = id.clone();
+    let on_send_message = move |_| {
+        messenger.dispatch(crate::pages::order::SetOrderMessage {
+            order_id: id_msg.clone(),
+            message: msg_text.get(),
+        });
+        msg_text.set(String::new());
+    };
 
     let on_advance = move |_| {
         if let Some((next_status, _)) = next {
@@ -702,6 +733,39 @@ fn DetailCard(
             <button class="btn ghost" on:click=on_back_to_received>"Status zurücksetzen"</button>
             <button class="btn ghost danger" on:click=on_cancel>"Stornieren"</button>
         </footer>
+
+        <div class="customer-message no-print">
+            <h3>"Nachrichten an Kund:in"</h3>
+            {move || {
+                let msgs = msg_history.get();
+                (!msgs.is_empty()).then(|| view! {
+                    <ul class="message-log">
+                        {msgs.into_iter().map(|m| {
+                            let ack = if m.delivered { "✓ Zugestellt" } else { "gesendet" };
+                            let ack_cls = if m.delivered { "ack delivered" } else { "ack pending" };
+                            view! {
+                                <li>
+                                    <span class="ts">"🕒 " {m.created_at} " — "</span>
+                                    {m.body}
+                                    <span class=ack_cls>" · " {ack}</span>
+                                </li>
+                            }
+                        }).collect_view()}
+                    </ul>
+                })
+            }}
+            <p class="hint">"Erscheint sofort live auf der Bestellseite der Kund:in (und bleibt nach dem Neuladen). \"✓ Zugestellt\" = im Browser der Kund:in angezeigt."</p>
+            <textarea rows="2" maxlength="500" placeholder="z. B. Deine Bestellung braucht 10 Min länger — danke für die Geduld!"
+                prop:value=move || msg_text.get()
+                on:input=move |ev| msg_text.set(event_target_value(&ev))></textarea>
+            <div class="row">
+                <button class="btn primary" on:click=on_send_message>"Nachricht senden"</button>
+                {move || messenger.value().get().map(|res| match res {
+                    Ok(_) => view! { <span class="ok">"✓ Gespeichert"</span> }.into_any(),
+                    Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),
+                })}
+            </div>
+        </div>
     }
 }
 

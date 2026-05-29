@@ -23,7 +23,7 @@ from playwright.sync_api import expect
 
 def test_admin_top_nav_clickable_on_cold_load(admin_page):
     """First click after cold /admin load must navigate. No workaround."""
-    admin_page.goto("/admin", wait_until="networkidle")
+    admin_page.goto("/admin", wait_until="domcontentloaded")
 
     # Wait until the shell is interactive. Brand text resolves via a
     # server fn — once it's there, hydration of that subtree has run
@@ -46,7 +46,7 @@ def test_admin_top_nav_clickable_on_cold_load(admin_page):
 def test_admin_pdf_nav_clickable_on_cold_load(admin_page):
     """Same shape, different link — guards against partial-hydration
     bugs where only the *first* nav link works."""
-    admin_page.goto("/admin", wait_until="networkidle")
+    admin_page.goto("/admin", wait_until="domcontentloaded")
     expect(admin_page.locator(".admin-shell-bar")).to_be_visible(timeout=10_000)
 
     admin_page.locator(".admin-nav a[href='/admin/pdf']").click()

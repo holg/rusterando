@@ -27,7 +27,8 @@ use crate::pages::home::Home;
 use crate::pages::kitchen::board::KitchenBoardPage;
 use crate::pages::kitchen::login::KitchenLoginPage;
 use crate::pages::legal::{DatenschutzPage, ImpressumPage};
-use crate::pages::menu::MenuPage;
+use crate::pages::menu::{MenuCategoryPage, MenuPage};
+use crate::pages::lieferservice::DeliveryAreaPage;
 use crate::pages::order::{CheckoutPage, OrderConfirmationPage};
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -61,13 +62,21 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     // be coordinated with the SSR stream markers. A plain inline
     // global is hydrate-safe by construction — same string on SSR
     // and hydrate, no async boundary.
-    let (bootstrap_script, page_title) = {
+    let (bootstrap_script, page_title, jsonld, gsv) = {
         #[cfg(feature = "ssr")]
         {
-            let name = use_context::<crate::branding::BrandingHandle>()
-                .map(|h| h.get().display_name())
+            let branding = use_context::<crate::branding::BrandingHandle>().map(|h| h.get());
+            let name = branding
+                .as_ref()
+                .map(|b| b.display_name())
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "Mein Restaurant".to_string());
+            // Optional Google Search Console verification token (per-shop,
+            // confidential, lives only in that shop's DB). Empty → no tag.
+            let gsv = branding
+                .as_ref()
+                .map(|b| b.shop_google_site_verification.trim().to_string())
+                .unwrap_or_default();
             let i18n_on = use_context::<crate::pages::settings::I18nHandle>()
                 .map(|h| h.get())
                 .unwrap_or(false);
@@ -81,11 +90,23 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             let js = format!(
                 "window.__appBootstrap = {{ shop_name: {name_json}, i18n_enabled: {i18n_on}, stripe_sandbox: {stripe_sandbox} }};"
             );
-            (Some(js), name)
+            // Cached Restaurant JSON-LD (built at boot, rebuilt on edits).
+            // Read here SYNCHRONOUSLY and baked into <head> below — the shell
+            // runs SSR-only and <head> is outside the hydrate walk, so this is
+            // the hydration-safe place for it (a body component is not).
+            let ld = use_context::<crate::pages::seo::JsonLdHandle>()
+                .map(|h| h.get().to_string())
+                .unwrap_or_default();
+            (Some(js), name, ld, gsv)
         }
         #[cfg(not(feature = "ssr"))]
         {
-            (None::<String>, String::from("Mein Restaurant"))
+            (
+                None::<String>,
+                String::from("Mein Restaurant"),
+                String::new(),
+                String::new(),
+            )
         }
     };
 
@@ -117,6 +138,20 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 // effect but has an empty body-render that confuses
                 // the hydrate walker into expecting a `()` marker).
                 <title>{page_title}</title>
+                // Optional Google Search Console verification tag. Rendered
+                // only when the shop set a token (shop_google_site_verification
+                // in app_settings); empty → nothing. In <head>, SSR-only —
+                // hydration-safe (outside the body walk).
+                {(!gsv.is_empty()).then(|| view! {
+                    <meta name="google-site-verification" content=gsv.clone()/>
+                })}
+                // Restaurant JSON-LD (cached, SSR-built). Baked into <head>
+                // here for the same reason as <title>: the shell runs SSR-only
+                // and <head> is outside the hydrate walk, so the structured
+                // data reaches crawlers with zero hydrate/body footprint and
+                // never re-runs on client navigation. Empty content on the
+                // (unused) hydrate path keeps the tag shape constant.
+                <script type="application/ld+json">{jsonld}</script>
                 // Bootstrap blob lives in <head> instead of <body> so
                 // it sits OUTSIDE the subtree tachys's hydrate walker
                 // traverses (the walker starts at <body>'s first
@@ -259,6 +294,9 @@ pub fn App() -> impl IntoView {
                 <Routes fallback=|| crate::t!("errors.page_not_found")>
                     <Route path=StaticSegment("") view=Home/>
                     <Route path=StaticSegment("menu") view=MenuPage/>
+                    // SEO depth pages (must come after the static /menu route).
+                    <Route path=(StaticSegment("menu"), ParamSegment("category_slug")) view=MenuCategoryPage/>
+                    <Route path=(StaticSegment("lieferservice"), ParamSegment("area_slug")) view=DeliveryAreaPage/>
                     <Route path=StaticSegment("checkout") view=CheckoutPage/>
                     <Route path=(StaticSegment("orders"), ParamSegment("id")) view=OrderConfirmationPage/>
                     <Route path=StaticSegment("admin") view=AdminHomePage/>

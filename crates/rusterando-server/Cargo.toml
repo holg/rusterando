@@ -32,6 +32,7 @@ rusterando-frontend = { workspace = true, features = ["ssr"] }
 kitchen-protocol = { workspace = true }
 postcard = { workspace = true }
 tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 
@@ -61,6 +62,12 @@ apns-h2 = { version = "0.11", default-features = false, features = ["openssl", "
 async-trait = "0.1"
 # Content-hash filename for /api/admin/upload_image so duplicates dedupe.
 sha2 = "0.10"
+# Cover-image normalisation: the Typst template hardcodes
+# `image("/img/cover.jpg")`, so Typst always decodes the active cover as
+# JPEG. Admins may upload PNG, so we transcode PNG→JPEG before handing the
+# bytes to Typst. Pure-Rust jpeg+png codecs only (no C deps) so the
+# aarch64 cross-build stays clean.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

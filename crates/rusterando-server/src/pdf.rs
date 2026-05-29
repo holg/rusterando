@@ -21,11 +21,17 @@ use typst::{Library, LibraryExt, World};
 // Embedded template
 // ---------------------------------------------------------------------------
 
-/// Factory-default template. Used when the admin hasn't supplied an
-/// override via app_settings.pdf_template_source. Kept as the safety
-/// net for the "Reset auf Werks-Template" button.
+/// Factory-default STYLING theme (palette + render fns, no page geometry).
+/// Used when the admin hasn't supplied an override via the pdf_themes
+/// library. Kept as the safety net for "Reset auf Werks-Template".
 pub const TEMPLATE_SRC: &str = include_str!("../../../templates/menu.typ");
-const TEMPLATE_VPATH: &str = "/menu.typ";
+/// The theme is imported by the geometry layer as `/theme.typ`.
+const THEME_VPATH: &str = "/theme.typ";
+
+/// Geometry layer — the Typst MAIN source. Owns page size + fold layout per
+/// `?format=`, imports the styling theme (`/theme.typ`). Not user-editable.
+const GEOMETRY_SRC: &str = include_str!("../../../templates/geometry.typ");
+const GEOMETRY_VPATH: &str = "/geometry.typ";
 
 // Image assets the template can `image("/img/...")` for. Bytes are embedded
 // at compile time so the running binary needs no filesystem access.
@@ -182,8 +188,14 @@ fn resources() -> &'static PdfResources {
 
 struct MenuWorld {
     library: LazyHash<Library>,
+    /// Main source = the geometry layer (`/geometry.typ`).
     main_id: FileId,
     main_source: Source,
+    /// The styling theme (`/theme.typ`), imported by the geometry layer.
+    /// Either the admin's active `pdf_themes.source` override or the bundled
+    /// `TEMPLATE_SRC`.
+    theme_id: FileId,
+    theme_source: Source,
     /// SVG bytes for the QR code that points at `payload.site_url`. Generated
     /// once per request — Typst caches the resulting `Image`.
     qr_svg: Vec<u8>,
@@ -197,20 +209,41 @@ struct MenuWorld {
 }
 
 impl MenuWorld {
-    fn new(payload: &MenuPdfPayload, overrides: &PdfOverrides) -> anyhow::Result<Self> {
+    fn new(
+        payload: &MenuPdfPayload,
+        overrides: &PdfOverrides,
+        format: &str,
+        show_ingredients: bool,
+    ) -> anyhow::Result<Self> {
         let json = serde_json::to_string(payload)?;
         let mut inputs = Dict::new();
         inputs.insert("data".into(), typst::foundations::Value::Str(json.into()));
+        // `format` selects the page geometry / fold layout in the template.
+        inputs.insert(
+            "format".into(),
+            typst::foundations::Value::Str(format.into()),
+        );
+        // `show-ingredients` toggles the per-item description line. Default
+        // (true) is the full hand-out menu; `?condensed=1` flips it off for
+        // the airy title+price-only in-house menu.
+        inputs.insert(
+            "show-ingredients".into(),
+            typst::foundations::Value::Bool(show_ingredients),
+        );
         let library = Library::builder().with_inputs(inputs).build();
 
-        let template_source = overrides
+        // Main = the geometry layer (page setup + fold layout per format).
+        let main_id = FileId::new(None, VirtualPath::new(GEOMETRY_VPATH));
+        let main_source = Source::new(main_id, GEOMETRY_SRC.to_string());
+
+        // Theme = admin override (pdf_themes.source) or the bundled default.
+        let theme_str = overrides
             .template_source
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(TEMPLATE_SRC);
-
-        let main_id = FileId::new(None, VirtualPath::new(TEMPLATE_VPATH));
-        let main_source = Source::new(main_id, template_source.to_string());
+        let theme_id = FileId::new(None, VirtualPath::new(THEME_VPATH));
+        let theme_source = Source::new(theme_id, theme_str.to_string());
 
         let qr_svg = render_qr_svg(&payload.site_url);
 
@@ -218,6 +251,8 @@ impl MenuWorld {
             library: LazyHash::new(library),
             main_id,
             main_source,
+            theme_id,
+            theme_source,
             qr_svg,
             cover_override: overrides.cover_image.clone(),
             ad_cover: overrides.ad_cover_image.clone(),
@@ -273,6 +308,9 @@ impl World for MenuWorld {
     fn source(&self, id: FileId) -> FileResult<Source> {
         if id == self.main_id {
             Ok(self.main_source.clone())
+        } else if id == self.theme_id {
+            // The geometry layer `#import "/theme.typ"` resolves here.
+            Ok(self.theme_source.clone())
         } else {
             Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
         }
@@ -281,15 +319,19 @@ impl World for MenuWorld {
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         let path = id.vpath().as_rooted_path();
         match path.to_str() {
-            Some(p) if p == ASSET_LADENFRONT_VPATH => {
-                // Admin override beats the bundled factory image.
+            // `ladenfront.jpg` is the in-body shop-front photo — always the
+            // bundled asset (the admin cover library does NOT drive this).
+            Some(p) if p == ASSET_LADENFRONT_VPATH => Ok(Bytes::new(ASSET_LADENFRONT.to_vec())),
+            // `cover.jpg` is the PDF FRONT PAGE — this is what the admin
+            // "Cover-Bibliothek" controls. Apply the active cover override
+            // here; fall back to the bundled cover when none is active.
+            Some(p) if p == ASSET_COVER_VPATH => {
                 let bytes = self
                     .cover_override
                     .clone()
-                    .unwrap_or_else(|| ASSET_LADENFRONT.to_vec());
+                    .unwrap_or_else(|| ASSET_COVER.to_vec());
                 Ok(Bytes::new(bytes))
             }
-            Some(p) if p == ASSET_COVER_VPATH => Ok(Bytes::new(ASSET_COVER.to_vec())),
             Some(p) if p == ASSET_AD_COVER_VPATH => Ok(Bytes::new(
                 self.ad_cover.clone().unwrap_or_else(|| BLANK_PNG.to_vec()),
             )),
@@ -323,8 +365,10 @@ impl World for MenuWorld {
 pub fn render_menu_pdf(
     payload: &MenuPdfPayload,
     overrides: &PdfOverrides,
+    format: &str,
+    show_ingredients: bool,
 ) -> anyhow::Result<Vec<u8>> {
-    let world = MenuWorld::new(payload, overrides)?;
+    let world = MenuWorld::new(payload, overrides, format, show_ingredients)?;
     tracing::debug!(
         "pdf: compiling, fonts={}, categories={}, items={}",
         resources().fonts.len(),
@@ -584,12 +628,17 @@ async fn read_setting_lines(db: &SqlitePool, key: &str) -> Option<Vec<String>> {
 /// The ad-slot images (cover/center/back) are independent — they
 /// still read directly from their single-value `pdf_ad_*_image`
 /// settings. They're overlays, not the main cover.
-pub async fn load_pdf_overrides(db: &SqlitePool) -> PdfOverrides {
+/// `uploads_dir` is the on-disk base for admin uploads,
+/// `<site_root>/img/uploads` (e.g. `html/img/uploads` on prod). Cover
+/// files live in its `covers/` subdir; ad-slot images live directly under
+/// it. Passed in (rather than hardcoded) so the path always matches
+/// whatever directory the static server serves `/img/uploads/` from.
+pub async fn load_pdf_overrides(db: &SqlitePool, uploads_dir: &str) -> PdfOverrides {
     let template_source = read_active_theme_source(db).await;
-    let cover_image = read_active_cover_bytes(db).await;
-    let ad_cover_image = read_image_setting(db, "pdf_ad_cover_image").await;
-    let ad_center_image = read_image_setting(db, "pdf_ad_center_image").await;
-    let ad_back_image = read_image_setting(db, "pdf_ad_back_image").await;
+    let cover_image = read_active_cover_bytes(db, uploads_dir).await;
+    let ad_cover_image = read_image_setting(db, "pdf_ad_cover_image", uploads_dir).await;
+    let ad_center_image = read_image_setting(db, "pdf_ad_center_image", uploads_dir).await;
+    let ad_back_image = read_image_setting(db, "pdf_ad_back_image", uploads_dir).await;
     PdfOverrides {
         template_source,
         cover_image,
@@ -618,13 +667,13 @@ async fn read_active_theme_source(db: &SqlitePool) -> Option<String> {
 }
 
 /// Resolve `pdf_cover_active_id` → `pdf_cover_images.filename` →
-/// bytes under `data/uploads/covers/<filename>`. Falls back to
-/// `data/uploads/<filename>` so rows imported from the legacy
+/// bytes under `<uploads_dir>/covers/<filename>`. Falls back to
+/// `<uploads_dir>/<filename>` so rows imported from the legacy
 /// `pdf_cover_image` setting (where files lived in the parent
 /// dir, not the `covers/` subdir) still resolve. Returns `None`
 /// for any failure — the renderer then uses the bundled
-/// `ASSET_LADENFRONT`.
-async fn read_active_cover_bytes(db: &SqlitePool) -> Option<Vec<u8>> {
+/// `ASSET_COVER`.
+async fn read_active_cover_bytes(db: &SqlitePool, uploads_dir: &str) -> Option<Vec<u8>> {
     let id: i64 = read_setting(db, "pdf_cover_active_id")
         .await?
         .trim()
@@ -643,20 +692,53 @@ async fn read_active_cover_bytes(db: &SqlitePool) -> Option<Vec<u8>> {
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return None;
     }
-    let primary = std::path::Path::new("data/uploads/covers").join(&filename);
-    if let Ok(bytes) = std::fs::read(&primary) {
-        return Some(bytes);
+    let base = std::path::Path::new(uploads_dir);
+    let primary = base.join("covers").join(&filename);
+    let raw = std::fs::read(&primary).ok().or_else(|| {
+        // Legacy: rows imported from the old single-value pdf_cover_image
+        // setting reference files that live under the uploads root directly.
+        std::fs::read(base.join(&filename)).ok()
+    })?;
+    Some(normalise_cover_to_jpeg(raw))
+}
+
+/// The Typst template fetches the cover via `image("/img/cover.jpg")`, so
+/// Typst infers the JPEG decoder from the `.jpg` extension regardless of
+/// what bytes `MenuWorld::file` returns. Admins may upload PNG (the upload
+/// route accepts both), which would feed PNG bytes into the JPEG decoder
+/// and fail the whole render with "Illegal start bytes:8950" (the PNG
+/// signature). So: if the bytes aren't already JPEG, transcode to JPEG.
+/// Already-JPEG bytes pass through untouched (no lossy re-encode). On any
+/// decode/encode failure we return the original bytes — the renderer logs
+/// a clear Typst error rather than this swallowing it silently.
+fn normalise_cover_to_jpeg(bytes: Vec<u8>) -> Vec<u8> {
+    // JPEG SOI marker — already the right format, pass through.
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return bytes;
     }
-    // Legacy: rows imported from the old single-value pdf_cover_image
-    // setting reference files that live under data/uploads/ directly.
-    let legacy = std::path::Path::new("data/uploads").join(&filename);
-    std::fs::read(&legacy).ok()
+    use image::ImageFormat;
+    use std::io::Cursor;
+    let Ok(img) = image::load_from_memory(&bytes) else {
+        return bytes;
+    };
+    // PNG may carry alpha; flatten to RGB8 so the JPEG encoder (no alpha)
+    // doesn't choke. White-background flatten matches how the cover sits
+    // on the printed page.
+    let rgb = img.to_rgb8();
+    let mut out = Cursor::new(Vec::new());
+    if image::DynamicImage::ImageRgb8(rgb)
+        .write_to(&mut out, ImageFormat::Jpeg)
+        .is_err()
+    {
+        return bytes;
+    }
+    out.into_inner()
 }
 
 /// Resolve a `/img/uploads/<hash>.<ext>` setting to its on-disk bytes.
 /// `None` if the setting is empty, the path is malformed, or the file
 /// has been deleted from the uploads directory.
-async fn read_image_setting(db: &SqlitePool, key: &str) -> Option<Vec<u8>> {
+async fn read_image_setting(db: &SqlitePool, key: &str, uploads_dir: &str) -> Option<Vec<u8>> {
     let value = read_setting(db, key).await?;
     let trimmed = value.trim().trim_start_matches('/');
     // Only honour our own uploads directory. Anything else is rejected
@@ -665,20 +747,32 @@ async fn read_image_setting(db: &SqlitePool, key: &str) -> Option<Vec<u8>> {
     if rel.contains('/') || rel.contains('\\') {
         return None;
     }
-    let path = std::path::Path::new("data/uploads").join(rel);
+    let path = std::path::Path::new(uploads_dir).join(rel);
     std::fs::read(&path).ok()
 }
 
 /// Convenience: load + render in one go. Compile runs on a blocking pool so
 /// the async runtime stays responsive during the ~hundreds-of-ms render.
+/// `format` selects the page geometry / fold layout the Typst template
+/// renders: `"trifold"` (default — the 443×210 three-panel sheet) or
+/// `"a5-zickzack"` (DIN-A5 portrait, 6-panel accordion, 888×210 + 3 mm bleed
+/// + fold marks for the 4c print job). Unknown values fall back to trifold in
+/// the caller.
 pub async fn build_menu_pdf(
     db: &SqlitePool,
     site_url: String,
     shop_branding: &rusterando_frontend::branding::Branding,
+    uploads_dir: &str,
+    format: &str,
+    show_ingredients: bool,
 ) -> anyhow::Result<Vec<u8>> {
     let payload = load_menu_payload(db, site_url, shop_branding).await?;
-    let overrides = load_pdf_overrides(db).await;
-    tokio::task::spawn_blocking(move || render_menu_pdf(&payload, &overrides)).await?
+    let overrides = load_pdf_overrides(db, uploads_dir).await;
+    let format = format.to_string();
+    tokio::task::spawn_blocking(move || {
+        render_menu_pdf(&payload, &overrides, &format, show_ingredients)
+    })
+    .await?
 }
 
 // ---------------------------------------------------------------------------
@@ -690,8 +784,8 @@ pub async fn build_menu_pdf(
 /// Idempotent. If `pdf_themes` is empty, insert one row with the
 /// bundled `TEMPLATE_SRC` and set it active. If `pdf_cover_images`
 /// is empty AND we can find `public/img/cover.jpg`, copy it into
-/// `data/uploads/covers/cover.jpg` and seed a row + activate it.
-pub async fn seed_pdf_library_if_empty(db: &SqlitePool) -> anyhow::Result<()> {
+/// `<uploads_dir>/covers/cover.jpg` and seed a row + activate it.
+pub async fn seed_pdf_library_if_empty(db: &SqlitePool, uploads_dir: &str) -> anyhow::Result<()> {
     // Theme side.
     let theme_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pdf_themes")
         .fetch_one(db)
@@ -717,8 +811,8 @@ pub async fn seed_pdf_library_if_empty(db: &SqlitePool) -> anyhow::Result<()> {
         // Try the bundled public/img/cover.jpg as the seed image.
         let src_path = std::path::Path::new("public/img/cover.jpg");
         if let Ok(bytes) = std::fs::read(src_path) {
-            let dst_dir = std::path::Path::new("data/uploads/covers");
-            std::fs::create_dir_all(dst_dir).ok();
+            let dst_dir = std::path::Path::new(uploads_dir).join("covers");
+            std::fs::create_dir_all(&dst_dir).ok();
             let dst_path = dst_dir.join("cover.jpg");
             if std::fs::write(&dst_path, &bytes).is_ok() {
                 let row: (i64,) = sqlx::query_as(
@@ -739,7 +833,7 @@ pub async fn seed_pdf_library_if_empty(db: &SqlitePool) -> anyhow::Result<()> {
         }
         // If public/img/cover.jpg isn't present, the library stays
         // empty. The renderer falls back to the compiled-in
-        // ASSET_LADENFRONT (the old shop-photo seed) — no crash.
+        // ASSET_COVER (the bundled cover.jpg bytes) — no crash.
     }
 
     Ok(())

@@ -57,6 +57,9 @@ postcard = { version = "1", features = ["use-std"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 futures = "0.3"
+# SSE: BroadcastStream wraps a tokio broadcast Receiver into a Stream for
+# the /api/live/orders/{id} server-sent-events handler.
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "uuid", "chrono", "migrate"] }

@@ -2,8 +2,11 @@
 
 > **A self-hostable, open-source restaurant + delivery platform written in Rust.**
 > Online menu, cart, checkout (cash + Stripe), kitchen board, driver tour
-> optimisation, push notifications, printable PDF menu, multi-role staff
-> tooling, and an admin UI to edit it all without redeploying.
+> optimisation, push notifications, live order tracking over SSE, an
+> opening-hours / pause / snooze scheduler, vouchers, a customer CRM, a
+> Typst-rendered printable PDF menu with switchable cover + theme
+> libraries, runtime-toggleable 8-locale i18n, multi-role staff tooling,
+> and an admin UI to edit it all without redeploying.
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust](https://img.shields.io/badge/Rust-edition_2021-orange.svg)](https://www.rust-lang.org/)
@@ -42,9 +45,29 @@ could use the same shape.
   copy `.env.demo.example` → `.env.<shop>`, point an nginx vhost at
   the new port, deploy.
 - **Editable in production.** Hero copy, photos, offer cards, the gallery,
-  the delivery zones, the free-delivery threshold, the colour theme —
-  all live in `app_settings` and `home_*` tables. The admin edits them
-  via `/admin/home`, `/admin/branding`, `/admin/settings`. No redeploy.
+  the menu, the extras catalogue, the delivery zones, the free-delivery
+  threshold, the colour theme, the opening hours, the PDF cover + Typst
+  theme, vouchers, the shop's contact/imprint details — all live in
+  `app_settings`, `home_*`, `menu_*`, and the PDF/voucher tables. The
+  admin edits everything from the `/admin/*` pages. No redeploy.
+- **Live order tracking over SSE.** A per-order Server-Sent-Events channel
+  (`/api/live/orders/{id}`) pushes status changes and admin→customer
+  messages to the customer's open tab with no polling; a global
+  `/api/live/shop` channel flips the "we're open / closed" banner on the
+  home and cart pages the instant staff toggle it. Messages carry a
+  delivery ack so the admin sees "✓ Zugestellt" when the customer's
+  browser actually rendered them.
+- **Open / closed on your terms.** A weekly opening-hours editor, dated
+  holiday overrides ("closed 24.12", "open on the Easter Monday"), a
+  manual "close now" switch, a timed **snooze** ("stop taking orders for
+  90 min, auto-reopen"), and an ad-hoc **force-open** (accept past
+  closing today). The checkout enforces all of it server-side and only
+  offers valid pickup slots.
+- **Switchable printed menu.** `/menu.pdf` renders live from the DB via
+  Typst. A **cover-image library** and a **Typst theme library** let the
+  admin upload several covers / templates and flip the active one from
+  `/admin/pdf` — with a test-render endpoint that rejects a broken
+  template before it can poison the live PDF.
 - **Real iOS app.** A native Swift WebView shell (`ios-app/`) wraps the
   site and adds APNs push, persistent staff cookies, a role keychain,
   and a settings sheet. Distributed via TestFlight today; Android +
@@ -53,13 +76,84 @@ could use the same shape.
   One device can hold all three staff passwords in iOS Keychain and
   switch in one tap from the gear FAB.
 - **Order lifecycle covered.** Cart → checkout (cash or Stripe Payment
-  Element) → kitchen board → driver tour (with OpenRouteService route
-  optimisation) → SMTP confirmation email → audit trail in the
-  bookkeeping page (`/admin/history`) with CSV export.
+  Element, with vouchers + a returning-customer recall) → kitchen board →
+  driver tour (with OpenRouteService route optimisation) → SMTP
+  confirmation email → audit trail in the bookkeeping page
+  (`/admin/history`) with CSV export and a Lieferando-savings simulation.
+- **Eight locales, flipped at runtime.** German is the default and needs
+  no URL prefix; English, French, Italian, Spanish, Portuguese, Russian
+  and Simplified Chinese are built in. The `i18n_enabled` toggle in
+  `/admin/settings` turns the language switcher + `/<lang>/*` routes +
+  hreflang sitemap on or off without a rebuild — a single-language shop
+  serves German only and 404s every locale path.
+- **Found by Google.** `/sitemap.xml` (with hreflang alternates when i18n
+  is on) and `/robots.txt` (disallowing `/admin`, `/kitchen`, `/driver`,
+  `/checkout`, `/orders/`) are served straight from the binary.
 
 ## Screenshots
 
 (*Not yet — the davidspizzeria.de live site is the reference.*)
+
+## Features
+
+### Customer-facing
+
+| Route | Page | What it does |
+|---|---|---|
+| `/` | Home | Hero, offer cards, photo gallery, delivery-zone list, public opening-hours table, live "open / closed" banner. Hero + offers + gallery are admin-edited. |
+| `/menu` | Menu | Categorised menu with item cards (price per size, description, allergen + additive codes, spicy badge). Adds to cart with size, extras checkboxes, and required option-groups. Optional sticky category overlay. Download-PDF button. |
+| `/checkout` | Checkout | Cart review, phone/name recall of returning customers, pickup-or-delivery with zone fee + min-order, voucher entry, cash or Stripe Payment Element. Server-validated opening hours offer only real pickup slots; a closed / paused / snoozed shop blocks ordering with a banner (pre-orders still allowed when configured). |
+| `/orders/{id}` | Confirmation + tracking | Order status, QR code, and a **live message feed** over SSE — the customer sees status changes and admin messages without reloading, and their browser sends a delivery ack back. |
+| `/datenschutz`, `/impressum` | Legal | GDPR privacy text and the TMG §5 imprint (address / owner / tax id / bank from the admin contact settings). |
+
+### Kitchen & driver
+
+| Route | Page | What it does |
+|---|---|---|
+| `/kitchen` | Kitchen board | Cook-focused three-column board (eingegangen → in Zubereitung → abholbereit), one-click status advance, no revenue or refund controls. Login at `/kitchen/login`. |
+| `/driver` | Driver board | Delivery-only board: bundle ready orders into a tour, ORS-optimised stop order with ETAs + map deep-links, mark stops delivered, finish or trim a tour. Login at `/driver/login`. |
+
+### Live updates (SSE)
+
+A `tokio::sync::broadcast` hub fans events to two Server-Sent-Events streams
+(`crates/rusterando-frontend/src/live.rs`, served from
+`crates/rusterando-server/src/main.rs`):
+
+- **`/api/live/orders/{id}`** — per-order: `Status` changes, admin→customer
+  `Message`s (logged + persisted in `order_messages`), and `MessageAck`
+  (customer browser confirms render → admin's open order view flips to
+  "✓ Zugestellt").
+- **`/api/live/shop`** — global `ShopStatus { closed, reason }`; the home +
+  cart banners and the admin online/offline chip flip live when staff
+  pause, snooze, force-open, or hit a Ruhetag.
+
+Subscriptions live in post-hydration effects so they never alter the
+SSR/hydrate DOM — the `tests/e2e/` hydration suite guards against the
+mismatch panic that would otherwise cause.
+
+## Admin tooling
+
+Every page below sits under `/admin/*`, is gated by an 8-hour
+`admin_session` cookie (`/admin/login`, password = `ADMIN_PASSWORD`), and
+is reachable from the top nav in `AdminShell`. None of it requires a
+redeploy — it all reads and writes the live DB.
+
+| Route | What you manage |
+|---|---|
+| `/admin` | Dashboard: today's order count + revenue, tiles to every section. |
+| `/admin/orders` · `/admin/orders/{id}` | Order list with status transitions + revenue; per-order detail with the live SSE message box (send a message to the customer, watch the delivery ack). |
+| `/admin/menu` | Categories + items: prices per size, allergens, additives, availability, per-item extras allowance + flat-extra price, and attached option-groups (Dressing, Beilage, …). |
+| `/admin/extras` | Pizza-topping catalogue: label, per-piece price, availability. |
+| `/admin/pricing` | Price-sanity checker — flags extras that undercut named pizzas and suggests corrected prices to protect margins. |
+| `/admin/home` | Public landing page: hero image + copy, two offer cards, gallery photos (uploads via `/api/admin/upload_image`). |
+| `/admin/hours` | Weekly opening hours, dated holiday overrides, the **close-now** switch, **snooze** (timed auto-reopen) and **force-open** (accept past closing today). Flips the live banner via SSE. |
+| `/admin/zones` | Delivery zones: postcode → name, fee, min-order, ETA. Drives checkout city auto-complete, route optimisation, and the home-page "Wir liefern" list. |
+| `/admin/vouchers` | Vouchers: percent / fixed / free-delivery, min-subtotal, first-order-only, per-phone + global caps, validity window, optional bind-to-one-customer. |
+| `/admin/customers` · `/admin/customers/{id}` | Lightweight CRM: order count + lifetime spend per phone, addresses on file, notes, and a blacklist flag that blocks cash orders. |
+| `/admin/pdf` | PDF editor — text fields (tagline, hours, extras), ad-slot images, the **cover-image library** (upload / activate / delete; PNG auto-transcoded to JPEG for Typst), and the **Typst theme library** (create / edit / activate, with a safe test-render). |
+| `/admin/broadcast` | One-shot push to staff roles or all devices; each send is audited in `push_broadcasts`. |
+| `/admin/settings` | Generic `app_settings` editor: free-delivery threshold, colour theme, Stripe sandbox/live mode, `i18n_enabled`, category overlay, contact / imprint details, the order-pause flag, and an optional Google Search Console verification token (`shop_google_site_verification` — empty = no meta tag; when set it's rendered into the homepage `<head>`). |
+| `/admin/history` | Bookkeeping: date-range order list, daily + per-item totals, **CSV export** (`/admin/history.csv`), and the **Lieferando-savings simulation** (14% commission + per-order fees vs. Stripe-only on your own site, net of VAT). |
 
 ## Architecture
 
@@ -172,14 +266,17 @@ First visit creates `./data/rusterando.db` and seeds default rows
 (empty branding, the warm theme, no offers, no menu, no delivery zones).
 Sign in at `/admin/login` with `ADMIN_PASSWORD` and start filling in:
 
-1. **`/admin/branding`** — shop name, address, phone, email.
-2. **`/admin/menu`** — categories, items, sizes.
+1. **`/admin/settings`** — shop name, address, phone, email (the
+   contact / imprint block), free-delivery threshold, colour theme.
+2. **`/admin/menu`** — categories, items, sizes, option-groups.
 3. **`/admin/extras`** — pizza toppings.
-4. **`/admin/settings`** — free-delivery threshold, theme.
-5. **`/admin/home`** — hero photo, two offer cards, gallery photos.
+4. **`/admin/home`** — hero photo, two offer cards, gallery photos.
+5. **`/admin/hours`** — weekly opening hours.
+6. **`/admin/zones`** — delivery zones (postcode → fee, min-order, ETA).
+7. **`/admin/pdf`** — printed-menu cover, theme, and text fields (optional).
 
-Add delivery zones via the SQLite shell or a future `/admin/zones` page
-(currently seeded by hand — see `docs/delivery_zones_and_routing.md`).
+See `docs/delivery_zones_and_routing.md` for how zones feed route
+optimisation.
 
 ## Configuration: every `.env` key
 
@@ -331,7 +428,7 @@ vhosts.
 | systemd unit | `davidspizzeria-server.service` | `rusterando-server.service` |
 | Install root | `/var/www/davidspizzeria.de/` | `/var/www/rusterando.de/` |
 | SQLite DB | `data/davidspizzeria.db` | `data/rusterando.db` |
-| Photo uploads | `data/uploads/` (per-install) | `data/uploads/` (per-install) |
+| Photo uploads | `html/img/uploads/` (per-install) | `html/img/uploads/` (per-install) |
 | Branding seed | `data/branding.davids.sql` | `data/branding.demo.sql` |
 | Backups dir | `…/backups/davidspizzeria_*.zip` | `…/backups/rusterando_*.zip` |
 | iOS app | yes (TestFlight, APNs) | no |
@@ -407,6 +504,11 @@ server {
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
+    # Bundled assets AND admin uploads both live under html/img/ — uploads
+    # in html/img/uploads/ are written there by the app and served here
+    # statically, so the data/ dir (DB included) never sits under a web
+    # root. The deploy rsync excludes img/uploads/ from --delete so
+    # releases don't wipe them.
     location /img/ { alias /var/www/davidspizzeria.de/html/img/; expires 30d; }
     location /.well-known/ {
         alias /var/www/davidspizzeria.de/html/.well-known/;
@@ -481,7 +583,7 @@ The `.env` is owned by `www-data`, mode 600, lives at
 
 ### Branding (data, not code)
 
-After first install, Davids ran through `/admin/branding` and
+After first install, Davids ran through `/admin/settings` and
 `/admin/home` to fill in their specifics: shop name, German-language
 addresses, phone, email, hero photo, two offer cards (Pizzablech + Pizza
 36 cm), three gallery photos (storefront, counter, baking sheet), the
@@ -557,11 +659,18 @@ never collide.
 
 ## Roadmap
 
+- [x] **/admin/zones** — delivery zones are now edited in the UI (was
+  seeded by hand).
+- [x] **Multi-locale** — 8 locales built in (`--features i18n`), runtime
+  `i18n_enabled` toggle. Remaining: translate the last long-form legal
+  strings and the email templates.
+- [x] **PDF cover + theme libraries** — switchable covers and Typst
+  templates from `/admin/pdf`.
+- [x] **Live order tracking** — per-order SSE with delivery acks.
 - [ ] **FCM / Android app**: parallel to APNs/iOS. Server-side
   `MultiPushSink` will dispatch by `platform` column.
-- [ ] **/admin/zones**: today the delivery zones are seeded by hand.
-- [ ] **Multi-locale** (currently German-only). The grammar is in
-  `pages/legal.rs` and the email templates — about 600 strings.
+- [ ] **WebSocket channel** to replace the 30 s shop-status poll fallback
+  and back the driver-location board.
 - [ ] **Cargo workspace split**: peel the kitchen and driver views out
   into optional features so a takeaway-only shop has a smaller binary.
 - [ ] **Postgres support** behind a feature flag.

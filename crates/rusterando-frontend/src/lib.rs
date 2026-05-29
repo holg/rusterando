@@ -4,6 +4,7 @@ pub mod app;
 pub mod branding;
 pub mod components;
 pub mod i18n;
+pub mod live;
 pub mod pages;
 pub mod stripe;
 pub mod utils;
@@ -18,6 +19,8 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<stripe::GetStripeMode>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListMenu>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListAdminMenu>();
+    leptos::server_fn::axum::register_explicit::<pages::menu::ListMenuCategory>();
+    leptos::server_fn::axum::register_explicit::<pages::lieferservice::LoadDeliveryArea>();
     leptos::server_fn::axum::register_explicit::<pages::admin::login::AdminLogin>();
     leptos::server_fn::axum::register_explicit::<pages::admin::login::AdminLogout>();
     leptos::server_fn::axum::register_explicit::<pages::admin::menu_admin::UpdateMenuItem>();
@@ -104,6 +107,19 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::driver::login::DriverLogin>();
     leptos::server_fn::axum::register_explicit::<pages::driver::board::ListDriverOrders>();
     leptos::server_fn::axum::register_explicit::<pages::driver::board::DriverAdvance>();
+    // Opening-hours editor + quick open/close + snooze (/admin/hours).
+    leptos::server_fn::axum::register_explicit::<pages::admin::hours::LoadHoursAdmin>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::hours::UpdateHourRow>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::hours::UpsertSpecialHours>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::hours::DeleteSpecialHours>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::hours::SetOrdersOpen>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::hours::SetOrdersSchedule>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::hours::SnoozeOrders>();
+    // Live customer channel: admin → customer order message + delivery ack.
+    leptos::server_fn::axum::register_explicit::<pages::order::SetOrderMessage>();
+    leptos::server_fn::axum::register_explicit::<pages::order::AckOrderMessage>();
+    // Shop open/closed status for the menu page's status bar.
+    leptos::server_fn::axum::register_explicit::<pages::menu::ShopStatus>();
 }
 
 #[cfg(feature = "hydrate")]
