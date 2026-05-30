@@ -253,13 +253,13 @@ pub fn CartDrawer() -> impl IntoView {
                                             <input type="radio" name="giveaway-sauce"
                                                 value="opt-sauce-knoblauch"
                                                 on:change=move |_| sauce.set("opt-sauce-knoblauch".to_string())/>
-                                            <span>"Knoblauchsauce"</span>
+                                            <span>{crate::t!("cart.sauce_garlic")}</span>
                                         </label>
                                         <label class="giveaway-sauce">
                                             <input type="radio" name="giveaway-sauce"
                                                 value="opt-sauce-kraeuter"
                                                 on:change=move |_| sauce.set("opt-sauce-kraeuter".to_string())/>
-                                            <span>"Kräuterbutter"</span>
+                                            <span>{crate::t!("cart.sauce_herb_butter")}</span>
                                         </label>
                                         <button class="btn primary small giveaway-claim"
                                             disabled=claim_pending

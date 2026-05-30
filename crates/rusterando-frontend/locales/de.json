@@ -94,6 +94,8 @@
     "giveaway_unlocked": "🎁 Du hast ein gratis Pizzabrötchen frei!",
     "giveaway_sauce_prompt": "Sauce wählen (Pflicht):",
     "giveaway_claim": "Jetzt sichern",
+    "sauce_garlic": "Knoblauchsauce",
+    "sauce_herb_butter": "Kräuterbutter",
     "fab_open_aria": "Warenkorb öffnen",
     "decrement": "weniger",
     "increment": "mehr",
@@ -176,10 +178,67 @@
     "title": "Bestellung eingegangen",
     "order_number": "Bestellnummer",
     "estimated_pickup": "Voraussichtlich fertig",
-    "estimated_delivery": "Voraussichtliche Lieferung"
+    "estimated_delivery": "Voraussichtliche Lieferung",
+    "thanks": "Vielen Dank für Ihre Bestellung!",
+    "order_number_inline": "Bestellnummer:",
+    "delivery_chip": "🛵 Lieferung",
+    "pickup_chip": "🏪 Abholung",
+    "delivery_time": "Lieferzeit",
+    "pickup_time": "Abholung",
+    "name": "Name",
+    "phone": "Telefon",
+    "email": "E-Mail",
+    "delivery_address": "Lieferadresse",
+    "delivery_zone": "Liefergebiet: {zone}",
+    "items_heading": "Bestellung",
+    "subtotal": "Zwischensumme",
+    "delivery_fee": "Lieferzuschlag",
+    "grand_total": "Gesamt",
+    "see_menu": "Weitere Speisekarte ansehen",
+    "notify_btn": "🔔 Benachrichtigungen aktivieren",
+    "notify_title": "Bei neuen Nachrichten / Statusänderungen benachrichtigt werden",
+    "messages_heading": "📣 Nachrichten vom Restaurant",
+    "payment_hint_cash_delivery": "Bezahlung bar bei Lieferung an den Fahrer.",
+    "payment_hint_cash_pickup": "Bezahlung bar bei Abholung.",
+    "payment_hint_cash_pickup_addr": "Bezahlung bar bei Abholung — {address}.",
+    "payment_hint_paid": "Zahlung bestätigt. Bestellung ist in der Küche.",
+    "payment_hint_pending": "Zahlung wird verarbeitet — diese Seite aktualisiert sich, sobald die Bestätigung da ist.",
+    "payment_hint_failed": "Zahlung fehlgeschlagen. Bitte erneut versuchen.",
+    "payment_hint_failed_phone": "Zahlung fehlgeschlagen. Bitte erneut versuchen oder telefonisch bestellen: {phone}."
+  },
+  "status": {
+    "pending_payment": "Zahlung ausstehend",
+    "received": "Eingegangen",
+    "preparing": "Wird zubereitet",
+    "ready_for_pickup": "Abholbereit",
+    "picked_up": "Abgeholt",
+    "out_for_delivery": "Unterwegs",
+    "delivered": "Geliefert",
+    "cancelled": "Storniert",
+    "unknown": "Unbekannt"
+  },
+  "payment_status": {
+    "cash_on_pickup": "Bar bei Abholung",
+    "pending": "Zahlung ausstehend",
+    "paid": "Online bezahlt ✓",
+    "failed": "Zahlung fehlgeschlagen",
+    "refunded": "Erstattet",
+    "unknown": "—"
   },
   "errors": {
     "page_not_found": "Seite nicht gefunden.",
     "not_logged_in": "nicht angemeldet"
+  },
+  "lieferservice": {
+    "title": "Pizza-Lieferservice {area}",
+    "delivery_fee": "Liefergebühr",
+    "fee_free": "kostenlos",
+    "min_order": "Mindestbestellwert",
+    "delivery_eta": "Lieferzeit",
+    "eta_minutes": "ca. {n} Min."
+  },
+  "notify": {
+    "order_updated": "Bestellung aktualisiert",
+    "status_prefix": "Status: {label}"
   }
 }

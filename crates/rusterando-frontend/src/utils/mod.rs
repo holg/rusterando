@@ -152,10 +152,10 @@ pub fn subscribe_order_live(
                     }
                     LiveKind::Status(s) => {
                         if notify {
-                            let label = crate::pages::order::status_label_de(&s);
+                            let label = crate::pages::order::status_label(&s);
                             notify_customer(
-                                "Bestellung aktualisiert",
-                                &format!("Status: {label}"),
+                                &crate::t!("notify.order_updated"),
+                                &crate::t!("notify.status_prefix").replace("{label}", &label),
                                 &oid,
                             );
                         }

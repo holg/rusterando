@@ -3595,6 +3595,17 @@ pub fn payment_status_label_de(s: &str) -> &'static str {
     }
 }
 
+/// Locale-aware payment-status label for customer-facing surfaces.
+/// Reads `payment_status.<code>` from the i18n table; falls back to
+/// `payment_status.unknown` for codes the table doesn't know.
+pub fn payment_status_label(s: &str) -> String {
+    let key = match s {
+        "cash_on_pickup" | "pending" | "paid" | "failed" | "refunded" => s,
+        _ => "unknown",
+    };
+    crate::i18n::t(&format!("payment_status.{key}"))
+}
+
 /// Status code → German label
 pub fn status_label_de(s: &str) -> &'static str {
     match s {
@@ -3610,6 +3621,17 @@ pub fn status_label_de(s: &str) -> &'static str {
     }
 }
 
+/// Locale-aware status label for customer-facing surfaces. Same
+/// fallback contract as [`payment_status_label`].
+pub fn status_label(s: &str) -> String {
+    let key = match s {
+        "pending_payment" | "received" | "preparing" | "ready_for_pickup"
+        | "picked_up" | "out_for_delivery" | "delivered" | "cancelled" => s,
+        _ => "unknown",
+    };
+    crate::i18n::t(&format!("status.{key}"))
+}
+
 // ---------------------------------------------------------------------------
 // /orders/:id confirmation
 // ---------------------------------------------------------------------------
@@ -3622,9 +3644,9 @@ pub fn OrderConfirmationPage() -> impl IntoView {
 
     view! {
         <section class="order-confirm">
-            <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+            <Suspense fallback=|| view! { <p class="loading">{crate::t!("common.loading")}</p> }>
                 {move || order.get().map(|res| match res {
-                    Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                    Err(e) => view! { <p class="error">{format!("{}: {e}", crate::t!("common.error"))}</p> }.into_any(),
                     Ok(o) => view! { <ConfirmationView o/> }.into_any(),
                 })}
             </Suspense>
@@ -3674,15 +3696,15 @@ fn NotifyOptIn() -> impl IntoView {
             class="notify-optin"
             class:hidden=move || !show.get()
             on:click=on_click
-            title="Bei neuen Nachrichten / Statusänderungen benachrichtigt werden">
-            "🔔 Benachrichtigungen aktivieren"
+            title=crate::t!("order_confirm.notify_title")>
+            {crate::t!("order_confirm.notify_btn")}
         </button>
     }
 }
 
 #[component]
 fn ConfirmationView(o: OrderDetail) -> impl IntoView {
-    let payment_label = payment_status_label_de(&o.payment_status);
+    let payment_label = payment_status_label(&o.payment_status);
     let payment_attr = o.payment_status.clone();
     let is_delivery = o.order_type == "delivery";
     let is_pending = o.payment_status == "pending";
@@ -3698,30 +3720,30 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
     let shop_address = branding.full_address();
     let shop_phone = branding.shop_phone.clone();
 
-    let pickup_label_de = if is_delivery {
-        "Lieferzeit"
+    let pickup_label = if is_delivery {
+        crate::t!("order_confirm.delivery_time")
     } else {
-        "Abholung"
+        crate::t!("order_confirm.pickup_time")
     };
-    let cash_label_de: String = if is_delivery {
-        "Bezahlung bar bei Lieferung an den Fahrer.".to_string()
+    let cash_label: String = if is_delivery {
+        crate::t!("order_confirm.payment_hint_cash_delivery")
     } else if shop_address.is_empty() {
-        "Bezahlung bar bei Abholung.".to_string()
+        crate::t!("order_confirm.payment_hint_cash_pickup")
     } else {
-        format!("Bezahlung bar bei Abholung — {shop_address}.")
+        crate::t!("order_confirm.payment_hint_cash_pickup_addr")
+            .replace("{address}", &shop_address)
     };
-    let payment_failed_de: String = if shop_phone.is_empty() {
-        "Zahlung fehlgeschlagen. Bitte erneut versuchen.".to_string()
+    let payment_failed: String = if shop_phone.is_empty() {
+        crate::t!("order_confirm.payment_hint_failed")
     } else {
-        format!(
-            "Zahlung fehlgeschlagen. Bitte erneut versuchen oder telefonisch bestellen: {shop_phone}."
-        )
+        crate::t!("order_confirm.payment_hint_failed_phone")
+            .replace("{phone}", &shop_phone)
     };
     let payment_hint: String = match o.payment_status.as_str() {
-        "cash_on_pickup" => cash_label_de,
-        "paid" => "Zahlung bestätigt. Bestellung ist in der Küche.".to_string(),
-        "pending" => "Zahlung wird verarbeitet — diese Seite aktualisiert sich, sobald die Bestätigung da ist.".to_string(),
-        "failed" => payment_failed_de,
+        "cash_on_pickup" => cash_label,
+        "paid" => crate::t!("order_confirm.payment_hint_paid"),
+        "pending" => crate::t!("order_confirm.payment_hint_pending"),
+        "failed" => payment_failed,
         _ => String::new(),
     };
 
@@ -3759,18 +3781,23 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
     // falling back to the initial status when the signal is somehow empty.
     let live_status_label = move || {
         let s = live_status.get().unwrap_or_else(|| initial_status.clone());
-        status_label_de(&s).to_string()
+        status_label(&s)
     };
     let init2 = o.status.clone();
     let live_status_attr = move || live_status.get().unwrap_or_else(|| init2.clone());
 
+    let order_type_chip = if is_delivery {
+        crate::t!("order_confirm.delivery_chip")
+    } else {
+        crate::t!("order_confirm.pickup_chip")
+    };
     view! {
         <div class="confirm-card">
-            <h1>"Vielen Dank für Ihre Bestellung!"</h1>
-            <p class="sub">"Bestellnummer: " <strong>{o.order_number.clone()}</strong></p>
+            <h1>{crate::t!("order_confirm.thanks")}</h1>
+            <p class="sub">{crate::t!("order_confirm.order_number_inline")} " " <strong>{o.order_number.clone()}</strong></p>
             <div class="status-pills">
                 <div class="status-pill" data-order-type={o.order_type.clone()}>
-                    {if is_delivery { "🛵 Lieferung" } else { "🏪 Abholung" }}
+                    {order_type_chip}
                 </div>
                 <div class="status-pill" data-status=live_status_attr>{live_status_label}</div>
                 <div class="status-pill" data-payment=payment_attr>{payment_label}</div>
@@ -3788,7 +3815,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                 let msgs = messages.get();
                 (!msgs.is_empty()).then(|| view! {
                     <div class="restaurant-message" role="status">
-                        <strong>"📣 Nachrichten vom Restaurant"</strong>
+                        <strong>{crate::t!("order_confirm.messages_heading")}</strong>
                         <ul class="message-log">
                             {msgs.into_iter().map(|m| view! {
                                 <li><span class="ts">"🕒 " {m.created_at} " — "</span>{m.body}</li>
@@ -3799,27 +3826,27 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
             }}
 
             <dl class="confirm-meta">
-                <dt>{pickup_label_de}</dt><dd>{o.pickup_time_label.clone()}</dd>
-                <dt>"Name"</dt><dd>{o.contact_name.clone()}</dd>
-                <dt>"Telefon"</dt><dd>{o.contact_phone.clone()}</dd>
-                <dt>"E-Mail"</dt><dd>{o.contact_email.clone()}</dd>
+                <dt>{pickup_label}</dt><dd>{o.pickup_time_label.clone()}</dd>
+                <dt>{crate::t!("order_confirm.name")}</dt><dd>{o.contact_name.clone()}</dd>
+                <dt>{crate::t!("order_confirm.phone")}</dt><dd>{o.contact_phone.clone()}</dd>
+                <dt>{crate::t!("order_confirm.email")}</dt><dd>{o.contact_email.clone()}</dd>
                 {o.delivery_address.as_ref().map(|a| {
                     let line = format!("{}, {} {}", a.street_with_number(), a.postcode, a.city);
                     let zone = a.zone_name.clone();
                     let notes = a.notes.clone();
                     view! {
-                        <dt>"Lieferadresse"</dt>
+                        <dt>{crate::t!("order_confirm.delivery_address")}</dt>
                         <dd>
                             {line}
                             <br/>
-                            <span class="muted">{format!("Liefergebiet: {zone}")}</span>
+                            <span class="muted">{crate::t!("order_confirm.delivery_zone").replace("{zone}", &zone)}</span>
                             {notes.map(|n| view! { <br/> <span class="muted">{n}</span> })}
                         </dd>
                     }
                 })}
             </dl>
 
-            <h2>"Bestellung"</h2>
+            <h2>{crate::t!("order_confirm.items_heading")}</h2>
             <ul class="confirm-items">
                 {o.items.into_iter().map(|it| {
                     let extras = it.extras.clone();
@@ -3836,7 +3863,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                                     <ul class="extras">
                                         {extras.into_iter().map(|e| {
                                             let p = if e.price_cents == 0 {
-                                                "gratis".to_string()
+                                                crate::t!("common.free")
                                             } else {
                                                 format!("+{}", format_eur(e.price_cents))
                                             };
@@ -3852,10 +3879,10 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
             </ul>
 
             {(o.delivery_fee_cents > 0).then(|| view! {
-                <p class="meta-row">"Zwischensumme: " <strong>{format_eur(o.subtotal_cents)}</strong></p>
-                <p class="meta-row">"Lieferzuschlag: " <strong>{format_eur(o.delivery_fee_cents)}</strong></p>
+                <p class="meta-row">{crate::t!("order_confirm.subtotal")} ": " <strong>{format_eur(o.subtotal_cents)}</strong></p>
+                <p class="meta-row">{crate::t!("order_confirm.delivery_fee")} ": " <strong>{format_eur(o.delivery_fee_cents)}</strong></p>
             })}
-            <p class="grand-total">"Gesamt: " <strong>{format_eur(o.total_cents)}</strong></p>
+            <p class="grand-total">{crate::t!("order_confirm.grand_total")} ": " <strong>{format_eur(o.total_cents)}</strong></p>
             <p class="hint">
                 {payment_hint}
                 {o.payment_method_detail.clone().filter(|s| !s.is_empty()).map(|m| view! {
@@ -3863,7 +3890,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                 })}
             </p>
             <p>
-                <a class="btn ghost" href="/menu">"Weitere Speisekarte ansehen"</a>
+                <a class="btn ghost" href="/menu">{crate::t!("order_confirm.see_menu")}</a>
             </p>
             {is_pending.then(|| view! {
                 // Soft refresh every 3s so a 'pending' card flips to 'paid' shortly after the webhook lands.

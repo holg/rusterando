@@ -94,6 +94,8 @@
     "giveaway_unlocked": "🎁 You’ve earned a free Pizzabrötchen!",
     "giveaway_sauce_prompt": "Choose a sauce (required):",
     "giveaway_claim": "Claim now",
+    "sauce_garlic": "Garlic sauce",
+    "sauce_herb_butter": "Herb butter",
     "fab_open_aria": "Open cart",
     "decrement": "less",
     "increment": "more",
@@ -176,10 +178,67 @@
     "title": "Order received",
     "order_number": "Order number",
     "estimated_pickup": "Ready around",
-    "estimated_delivery": "Estimated delivery"
+    "estimated_delivery": "Estimated delivery",
+    "thanks": "Thank you for your order!",
+    "order_number_inline": "Order number:",
+    "delivery_chip": "🛵 Delivery",
+    "pickup_chip": "🏪 Pickup",
+    "delivery_time": "Delivery time",
+    "pickup_time": "Pickup",
+    "name": "Name",
+    "phone": "Phone",
+    "email": "Email",
+    "delivery_address": "Delivery address",
+    "delivery_zone": "Delivery area: {zone}",
+    "items_heading": "Order",
+    "subtotal": "Subtotal",
+    "delivery_fee": "Delivery fee",
+    "grand_total": "Total",
+    "see_menu": "View menu",
+    "notify_btn": "🔔 Enable notifications",
+    "notify_title": "Get notified about new messages / status changes",
+    "messages_heading": "📣 Messages from the restaurant",
+    "payment_hint_cash_delivery": "Pay cash to the driver on delivery.",
+    "payment_hint_cash_pickup": "Pay cash on pickup.",
+    "payment_hint_cash_pickup_addr": "Pay cash on pickup — {address}.",
+    "payment_hint_paid": "Payment confirmed. Order is in the kitchen.",
+    "payment_hint_pending": "Payment processing — this page will refresh as soon as confirmation arrives.",
+    "payment_hint_failed": "Payment failed. Please try again.",
+    "payment_hint_failed_phone": "Payment failed. Please try again or call us: {phone}."
+  },
+  "status": {
+    "pending_payment": "Payment pending",
+    "received": "Received",
+    "preparing": "Preparing",
+    "ready_for_pickup": "Ready for pickup",
+    "picked_up": "Picked up",
+    "out_for_delivery": "Out for delivery",
+    "delivered": "Delivered",
+    "cancelled": "Cancelled",
+    "unknown": "Unknown"
+  },
+  "payment_status": {
+    "cash_on_pickup": "Cash on pickup",
+    "pending": "Payment pending",
+    "paid": "Paid online ✓",
+    "failed": "Payment failed",
+    "refunded": "Refunded",
+    "unknown": "—"
   },
   "errors": {
     "page_not_found": "Page not found.",
     "not_logged_in": "not signed in"
+  },
+  "lieferservice": {
+    "title": "Pizza delivery to {area}",
+    "delivery_fee": "Delivery fee",
+    "fee_free": "free",
+    "min_order": "Minimum order",
+    "delivery_eta": "Delivery time",
+    "eta_minutes": "approx. {n} min"
+  },
+  "notify": {
+    "order_updated": "Order updated",
+    "status_prefix": "Status: {label}"
   }
 }
