@@ -842,11 +842,12 @@ pub mod ssr {
         let (paused, resume_at) = sset::order_pause_state(db).await;
         if paused {
             let reason = match resume_at {
-                Some(t) => format!("Pause — ab {t} Uhr wieder für Bestellungen da."),
+                Some(t) => crate::i18n::t("shop_status.paused_until")
+                    .replace("{time}", &t),
                 None => {
                     let msg = sset::orders_paused_message(db).await;
                     if msg.is_empty() {
-                        "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
+                        crate::i18n::t("shop_status.paused_no_orders")
                     } else {
                         msg
                     }
@@ -866,14 +867,14 @@ pub mod ssr {
         if let Some(next) = next_open_today(db).await {
             return (
                 ShopLevel::OpensLater,
-                format!("Heute ab {next} Uhr geöffnet"),
+                crate::i18n::t("shop_status.opens_today_at").replace("{time}", &next),
             );
         }
         // Nothing more today → hard red close.
         let reason = if is_ruhetag_today(db).await {
-            "Heute Ruhetag — bitte an einem anderen Tag bestellen.".to_string()
+            crate::i18n::t("shop_status.ruhetag")
         } else {
-            "Wir haben gerade geschlossen. Bestellungen sind während unserer Öffnungszeiten möglich.".to_string()
+            crate::i18n::t("shop_status.closed_outside_hours")
         };
         (ShopLevel::Closed, reason)
     }
@@ -888,11 +889,12 @@ pub mod ssr {
         let (paused, resume_at) = sset::order_pause_state(db).await;
         if paused {
             let reason = match resume_at {
-                Some(t) => format!("Wir sind ab {t} Uhr wieder für Bestellungen da."),
+                Some(t) => crate::i18n::t("shop_status.gate_back_at")
+                    .replace("{time}", &t),
                 None => {
                     let msg = sset::orders_paused_message(db).await;
                     if msg.is_empty() {
-                        "Wir nehmen derzeit keine Online-Bestellungen an.".to_string()
+                        crate::i18n::t("shop_status.paused_no_orders")
                     } else {
                         msg
                     }
@@ -902,9 +904,9 @@ pub mod ssr {
         }
         if today_slots(db).await.is_empty() {
             let reason = if is_ruhetag_today(db).await {
-                "Heute Ruhetag — bitte an einem anderen Tag bestellen.".to_string()
+                crate::i18n::t("shop_status.ruhetag")
             } else {
-                "Wir haben gerade geschlossen. Bestellungen sind während unserer Öffnungszeiten möglich.".to_string()
+                crate::i18n::t("shop_status.closed_outside_hours")
             };
             return (true, reason);
         }

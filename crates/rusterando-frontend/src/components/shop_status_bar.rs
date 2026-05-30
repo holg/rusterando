@@ -36,8 +36,8 @@ pub fn ShopStatusBar(
         match level {
             ShopLevel::Open => view! {
                 <div class=cls>
-                    <strong>"🟢 Jetzt geöffnet"</strong>
-                    <span>"Online-Bestellung möglich"</span>
+                    <strong>{crate::t!("shop_status.open")}</strong>
+                    <span>{crate::t!("shop_status.open_hint")}</span>
                 </div>
             }
             .into_any(),
@@ -45,14 +45,14 @@ pub fn ShopStatusBar(
                 // Amber: closed right now but it resolves itself. `role` is
                 // status (not alert) — it's informational, not an error.
                 <div class=cls role="status">
-                    <strong>"🟡 Gerade geschlossen"</strong>
+                    <strong>{crate::t!("shop_status.closed_now")}</strong>
                     <span>{reason}</span>
                 </div>
             }
             .into_any(),
             ShopLevel::Closed => view! {
                 <div class=cls role="alert">
-                    <strong>"🔴 Geschlossen"</strong>
+                    <strong>{crate::t!("shop_status.closed")}</strong>
                     <span>{reason}</span>
                 </div>
             }

@@ -229,6 +229,18 @@
     "page_not_found": "Page not found.",
     "not_logged_in": "not signed in"
   },
+  "shop_status": {
+    "open": "🟢 Open now",
+    "open_hint": "Online orders accepted",
+    "closed_now": "🟡 Currently closed",
+    "closed": "🔴 Closed",
+    "opens_today_at": "Opens today at {time}",
+    "paused_until": "Paused — back for orders at {time}.",
+    "paused_no_orders": "We're currently not accepting online orders.",
+    "gate_back_at": "Back for orders at {time}.",
+    "ruhetag": "Closed today — please order on another day.",
+    "closed_outside_hours": "We're currently closed. Orders are accepted during opening hours."
+  },
   "lieferservice": {
     "title": "Pizza delivery to {area}",
     "delivery_fee": "Delivery fee",
