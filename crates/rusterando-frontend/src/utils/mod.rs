@@ -184,25 +184,91 @@ pub fn subscribe_order_live(
 ) {
 }
 
-/// Subscribe to the global shop-status channel (`/api/live/shop`) and push
-/// `(level, reason)` into the callback signal whenever the shop's
-/// open/closed state changes (pause/snooze/force-open or snooze expiry).
-/// Effect-based + hydrate-only, same hydration-safety contract as
-/// `subscribe_order_live`. No-op on SSR.
+/// Subscribe to the global shop-status channel and push `(level, reason)`
+/// into the caller's signal whenever the shop's open/closed state changes.
+///
+/// Public signature unchanged for callers, but internally this bridges to a
+/// single tab-wide EventSource on `/api/live/shop` (see
+/// `ensure_shop_status_singleton`). Network problems are normal, not
+/// exceptional: the singleton reuses an OPEN/CONNECTING socket and
+/// auto-reconnects with exponential backoff on `onerror`. Five components
+/// previously each opened their own EventSource — now they share one, no
+/// matter how many times the components mount/remount.
 #[cfg(feature = "hydrate")]
 pub fn subscribe_shop_status(
     on_status: WriteSignal<Option<(rusterando_shared::models::ShopLevel, String)>>,
 ) {
-    use rusterando_shared::models::{LiveEvent, LiveKind};
-    use wasm_bindgen::closure::Closure;
-    use wasm_bindgen::JsCast;
-
+    let shared = ensure_shop_status_singleton();
     Effect::new(move |_| {
+        shared.with(|s| {
+            if let Some(v) = s {
+                on_status.set(Some(v.clone()));
+            }
+        });
+    });
+}
+
+/// Lazily-initialised tab-singleton for the `/api/live/shop` EventSource.
+/// Idempotent — calling multiple times (each `subscribe_shop_status`
+/// invocation, hot-reloads, re-renders) is safe:
+///   * If the existing EventSource is OPEN or CONNECTING → reuse it, do
+///     NOT open a new one. (User's explicit requirement: "does not simply
+///     do the new one and it makes no sense to have 3 in parallel.")
+///   * If it's CLOSED (or absent) → close any stale handle, open a fresh
+///     one, wire onmessage + onerror.
+/// `onerror` schedules a reconnect via `set_timeout` with exponential
+/// backoff (1s → 2s → 4s → 8s → 16s → 30s cap); resets to 1s on the next
+/// successful message so a brief blip doesn't push us to long delays.
+#[cfg(feature = "hydrate")]
+fn ensure_shop_status_singleton(
+) -> RwSignal<Option<(rusterando_shared::models::ShopLevel, String)>> {
+    use std::cell::{OnceCell, RefCell};
+    use std::rc::Rc;
+    thread_local! {
+        static SIG: OnceCell<RwSignal<Option<(rusterando_shared::models::ShopLevel, String)>>> =
+            const { OnceCell::new() };
+        static ES: RefCell<Option<web_sys::EventSource>> = const { RefCell::new(None) };
+        static BACKOFF_MS: RefCell<u32> = const { RefCell::new(1_000) };
+    }
+
+    let sig = SIG.with(|c| *c.get_or_init(|| RwSignal::new(None)));
+
+    // `connect` is recursive (the onerror handler schedules a delayed
+    // re-call), so wrap it in an Rc<RefCell<Option<Rc<dyn Fn()>>>> to break
+    // the self-reference. WASM is single-threaded so Rc/RefCell are safe.
+    let connect: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let connect_clone = connect.clone();
+    let connect_fn: Rc<dyn Fn()> = Rc::new(move || {
+        use wasm_bindgen::closure::Closure;
+        use wasm_bindgen::JsCast;
+
+        // Reuse if the existing socket is healthy. EventSource readyState
+        // constants: CONNECTING = 0, OPEN = 1, CLOSED = 2.
+        let needs_new = ES.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map_or(true, |es| es.ready_state() == web_sys::EventSource::CLOSED)
+        });
+        if !needs_new {
+            return;
+        }
+
+        // Close any stale handle before opening a fresh one.
+        ES.with(|cell| {
+            if let Some(old) = cell.borrow_mut().take() {
+                old.close();
+            }
+        });
         let Ok(es) = web_sys::EventSource::new("/api/live/shop") else {
             return;
         };
+
+        // onmessage: parse the LiveEvent; only ShopStatus updates the
+        // shared signal. Reset the backoff on success — proves the link
+        // is healthy again so the next blip starts from 1s, not 30s.
         let on_msg = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
             move |ev: web_sys::MessageEvent| {
+                use rusterando_shared::models::{LiveEvent, LiveKind};
                 let Some(text) = ev.data().as_string() else {
                     return;
                 };
@@ -210,14 +276,47 @@ pub fn subscribe_shop_status(
                     return;
                 };
                 if let LiveKind::ShopStatus { level, reason } = event.kind {
-                    on_status.set(Some((level, reason)));
+                    BACKOFF_MS.with(|b| *b.borrow_mut() = 1_000);
+                    sig.set(Some((level, reason)));
                 }
             },
         );
         es.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
         on_msg.forget();
-        std::mem::forget(es);
+
+        // onerror: close the socket and schedule a reconnect with the
+        // current backoff, then double it (capped at 30 s) for next time.
+        // The reconnect goes through `connect` again — which checks
+        // readyState first, so a flaky network won't multiply connections.
+        let reconnect = connect_clone.clone();
+        let on_err = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            ES.with(|cell| {
+                if let Some(old) = cell.borrow_mut().take() {
+                    old.close();
+                }
+            });
+            let delay = BACKOFF_MS.with(|b| {
+                let cur = *b.borrow();
+                let next = cur.saturating_mul(2).min(30_000);
+                *b.borrow_mut() = next;
+                cur
+            });
+            if let Some(f) = reconnect.borrow().clone() {
+                leptos::leptos_dom::helpers::set_timeout(
+                    move || f(),
+                    std::time::Duration::from_millis(delay as u64),
+                );
+            }
+        });
+        es.set_onerror(Some(on_err.as_ref().unchecked_ref()));
+        on_err.forget();
+
+        ES.with(|cell| *cell.borrow_mut() = Some(es));
     });
+    *connect.borrow_mut() = Some(connect_fn.clone());
+    connect_fn();
+
+    sig
 }
 
 #[cfg(not(feature = "hydrate"))]

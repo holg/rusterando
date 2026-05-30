@@ -148,47 +148,53 @@ pub fn RoleSwitcher(
     /// Which view is currently being rendered.
     current: Role,
 ) -> impl IntoView {
+    // SSR + hydrate must produce IDENTICAL DOM. Two rules to satisfy:
+    //   (1) Don't read the resource OUTSIDE a Suspense in hydrate mode —
+    //       Leptos warns this is a hydration-mismatch landmine.
+    //   (2) Suspense fallback's DOM shape must match the resolved view's,
+    //       or the Tachys marker walker explodes (the original bug here).
+    // Solution: always render all three pills inside Suspense. The resource
+    // only gates one CSS class on the "others" span. Fallback renders the
+    // same nav with the span pre-hidden; resolved view toggles based on role.
     let role_res = Resource::new(|| (), |_| async move { current_role().await });
 
+    fn render_nav(current: Role, is_admin: bool) -> impl IntoView {
+        let pill = move |role: Role, label: &'static str, icon: &'static str| {
+            let path = role.home_path();
+            let active = role == current;
+            view! {
+                <a href=path class:role-pill=true class:active=active>
+                    <span class="icon">{icon}</span>
+                    <span>{label}</span>
+                </a>
+            }
+        };
+        let mut others: Vec<_> = Vec::new();
+        if current != Role::Admin   { others.push(pill(Role::Admin,   "Admin",  "🏪")); }
+        if current != Role::Kitchen { others.push(pill(Role::Kitchen, "Küche",  "👨‍🍳")); }
+        if current != Role::Driver  { others.push(pill(Role::Driver,  "Fahrer", "🛵")); }
+        view! {
+            <nav class="role-switcher" aria-label="Bereich wechseln">
+                {pill(current, current.label_de(), match current {
+                    Role::Admin => "🏪",
+                    Role::Kitchen => "👨‍🍳",
+                    Role::Driver => "🛵",
+                })}
+                <span class="role-switcher-others" class:hidden=!is_admin>
+                    {others}
+                </span>
+            </nav>
+        }
+    }
+
     view! {
-        <Suspense fallback=|| ()>
+        <Suspense fallback=move || render_nav(current, false)>
             {move || {
-                let session_role = role_res.get()
-                    .and_then(|r| r.ok())
-                    .flatten()
-                    .and_then(|s| Role::parse(&s));
-                let is_admin = session_role == Some(Role::Admin);
-                let pill = |role: Role, label: &'static str, icon: &'static str| {
-                    let path = role.home_path();
-                    let active = role == current;
-                    view! {
-                        <a
-                            href=path
-                            class:role-pill=true
-                            class:active=active
-                        >
-                            <span class="icon">{icon}</span>
-                            <span>{label}</span>
-                        </a>
-                    }
-                };
-                view! {
-                    <nav class="role-switcher" aria-label="Bereich wechseln">
-                        {pill(current, current.label_de(), match current {
-                            Role::Admin => "🏪",
-                            Role::Kitchen => "👨‍🍳",
-                            Role::Driver => "🛵",
-                        })}
-                        {is_admin.then(|| {
-                            // Render the other two only for admin sessions.
-                            let mut others = Vec::new();
-                            if current != Role::Admin   { others.push(pill(Role::Admin,   "Admin",  "🏪")); }
-                            if current != Role::Kitchen { others.push(pill(Role::Kitchen, "Küche",  "👨‍🍳")); }
-                            if current != Role::Driver  { others.push(pill(Role::Driver,  "Fahrer", "🛵")); }
-                            others.collect_view()
-                        })}
-                    </nav>
-                }
+                let is_admin = matches!(
+                    role_res.get().and_then(|r| r.ok()).flatten().and_then(|s| Role::parse(&s)),
+                    Some(Role::Admin)
+                );
+                render_nav(current, is_admin)
             }}
         </Suspense>
     }

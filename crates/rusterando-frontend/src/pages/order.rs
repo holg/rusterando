@@ -4568,7 +4568,13 @@ fn Form(
                     {if has_slots {
                         view! {
                             <label class="radio">
-                                <input type="radio" name="pickup_time" value="scheduled"
+                                // Client-side toggle only — must NOT share
+                                // name="pickup_time" with the asap radio +
+                                // the HH:MM <select>, or the form posts
+                                // pickup_time twice and the server fn
+                                // deserializer errors with
+                                // "Multiple values for one key: \"pickup_time\"".
+                                <input type="radio" name="pickup_time_mode" value="scheduled"
                                        prop:checked=move || pickup_choice.get() == "scheduled"
                                        on:change=move |_| pickup_choice.set("scheduled".to_string())/>
                                 <span>{crate::t!("checkout.pick_later")}</span>

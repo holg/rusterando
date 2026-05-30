@@ -436,6 +436,7 @@ echo "Using profile: $PROFILE"
 # i18n, Stripe mode, branding) lives in the DB via app_settings and
 # the admin can flip toggles at runtime — no rebuild per shop.
 LEPTOS_BIN_TARGET_TRIPLE=$TARGET_TRIPLE \
+LEPTOS_HASH_FILES=true \
   cargo leptos build --release \
     --bin-cargo-args="--config=build.incremental=true" \
     -v
