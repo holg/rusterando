@@ -781,7 +781,17 @@ async fn live_order_sse_handler(
         }
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // Keep-alive every 5s instead of axum's 15s default. The keep-alive
+    // write is what detects a TCP RST/FIN from the client and tears down
+    // the stream — without it, a closed browser tab keeps the upstream
+    // TCP socket in CLOSE_WAIT until the next event arrives, and rare
+    // events (shop pause + order status) mean those sockets can sit
+    // half-open for minutes/hours. Empirically (2026-05-30) this leaks
+    // ~1 fd per 8 closed clients with the 15s default; 5s reduces the
+    // window 3× and brings steady-state fds in line with active clients.
+    Sse::new(stream).keep_alive(
+        KeepAlive::new().interval(std::time::Duration::from_secs(5)),
+    )
 }
 
 /// `/api/live/shop` — SSE stream of global shop open/closed changes. Home +
@@ -806,7 +816,10 @@ async fn live_shop_sse_handler(
         Some(Ok(Event::default().data(json)))
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // 5s keep-alive (see live_order_sse_handler for the why).
+    Sse::new(stream).keep_alive(
+        KeepAlive::new().interval(std::time::Duration::from_secs(5)),
+    )
 }
 
 /// Max upload size — keeps decompression bombs out and matches what a
