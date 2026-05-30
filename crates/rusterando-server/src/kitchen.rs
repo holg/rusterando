@@ -613,6 +613,21 @@ pub async fn build_order_for_kitchen(
         ))
     };
 
+    // Server-formatted timestamp labels in the SHOP's local timezone
+    // (TZ env var, see systemd unit). Sent to the Pi as ready-to-print
+    // strings so the Pi doesn't have to know about timezones — its
+    // chrono::Local is unreliable (the device may run UTC).
+    let fmt_local = |unix: i64| -> String {
+        use chrono::{Local, TimeZone};
+        Local
+            .timestamp_opt(unix, 0)
+            .single()
+            .map(|t| t.format("%d.%m. %H:%M").to_string())
+            .unwrap_or_default()
+    };
+    let created_at_label = fmt_local(created_at_unix);
+    let accepted_at_label = accepted_at_unix.map(fmt_local);
+
     Ok(OrderForKitchen {
         order_id: OrderId(hasher.finish()),
         display_number,
@@ -621,6 +636,7 @@ pub async fn build_order_for_kitchen(
         // confirmation email. Receipts and admin grep the same value.
         display_label: order_number,
         created_at_unix,
+        created_at_label,
         channel,
         customer: Customer {
             name: contact_name,
@@ -634,6 +650,7 @@ pub async fn build_order_for_kitchen(
         note: notes.filter(|s| !s.trim().is_empty()),
         shop_name: shop_name.to_string(),
         accepted_at_unix,
+        accepted_at_label,
         qr_url,
         is_test_mode,
         voucher_code,

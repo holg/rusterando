@@ -72,6 +72,13 @@ pub struct OrderForKitchen {
     #[serde(default)]
     pub display_label: String,
     pub created_at_unix: i64,
+    /// Server-formatted "Eingang" timestamp in the SHOP's timezone, ready to
+    /// print verbatim. The printer must NOT reformat from the epoch — the Pi's
+    /// clock/TZ may differ (it had no TZ set, so chrono::Local printed UTC).
+    /// `#[serde(default)]` empty string → old servers; the printer then falls
+    /// back to formatting `created_at_unix` itself.
+    #[serde(default)]
+    pub created_at_label: String,
     pub channel: OrderChannel,
     pub customer: Customer,
     pub items: Vec<LineItem>,
@@ -90,6 +97,11 @@ pub struct OrderForKitchen {
     /// Stripe payment confirmation). `None` when still pending.
     #[serde(default)]
     pub accepted_at_unix: Option<i64>,
+    /// Server-formatted "Angenommen" timestamp in the shop's timezone, printed
+    /// verbatim (same rationale as `created_at_label`). `None` when the order
+    /// hasn't been accepted yet.
+    #[serde(default)]
+    pub accepted_at_label: Option<String>,
     /// Full URL the QR code at the bottom encodes. Same target the
     /// customer's email links to: `<base>/orders/<id>`. None disables
     /// the QR block entirely.
@@ -322,6 +334,7 @@ mod tests {
             display_number: 1042,
             display_label: "MR-1105-0001".into(),
             created_at_unix: 1_700_000_000,
+            created_at_label: "14.11. 23:13".into(),
             channel: OrderChannel::Delivery {
                 address: DeliveryAddress {
                     street: "Musterstraße 12".into(),
@@ -349,6 +362,7 @@ mod tests {
             note: None,
             shop_name: "Mein Restaurant".into(),
             accepted_at_unix: None,
+            accepted_at_label: None,
             qr_url: Some("https://example.com/orders/abc".into()),
             is_test_mode: false,
             voucher_code: String::new(),

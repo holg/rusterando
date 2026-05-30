@@ -126,11 +126,19 @@ fn render(
         .bold(false)?;
 
     // ===== Fällig / Eingang timestamp =====
-    let created_ts = Local
-        .timestamp_opt(order.created_at_unix, 0)
-        .single()
-        .map(|t| t.format("Fällig: %d. %B, %H:%M").to_string())
-        .unwrap_or_else(|| "Fällig: —".into());
+    // Prefer the server-formatted label (shop's local TZ baked in); fall
+    // back to formatting the epoch with Local only for older servers that
+    // didn't send a label (then the Pi's TZ matters, but that's the legacy
+    // path; current servers always populate created_at_label).
+    let created_ts = if !order.created_at_label.is_empty() {
+        format!("Eingang: {}", order.created_at_label)
+    } else {
+        Local
+            .timestamp_opt(order.created_at_unix, 0)
+            .single()
+            .map(|t| t.format("Eingang: %d. %B, %H:%M").to_string())
+            .unwrap_or_else(|| "Eingang: —".into())
+    };
     p.justify(JustifyMode::CENTER)?
         .writeln(&created_ts)?
         .feed()?;
@@ -303,19 +311,30 @@ fn render(
     }
 
     // ===== Bestellung aufgegeben / angenommen =====
+    // Prefer the server-formatted labels (shop's local TZ); fall back to
+    // formatting the epoch with Local for older servers.
     p.feed()?.writeln(&"-".repeat(RECEIPT_WIDTH))?;
-    if let Some(t) = Local.timestamp_opt(order.created_at_unix, 0).single() {
-        p.writeln(&pad_line(
-            "Bestellung aufgegeben",
-            &t.format("%H:%M %d. %b").to_string(),
-        ))?;
+    let created_line = if !order.created_at_label.is_empty() {
+        order.created_at_label.clone()
+    } else {
+        Local
+            .timestamp_opt(order.created_at_unix, 0)
+            .single()
+            .map(|t| t.format("%H:%M %d. %b").to_string())
+            .unwrap_or_default()
+    };
+    if !created_line.is_empty() {
+        p.writeln(&pad_line("Bestellung aufgegeben", &created_line))?;
     }
-    if let Some(unix) = order.accepted_at_unix {
-        if let Some(t) = Local.timestamp_opt(unix, 0).single() {
-            p.writeln(&pad_line(
-                "Bestellung angenommen",
-                &t.format("%H:%M %d. %b").to_string(),
-            ))?;
+    let accepted_line = order.accepted_at_label.clone().or_else(|| {
+        order
+            .accepted_at_unix
+            .and_then(|u| Local.timestamp_opt(u, 0).single())
+            .map(|t| t.format("%H:%M %d. %b").to_string())
+    });
+    if let Some(line) = accepted_line {
+        if !line.is_empty() {
+            p.writeln(&pad_line("Bestellung angenommen", &line))?;
         }
     }
 
