@@ -128,7 +128,13 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 <AutoReload options=options.clone() />
-                <HydrationScripts options=options.clone()/>
+                // Custom replacement for leptos's HydrationScripts that
+                // reads hash.txt ONCE at startup via OnceLock instead of
+                // on every SSR render. See hydration_scripts.rs for the
+                // why; without this, leptos 0.8.x does an open+read+close
+                // on hash.txt per page render, which becomes the first
+                // thing to panic under any fd pressure.
+                <crate::hydration_scripts::CachedHydrationScripts options=options.clone()/>
                 <HashedStylesheet id="leptos" options/>
                 <MetaTags/>
                 // Page title baked directly into <head>. shell() runs

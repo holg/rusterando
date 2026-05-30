@@ -3,6 +3,7 @@
 pub mod app;
 pub mod branding;
 pub mod components;
+pub mod hydration_scripts;
 pub mod i18n;
 pub mod live;
 pub mod pages;
