@@ -576,6 +576,11 @@ WorkingDirectory=$REMOTE_BIN_DIR
 ExecStart=$REMOTE_BIN_DIR/$APP_NAME
 Restart=always
 RestartSec=5
+# Long-lived SSE streams + sqlite WAL each hold one fd; the systemd
+# default of 1024 runs out within hours under any real load and the
+# axum listener starts returning "Too many open files (os error 24)".
+# 65536 is comfortable headroom for a single pizzeria's traffic.
+LimitNOFILE=65536
 Environment=RUST_LOG=info
 Environment=TZ=$SHOP_TZ
 Environment=LEPTOS_HASH_FILES=true
