@@ -338,6 +338,25 @@ fn render(
         }
     }
 
+    // ===== Payment status directly above the QR code =====
+    // A prominent, unambiguous marker right where staff look when scanning:
+    // "BEZAHLT" if the order is already paid (card/online or fully covered by
+    // a voucher → Prepaid), or "NICHT BEZAHLT / Bar" when cash is still owed
+    // (CollectOnDelivery, regardless of channel). The headline is double-size
+    // (centered); the cash qualifier sits on a normal-size line below so the
+    // text never overruns the ~21 double-width columns of an 80-mm receipt.
+    p.feed()?.justify(JustifyMode::CENTER)?.bold(true)?;
+    match order.payment {
+        PaymentStatus::Prepaid => {
+            p.size(2, 2)?.writeln("BEZAHLT")?.reset_size()?;
+        }
+        PaymentStatus::CollectOnDelivery { .. } => {
+            p.size(2, 2)?.writeln("NICHT BEZAHLT")?.reset_size()?;
+            p.writeln("Bar")?;
+        }
+    }
+    p.bold(false)?.justify(JustifyMode::LEFT)?;
+
     // ===== QR code → order detail URL =====
     if let Some(url) = order.qr_url.as_deref() {
         if !url.is_empty() {
