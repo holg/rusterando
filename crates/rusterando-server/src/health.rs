@@ -181,14 +181,49 @@ pub fn spawn_self_monitor(interval: Duration) {
                     fds = ?snap.fds, fd_limit = ?snap.fd_limit, fd_pct = ?snap.fd_pct,
                     uptime_s = snap.uptime_s,
                     threshold_pct = FD_SELF_RESTART_PCT,
-                    "fd usage past self-restart threshold — exiting so systemd respawns us"
+                    "fd usage past self-restart threshold — initiating graceful shutdown"
                 );
-                // exit(1) so systemd treats it as a failure restart
-                // (matches the Restart=always policy, doesn't change
-                // the unit). Cannot use std::process::abort() because
-                // that'd leave a coredump behind on every restart;
-                // the tracing line above is the forensic record.
+                // Trigger the main() graceful-shutdown path by sending
+                // ourselves SIGTERM. axum's with_graceful_shutdown
+                // catches it, drains in-flight requests for 5 s, then
+                // closes the sqlite pool — same code path systemd
+                // uses on `systemctl restart`. Without this hop the
+                // process would just `exit(1)` and customers
+                // mid-checkout would see RST'd TCP connections.
+                //
+                // If the SIGTERM raise fails for any reason (kernel
+                // misconfigured? we shouldn't run anywhere it can),
+                // fall through to a hard exit(1) so we don't get
+                // stuck above the threshold forever. systemd's
+                // Restart=always picks us up either way.
+                //
+                // Gated to linux: libc is a Linux-only direct dep
+                // here (see Cargo.toml's
+                // [target.'cfg(target_os = "linux")'.dependencies]).
+                // macOS dev builds fall through to the hard exit;
+                // we never deploy to macOS anyway.
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    // SIGTERM = 15. raise() is async-signal-safe and
+                    // delivers the signal to the calling thread —
+                    // which is fine, the tokio runtime listens on
+                    // every thread.
+                    if libc::raise(libc::SIGTERM) != 0 {
+                        tracing::error!(
+                            "raise(SIGTERM) failed — falling back to exit(1)"
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
                 std::process::exit(1);
+                // Stop the loop on Linux — main() will hand control
+                // over to the shutdown future and the process will
+                // be down shortly. Looping further would risk a
+                // second SIGTERM raise (idempotent at the kernel
+                // level, but logs would look confused).
+                #[cfg(target_os = "linux")]
+                return;
             } else if pct >= 80 {
                 tracing::error!(
                     fds = ?snap.fds, fd_limit = ?snap.fd_limit, fd_pct = ?snap.fd_pct,

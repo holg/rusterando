@@ -583,12 +583,73 @@ async fn main() {
 
     tracing::info!("davidspizzeria listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(
+
+    // Graceful shutdown on SIGTERM (sent by `systemctl restart` /
+    // `systemctl stop`). The signal handler stops `accept()` on the
+    // listener, lets in-flight requests run to completion for up to
+    // 5 s (place_order is ~200-500 ms, menu.pdf render ~2 s — 5 s
+    // comfortably covers everything), then drops the sqlite pool so
+    // WAL is checkpointed cleanly before the process ends. Without
+    // this, customers mid-checkout get RST'd connections and the
+    // next startup has to roll back WAL rather than starting fresh.
+    //
+    // SIGINT (Ctrl-C in dev) takes the same path so a developer's
+    // ^C doesn't differ from prod's restart-by-systemd.
+    //
+    // We deliberately do NOT drain longer than 5 s: anything still
+    // running past that is wedged and SIGKILL (delivered by systemd
+    // after TimeoutStopSec=90 s) is the right answer. Also, customer-
+    // facing restart-window perception scales linearly with the
+    // drain timeout.
+    let db_for_shutdown = db.clone();
+    let shutdown_signal = async move {
+        let ctrl_c = async {
+            let _ = tokio::signal::ctrl_c().await;
+        };
+        #[cfg(unix)]
+        let terminate = async {
+            use tokio::signal::unix::{signal, SignalKind};
+            if let Ok(mut sig) = signal(SignalKind::terminate()) {
+                sig.recv().await;
+            } else {
+                // If we can't install the SIGTERM handler (rare —
+                // misconfigured kernel?) fall back to a future that
+                // never resolves so Ctrl-C still works.
+                std::future::pending::<()>().await;
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => tracing::info!("SIGINT received — draining"),
+            _ = terminate => tracing::info!("SIGTERM received — draining"),
+        }
+    };
+
+    if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal)
     .await
-    .unwrap();
+    {
+        tracing::error!(error = %e, "axum::serve exited with error");
+    }
+
+    // Post-drain: explicit sqlite pool close so WAL is checkpointed
+    // before exit. `pool.close()` waits for all live connections to
+    // be returned to the pool then runs a final checkpoint; with the
+    // 5-s drain above complete, this is effectively instant. Bounded
+    // by a 2-s timeout so a wedged checkpoint doesn't hold the
+    // shutdown forever.
+    tracing::info!("shutting down sqlite pool");
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        db_for_shutdown.close(),
+    )
+    .await;
+    tracing::info!("graceful shutdown complete");
 }
 
 #[derive(serde::Deserialize)]
