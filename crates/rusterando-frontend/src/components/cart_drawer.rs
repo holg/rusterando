@@ -222,14 +222,31 @@ pub fn CartDrawer() -> impl IntoView {
                         } else {
                             ("order-closed-note hidden", "")
                         };
-                        // Giveaway (free Pizzabrötchen). Three states:
+                        // Giveaway (free Pizzabrötchen). Four states:
                         //   • not qualified yet → nudge "noch X € bis zum …"
                         //   • qualified, unclaimed → "Jetzt sichern" + sauce choice
-                        //   • claimed → shown as a 0 € line in the list (no block)
+                        //   • claimed AND still qualified → quiet (line in list)
+                        //   • claimed BUT no longer qualifies → warn: customer
+                        //     removed paid items below the threshold after
+                        //     claiming. The line is still visually in the cart
+                        //     until checkout; place_order strips it server-side
+                        //     (authoritative gate in pages/order.rs). The hint
+                        //     keeps the UX honest so the customer isn't
+                        //     surprised when the freebie vanishes from the
+                        //     receipt. Pure WASM: no extra server call.
                         let giveaway = cart.giveaway.clone();
                         let give_view = giveaway.map(|g| {
-                            if g.claimed {
-                                // Already in the cart; the line list shows it.
+                            if g.claimed && !g.qualifies {
+                                view! {
+                                    <p class="giveaway-hint giveaway-revoked-hint">
+                                        {crate::t!("cart.giveaway_revoked")
+                                            .replace("{amount}", &format_eur(g.min_order_cents))}
+                                    </p>
+                                }
+                                .into_any()
+                            } else if g.claimed {
+                                // Quiet: claimed + still qualifies. Line shows
+                                // in the list with its 0 € price.
                                 view! { <></> }.into_any()
                             } else if g.qualifies {
                                 let sauce = RwSignal::new(String::new());

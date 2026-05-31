@@ -6,6 +6,7 @@ pub mod components;
 pub mod hydration_scripts;
 pub mod i18n;
 pub mod live;
+pub mod order_cache;
 pub mod pages;
 pub mod stripe;
 pub mod utils;

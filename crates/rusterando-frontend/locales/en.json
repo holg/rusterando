@@ -94,6 +94,7 @@
     "giveaway_unlocked": "🎁 You’ve earned a free Pizzabrötchen!",
     "giveaway_sauce_prompt": "Choose a sauce (required):",
     "giveaway_claim": "Claim now",
+    "giveaway_revoked": "🎁 Free add-on will be removed at checkout — minimum order {amount} no longer met.",
     "sauce_garlic": "Garlic sauce",
     "sauce_herb_butter": "Herb butter",
     "fab_open_aria": "Open cart",

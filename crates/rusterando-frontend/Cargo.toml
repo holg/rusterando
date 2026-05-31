@@ -42,8 +42,14 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { workspace = true, optional = true }
 console_log = { workspace = true, optional = true }
+# Wraps !Send web_sys types so they can cross `on_cleanup`'s
+# Send+Sync bound. WASM is single-threaded, so the wrapper's panic
+# path (used-from-wrong-thread) is unreachable in our build.
+send_wrapper = "0.6"
 web-sys = { version = "0.3", features = [
     "Window",
+    # localStorage for crate::order_cache (revisit /orders/<id> instantly)
+    "Storage",
     "Location",
     "HtmlInputElement",
     "HtmlSelectElement",

@@ -94,6 +94,7 @@
     "giveaway_unlocked": "🎁 Du hast ein gratis Pizzabrötchen frei!",
     "giveaway_sauce_prompt": "Sauce wählen (Pflicht):",
     "giveaway_claim": "Jetzt sichern",
+    "giveaway_revoked": "🎁 Gratis-Beigabe wird beim Checkout entfernt — Mindestbestellwert {amount} nicht mehr erreicht.",
     "sauce_garlic": "Knoblauchsauce",
     "sauce_herb_butter": "Kräuterbutter",
     "fab_open_aria": "Warenkorb öffnen",

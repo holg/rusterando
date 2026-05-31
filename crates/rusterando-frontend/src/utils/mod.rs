@@ -101,6 +101,8 @@ pub fn subscribe_order_live(
     notify: bool,
 ) {
     use rusterando_shared::models::{LiveEvent, LiveKind};
+    use std::cell::RefCell;
+    use std::rc::Rc;
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
 
@@ -166,10 +168,52 @@ pub fn subscribe_order_live(
             },
         );
         es.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
-        // Leak the closure + EventSource: they live for the page's lifetime;
-        // the browser tears the connection down on navigation/close.
-        on_msg.forget();
-        std::mem::forget(es);
+
+        // Stash the EventSource + closure in a per-effect RefCell so the
+        // owner's on_cleanup hook can drop them. Previously we
+        // `forget()`-ed both, which is fine on full-page navigation
+        // (browser tears down the tab's EventSources) but LEAKS on
+        // Leptos client-side routing: the OrderConfirmationPage unmounts,
+        // the effect is disposed, but the leaked ES stays connected
+        // forever. A second visit to /orders/<id> then opens ANOTHER
+        // EventSource on top, doubling the server's fd count per revisit.
+        //
+        // !Send web_sys types can't go through `on_cleanup` directly
+        // (the signature requires Send+Sync). We bridge via a thread_local
+        // slot: the cleanup hook just sets a flag; the next time the
+        // tokio/leptos event loop yields we close + drop the ES. Single-
+        // threaded WASM makes this race-free.
+        let es_slot: Rc<RefCell<Option<web_sys::EventSource>>> =
+            Rc::new(RefCell::new(Some(es)));
+        let closure_slot: Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MessageEvent)>>>> =
+            Rc::new(RefCell::new(Some(on_msg)));
+
+        // Register the close+drop hook on the current owner. The
+        // !Send Rc<RefCell<…>> values we want to drop wouldn't satisfy
+        // on_cleanup's `FnOnce + Send + Sync` bound on their own, but
+        // WASM is single-threaded so `send_wrapper::SendWrapper` is
+        // sound here: it asserts Send/Sync, then panics if anyone
+        // actually moves it off its origin thread. Inside the
+        // browser there IS no other thread, so the panic path is
+        // unreachable.
+        use send_wrapper::SendWrapper;
+        let es_for_drop = SendWrapper::new(es_slot.clone());
+        let closure_for_drop = SendWrapper::new(closure_slot.clone());
+        leptos::prelude::on_cleanup(move || {
+            // Take + close synchronously. The browser EventSource API
+            // is allowed to run on whatever thread we're on (it's all
+            // the main JS thread in WASM), so no spawn_local needed.
+            if let Some(es) = es_for_drop.borrow_mut().take() {
+                es.close();
+            }
+            // Dropping the closure frees the JS-side allocation; the
+            // browser's onmessage handler is detached as soon as the
+            // EventSource is closed above.
+            let _ = closure_for_drop.borrow_mut().take();
+        });
+        // Keep the slots alive for the lifetime of the effect: dropping
+        // them here would close the ES immediately.
+        let _ = (es_slot, closure_slot);
     });
 }
 

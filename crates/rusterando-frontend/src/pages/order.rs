@@ -3644,9 +3644,55 @@ pub fn OrderConfirmationPage() -> impl IntoView {
     let id = move || params.read().get("id").unwrap_or_default();
     let order = Resource::new(id, |id| async move { get_order(id).await });
 
+    // Browser-side cache: revisit shows the LAST snapshot instantly
+    // without waiting for the server fetch. Seeded post-hydration so
+    // SSR + first hydrate paint render identical DOM (the cache read
+    // would otherwise mismatch — localStorage doesn't exist on SSR).
+    // The Resource above still fires in parallel; when it resolves
+    // we overwrite the cached view AND refresh the cache entry. See
+    // crate::order_cache + [[feedback-in-memory-first]].
+    let cached: RwSignal<Option<OrderDetail>> = RwSignal::new(None);
+    #[cfg(feature = "hydrate")]
+    {
+        let id_for_cache = id.clone();
+        Effect::new(move |_| {
+            let oid = id_for_cache();
+            if oid.is_empty() {
+                return;
+            }
+            if let Some(cached_order) = crate::order_cache::load(&oid) {
+                cached.set(Some(cached_order));
+            }
+        });
+    }
+
+    // When the server response arrives, persist it (+1 to the LRU
+    // head) and let the rendered view switch from cached to fresh.
+    Effect::new(move |_| {
+        if let Some(Ok(o)) = order.get() {
+            #[cfg(feature = "hydrate")]
+            crate::order_cache::save(&o);
+            #[cfg(not(feature = "hydrate"))]
+            let _ = &o;
+        }
+    });
+
     view! {
         <section class="order-confirm">
-            <Suspense fallback=|| view! { <p class="loading">{crate::t!("common.loading")}</p> }>
+            <Suspense fallback=move || {
+                // Suspense fallback: render the cached order if we
+                // have one (revisit path), otherwise the spinner.
+                // SSR always sees `cached.get() == None` so the SSR
+                // fallback is the spinner — hydrate matches because
+                // the cache-seeding Effect hasn't run yet at the
+                // moment of first paint. The cached blob takes over
+                // on the NEXT reactive tick after hydrate, replacing
+                // the spinner before the server fetch returns.
+                move || match cached.get() {
+                    Some(o) => view! { <ConfirmationView o/> }.into_any(),
+                    None => view! { <p class="loading">{crate::t!("common.loading")}</p> }.into_any(),
+                }
+            }>
                 {move || order.get().map(|res| match res {
                     Err(e) => view! { <p class="error">{format!("{}: {e}", crate::t!("common.error"))}</p> }.into_any(),
                     Ok(o) => view! { <ConfirmationView o/> }.into_any(),
