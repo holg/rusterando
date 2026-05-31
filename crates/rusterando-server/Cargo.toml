@@ -48,6 +48,7 @@ leptos_router = { workspace = true, features = ["ssr"] }
 
 sqlx = { workspace = true }
 tower-cookies = "0.11"
+
 qrcode = { workspace = true }
 chrono = { workspace = true }
 async-stripe = { workspace = true }
@@ -81,3 +82,9 @@ typst-pdf = "0.14"
 typst-kit = { version = "0.14", features = ["embed-fonts"] }
 ecow = "0.2"
 comemo = "0.4"
+
+# RLIMIT_NOFILE lookup for src/health.rs (process-health observability).
+# Linux-only; the call is cfg-gated and macOS dev builds skip the syscall
+# entirely, returning None for the fd-limit field.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

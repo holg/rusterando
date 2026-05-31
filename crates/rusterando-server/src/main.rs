@@ -123,7 +123,16 @@ async fn main() {
     let connect_opts: SqliteConnectOptions = db_url
         .parse::<SqliteConnectOptions>()
         .expect("parse DATABASE_URL")
-        .create_if_missing(true);
+        .create_if_missing(true)
+        // Wait up to 5 s on SQLITE_BUSY instead of erroring immediately.
+        // sqlite serialises writes via WAL but a slow read on a checkpoint
+        // can still hand a BUSY back to a concurrent writer; the default
+        // behaviour is to return an error to sqlx, which then bubbles up
+        // as a 500. With this set, transient lock contention smooths
+        // itself out without ever surfacing to the customer. 5 s is well
+        // above the longest transaction we run (admin bulk imports take
+        // ~200 ms in the wild).
+        .busy_timeout(std::time::Duration::from_secs(5));
 
     let db = SqlitePoolOptions::new()
         .max_connections(5)
@@ -268,14 +277,53 @@ async fn main() {
             Ok(addr) => {
                 let chan = rusterando_server::kitchen::KitchenChannel::new(db.clone());
                 let listener_chan = chan.clone();
+                // Respawn loop: on 2026-05-30 the listener exited once
+                // with "Too many open files" and stayed dead the rest of
+                // the evening — the printer Pi reconnected to a closed
+                // port for 5 hours. The listener is a long-lived bind+
+                // accept; if it ever returns Err (transient I/O hiccup,
+                // listener_chan.clone() poisoned, anything), we log it
+                // and respawn after a short backoff so the kitchen
+                // subsystem self-heals without needing the whole process
+                // to restart. The bind() inside run_listener will fail
+                // if another instance is still holding the port — that's
+                // the desired guard against double-bind.
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        rusterando_server::kitchen::run_listener(listener_chan, addr).await
-                    {
-                        tracing::error!(error = %e, "kitchen listener exited");
+                    let mut backoff_s: u64 = 1;
+                    loop {
+                        let started = std::time::Instant::now();
+                        match rusterando_server::kitchen::run_listener(
+                            listener_chan.clone(),
+                            addr,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                tracing::info!("kitchen listener ended cleanly — respawning");
+                                backoff_s = 1;
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    uptime_s = started.elapsed().as_secs(),
+                                    backoff_s,
+                                    "kitchen listener exited with error — respawning",
+                                );
+                            }
+                        }
+                        // Cap the backoff at 30 s so a printer Pi
+                        // reconnecting after a long outage isn't stuck
+                        // for minutes. If we ran for >60 s before failing,
+                        // reset the backoff: a long-running listener that
+                        // crashes once is healthy enough to start fresh.
+                        if started.elapsed().as_secs() > 60 {
+                            backoff_s = 1;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_s)).await;
+                        backoff_s = (backoff_s * 2).min(30);
                     }
                 });
-                tracing::info!(%addr, "kitchen listener enabled");
+                tracing::info!(%addr, "kitchen listener enabled (with respawn)");
                 Some(chan)
             }
             Err(e) => {
@@ -481,6 +529,10 @@ async fn main() {
         // Global shop open/closed channel — home + cart subscribe so the
         // pause/force-open state flips without a reload.
         .route("/api/live/shop", axum::routing::get(live_shop_sse_handler))
+        // Process-health probe — fd usage + uptime. Designed for an
+        // external uptime monitor to poll every minute and alert on
+        // `status != "ok"`. Unauthenticated, counters only.
+        .route("/api/healthz", axum::routing::get(healthz_handler))
         .route(
             "/admin/history.csv",
             axum::routing::get(history_csv_handler),
@@ -517,6 +569,18 @@ async fn main() {
         .layer(CookieManagerLayer::new())
         .with_state(state);
 
+    // Self-monitor: sample fd usage every 30 s. Logs proof-of-life
+    // periodically when healthy, escalates on a leak, PROACTIVELY
+    // EXITS at 95% so systemd's `Restart=always` brings us back
+    // before axum's accept() starts rejecting with EMFILE. See
+    // crates/rusterando-server/src/health.rs and
+    // [[feedback-in-memory-first]] in the memory store. The whole
+    // thing is in-process (one readdir + one getrlimit per tick)
+    // — no disk writes, no nginx round-trip, no external probe.
+    rusterando_server::health::spawn_self_monitor(
+        std::time::Duration::from_secs(30),
+    );
+
     tracing::info!("davidspizzeria listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(
@@ -538,6 +602,32 @@ struct QrParams {
 /// Edit `public/.well-known/apple-app-site-association` to change.
 const APPLE_APP_SITE_ASSOCIATION: &[u8] =
     include_bytes!("../../../public/.well-known/apple-app-site-association");
+
+/// Process-health check for external uptime monitors. Returns the
+/// current file-descriptor count + soft limit + percentage so a
+/// monitoring service (or `curl https://davidspizzeria.de/api/healthz |
+/// jq .status`) can alert before the box runs out of fds again. The
+/// `status` field is the same `ok`/`warn`/`crit` ladder the periodic
+/// in-process logger uses — see `health::status_for_pct`. The endpoint
+/// is intentionally unauthenticated: it returns counters only, no PII,
+/// no cart/order data, and the rate limiter still applies. A failure
+/// to read the fd table degrades to `{fds: null, status: "ok"}` rather
+/// than 500 — we never want the healthcheck itself to flap.
+async fn healthz_handler() -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    let snap = rusterando_server::health::fd_snapshot();
+    let body = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".to_string());
+    // 200 even on warn/crit — operators read the JSON to decide. A
+    // non-200 here would cause uptime monitors to alert on EVERY
+    // elevated-fd reading instead of letting them threshold themselves.
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
+}
 
 /// Serves the Apple App Site Association manifest. Apple's link verifier
 /// is strict: it requires `200 OK`, exact `Content-Type: application/json`,
