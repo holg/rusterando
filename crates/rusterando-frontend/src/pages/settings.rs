@@ -516,8 +516,8 @@ pub mod ssr {
     /// so they never disagree. Returns `(paused, resume_label)`:
     ///   * `paused`        — indefinite switch on, OR an unexpired snooze.
     ///   * `resume_label`  — local "HH:MM" the snooze ends, when the
-    ///                       pause is purely timed (None for indefinite,
-    ///                       so the UI shows the generic/custom message).
+    ///     pause is purely timed (None for indefinite, so the UI shows
+    ///     the generic/custom message).
     pub async fn order_pause_state(db: &SqlitePool) -> (bool, Option<String>) {
         let indefinite = orders_paused(db).await;
         let until = orders_paused_until(db).await;

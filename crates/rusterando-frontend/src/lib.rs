@@ -40,6 +40,13 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::order::GetOrder>();
     leptos::server_fn::axum::register_explicit::<pages::order::LookupCustomerByPhone>();
     leptos::server_fn::axum::register_explicit::<pages::order::ValidateAddress>();
+    leptos::server_fn::axum::register_explicit::<pages::locality::GetPostcodeHints>();
+    leptos::server_fn::axum::register_explicit::<pages::locality::SetPostcodeHints>();
+    leptos::server_fn::axum::register_explicit::<pages::locality::GetDeliveryAreas>();
+    leptos::server_fn::axum::register_explicit::<pages::locality::SetDeliveryAreas>();
+    leptos::server_fn::axum::register_explicit::<pages::locality::GeocodeForAdmin>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::localities::LoadLocalitiesAdmin>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::localities::SaveBypassSettings>();
     leptos::server_fn::axum::register_explicit::<pages::order::StartTour>();
     leptos::server_fn::axum::register_explicit::<pages::order::GetTour>();
     leptos::server_fn::axum::register_explicit::<pages::order::TourStopDelivered>();
@@ -66,6 +73,8 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::admin::zones::CreateZone>();
     leptos::server_fn::axum::register_explicit::<pages::admin::zones::UpdateZone>();
     leptos::server_fn::axum::register_explicit::<pages::admin::zones::DeleteZone>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::address_attempts::ListAddressAttempts>(
+    );
     leptos::server_fn::axum::register_explicit::<pages::admin::pdf::GetPdfDefaults>();
     leptos::server_fn::axum::register_explicit::<pages::admin::pdf::ListPdfCovers>();
     leptos::server_fn::axum::register_explicit::<pages::admin::pdf::ActivatePdfCover>();

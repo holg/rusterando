@@ -209,9 +209,7 @@ pub fn spawn_self_monitor(interval: Duration) {
                     // which is fine, the tokio runtime listens on
                     // every thread.
                     if libc::raise(libc::SIGTERM) != 0 {
-                        tracing::error!(
-                            "raise(SIGTERM) failed — falling back to exit(1)"
-                        );
+                        tracing::error!("raise(SIGTERM) failed — falling back to exit(1)");
                         std::process::exit(1);
                     }
                 }

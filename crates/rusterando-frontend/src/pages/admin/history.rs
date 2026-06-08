@@ -874,8 +874,6 @@ fn SavingsPanel(s: SavingsSimulation, lifetime: SavingsSimulation) -> impl IntoV
     }
 }
 
-
-
 /// (Label, css-class) for the Zahlung pill. payment_method is "cash" |
 /// "card" | "voucher"; payment_status carries the actual settlement
 /// state.

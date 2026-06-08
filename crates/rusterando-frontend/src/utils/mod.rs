@@ -115,8 +115,8 @@ pub fn subscribe_order_live(
             return;
         };
         let oid = order_id.clone();
-        let on_msg = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
-            move |ev: web_sys::MessageEvent| {
+        let on_msg =
+            Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |ev: web_sys::MessageEvent| {
                 let Some(text) = ev.data().as_string() else {
                     return;
                 };
@@ -165,8 +165,7 @@ pub fn subscribe_order_live(
                     }
                     LiveKind::ShopStatus { .. } => {}
                 }
-            },
-        );
+            });
         es.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
 
         // Stash the EventSource + closure in a per-effect RefCell so the
@@ -183,8 +182,7 @@ pub fn subscribe_order_live(
         // slot: the cleanup hook just sets a flag; the next time the
         // tokio/leptos event loop yields we close + drop the ES. Single-
         // threaded WASM makes this race-free.
-        let es_slot: Rc<RefCell<Option<web_sys::EventSource>>> =
-            Rc::new(RefCell::new(Some(es)));
+        let es_slot: Rc<RefCell<Option<web_sys::EventSource>>> = Rc::new(RefCell::new(Some(es)));
         let closure_slot: Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MessageEvent)>>>> =
             Rc::new(RefCell::new(Some(on_msg)));
 
@@ -264,8 +262,8 @@ pub fn subscribe_shop_status(
 /// backoff (1s → 2s → 4s → 8s → 16s → 30s cap); resets to 1s on the next
 /// successful message so a brief blip doesn't push us to long delays.
 #[cfg(feature = "hydrate")]
-fn ensure_shop_status_singleton(
-) -> RwSignal<Option<(rusterando_shared::models::ShopLevel, String)>> {
+fn ensure_shop_status_singleton() -> RwSignal<Option<(rusterando_shared::models::ShopLevel, String)>>
+{
     use std::cell::{OnceCell, RefCell};
     use std::rc::Rc;
     thread_local! {
@@ -310,8 +308,8 @@ fn ensure_shop_status_singleton(
         // onmessage: parse the LiveEvent; only ShopStatus updates the
         // shared signal. Reset the backoff on success — proves the link
         // is healthy again so the next blip starts from 1s, not 30s.
-        let on_msg = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
-            move |ev: web_sys::MessageEvent| {
+        let on_msg =
+            Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |ev: web_sys::MessageEvent| {
                 use rusterando_shared::models::{LiveEvent, LiveKind};
                 let Some(text) = ev.data().as_string() else {
                     return;
@@ -323,8 +321,7 @@ fn ensure_shop_status_singleton(
                     BACKOFF_MS.with(|b| *b.borrow_mut() = 1_000);
                     sig.set(Some((level, reason)));
                 }
-            },
-        );
+            });
         es.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
         on_msg.forget();
 

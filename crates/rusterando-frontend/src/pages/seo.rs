@@ -64,7 +64,13 @@ mod ssr {
 
         // openingHoursSpecification — one per open weekday shift.
         const DAY: [&str; 7] = [
-            "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
         ];
         let opening: Vec<serde_json::Value> = match sqlx::query(
             "SELECT weekday, open_time, close_time FROM opening_hours WHERE is_closed = 0 ORDER BY weekday, open_time",
@@ -202,10 +208,8 @@ pub use ssr::{build_restaurant_jsonld, JsonLdHandle};
 #[cfg(feature = "ssr")]
 pub async fn rebuild_jsonld_cache() {
     use sqlx::SqlitePool;
-    let (Some(db), Some(handle)) = (
-        use_context::<SqlitePool>(),
-        use_context::<JsonLdHandle>(),
-    ) else {
+    let (Some(db), Some(handle)) = (use_context::<SqlitePool>(), use_context::<JsonLdHandle>())
+    else {
         return;
     };
     let branding = use_context::<crate::branding::BrandingHandle>()

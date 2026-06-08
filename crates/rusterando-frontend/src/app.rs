@@ -6,6 +6,7 @@ use leptos_router::{ParamSegment, StaticSegment};
 use crate::components::cart_drawer::{provide_cart_ctx, CartDrawer, CartFab};
 use crate::components::site_header::SiteHeader;
 use crate::components::test_mode_banner::TestModeBanner;
+use crate::pages::admin::address_attempts::AddressAttemptsPage;
 use crate::pages::admin::broadcast::BroadcastAdminPage;
 use crate::pages::admin::customers::{AdminCustomerDetailPage, AdminCustomersPage};
 use crate::pages::admin::extras_admin::ExtrasAdminPage;
@@ -13,6 +14,7 @@ use crate::pages::admin::history::AdminHistoryPage;
 use crate::pages::admin::home::AdminHomePage;
 use crate::pages::admin::home_admin::HomeAdminPage;
 use crate::pages::admin::hours::HoursAdminPage;
+use crate::pages::admin::localities::LocalitiesAdminPage;
 use crate::pages::admin::login::AdminLoginPage;
 use crate::pages::admin::menu_admin::AdminMenuPage;
 use crate::pages::admin::orders::{AdminOrderDetailPage, AdminOrdersPage};
@@ -27,8 +29,8 @@ use crate::pages::home::Home;
 use crate::pages::kitchen::board::KitchenBoardPage;
 use crate::pages::kitchen::login::KitchenLoginPage;
 use crate::pages::legal::{DatenschutzPage, ImpressumPage};
-use crate::pages::menu::{MenuCategoryPage, MenuPage};
 use crate::pages::lieferservice::DeliveryAreaPage;
+use crate::pages::menu::{MenuCategoryPage, MenuPage};
 use crate::pages::order::{CheckoutPage, OrderConfirmationPage};
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
@@ -319,6 +321,8 @@ pub fn App() -> impl IntoView {
                     <Route path=(StaticSegment("admin"), StaticSegment("customers"), ParamSegment("id")) view=AdminCustomerDetailPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("vouchers")) view=VouchersAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("zones")) view=ZonesAdminPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("localities")) view=LocalitiesAdminPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("address-attempts")) view=AddressAttemptsPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("pdf")) view=PdfAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("pricing")) view=PricingAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("hours")) view=HoursAdminPage/>

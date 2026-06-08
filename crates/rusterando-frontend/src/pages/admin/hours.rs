@@ -111,22 +111,25 @@ pub async fn load_hours_admin() -> Result<HoursAdmin, ServerFnError> {
     })
     .collect();
 
-    let special = sqlx::query_as::<_, (String, i64, Option<String>, Option<String>, Option<String>)>(
-        "SELECT date, is_closed, open_time, close_time, note
+    let special =
+        sqlx::query_as::<_, (String, i64, Option<String>, Option<String>, Option<String>)>(
+            "SELECT date, is_closed, open_time, close_time, note
          FROM special_hours ORDER BY date",
-    )
-    .fetch_all(&db)
-    .await
-    .map_err(|e| ServerFnError::new(format!("load special_hours: {e}")))?
-    .into_iter()
-    .map(|(date, is_closed, open_time, close_time, note)| SpecialRow {
-        date,
-        is_closed: is_closed != 0,
-        open_time: open_time.unwrap_or_default(),
-        close_time: close_time.unwrap_or_default(),
-        note: note.unwrap_or_default(),
-    })
-    .collect();
+        )
+        .fetch_all(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("load special_hours: {e}")))?
+        .into_iter()
+        .map(
+            |(date, is_closed, open_time, close_time, note)| SpecialRow {
+                date,
+                is_closed: is_closed != 0,
+                open_time: open_time.unwrap_or_default(),
+                close_time: close_time.unwrap_or_default(),
+                note: note.unwrap_or_default(),
+            },
+        )
+        .collect();
 
     let orders_paused = crate::pages::settings::ssr::orders_paused(&db).await;
     // Active timed snooze → local resume label for the status line.
@@ -157,9 +160,8 @@ pub async fn load_hours_admin() -> Result<HoursAdmin, ServerFnError> {
     // has slots) while the customer banner correctly shows closed — and
     // clicking it would force-close instead of clearing the snooze.
     let snoozed = !snooze_until_label.is_empty();
-    let effective_open = !orders_paused
-        && !snoozed
-        && !crate::pages::order::ssr::today_slots(&db).await.is_empty();
+    let effective_open =
+        !orders_paused && !snoozed && !crate::pages::order::ssr::today_slots(&db).await.is_empty();
 
     // The exact customer view (green/amber/red + reason). The admin status
     // line is driven by this so it can never show green while the customer
@@ -516,18 +518,8 @@ fn HoursBody(
     let (shop_live, set_shop_live) =
         signal::<Option<(ShopLevel, String)>>(Some((d.shop_level, d.shop_reason.clone())));
     crate::utils::subscribe_shop_status(set_shop_live);
-    let level = move || {
-        shop_live
-            .get()
-            .map(|(l, _)| l)
-            .unwrap_or(ShopLevel::Open)
-    };
-    let reason = move || {
-        shop_live
-            .get()
-            .map(|(_, r)| r)
-            .unwrap_or_default()
-    };
+    let level = move || shop_live.get().map(|(l, _)| l).unwrap_or(ShopLevel::Open);
+    let reason = move || shop_live.get().map(|(_, r)| r).unwrap_or_default();
     // "Open right now" — drives the toggle direction. NOT `effective_open`
     // (which counts a future pre-order slot as open).
     let open = move || level() == ShopLevel::Open;

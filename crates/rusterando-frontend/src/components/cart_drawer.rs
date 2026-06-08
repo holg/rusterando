@@ -247,7 +247,7 @@ pub fn CartDrawer() -> impl IntoView {
                             } else if g.claimed {
                                 // Quiet: claimed + still qualifies. Line shows
                                 // in the list with its 0 € price.
-                                view! { <></> }.into_any()
+                                ().into_any()
                             } else if g.qualifies {
                                 let sauce = RwSignal::new(String::new());
                                 let claim = ctx.claim_giveaway;

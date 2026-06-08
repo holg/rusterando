@@ -199,9 +199,14 @@ pub struct LocaleCtx(pub RwSignal<Locale>);
 /// Read the current locale from context. Falls back to DE if no
 /// context has been provided (defensive — every App() should call
 /// `provide_locale_ctx`).
+///
+/// Uses `get_untracked()` so callers that just want a snapshot ("what
+/// locale is this request / this render in?") don't register a reactive
+/// dependency. Components that need to *react* to locale switches
+/// should read `LocaleCtx`'s signal directly inside a `move ||` closure.
 pub fn current_locale() -> Locale {
     use_context::<LocaleCtx>()
-        .map(|c| c.0.get())
+        .map(|c| c.0.get_untracked())
         .unwrap_or(Locale::DEFAULT)
 }
 

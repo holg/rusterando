@@ -170,9 +170,15 @@ pub fn RoleSwitcher(
             }
         };
         let mut others: Vec<_> = Vec::new();
-        if current != Role::Admin   { others.push(pill(Role::Admin,   "Admin",  "🏪")); }
-        if current != Role::Kitchen { others.push(pill(Role::Kitchen, "Küche",  "👨‍🍳")); }
-        if current != Role::Driver  { others.push(pill(Role::Driver,  "Fahrer", "🛵")); }
+        if current != Role::Admin {
+            others.push(pill(Role::Admin, "Admin", "🏪"));
+        }
+        if current != Role::Kitchen {
+            others.push(pill(Role::Kitchen, "Küche", "👨‍🍳"));
+        }
+        if current != Role::Driver {
+            others.push(pill(Role::Driver, "Fahrer", "🛵"));
+        }
         view! {
             <nav class="role-switcher" aria-label="Bereich wechseln">
                 {pill(current, current.label_de(), match current {

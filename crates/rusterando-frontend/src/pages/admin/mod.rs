@@ -1,10 +1,12 @@
+pub mod address_attempts;
 pub mod broadcast;
 pub mod customers;
 pub mod extras_admin;
 pub mod history;
 pub mod home;
-pub mod hours;
 pub mod home_admin;
+pub mod hours;
+pub mod localities;
 pub mod login;
 pub mod menu_admin;
 pub mod options_admin;

@@ -6,6 +6,7 @@ pub mod home_content;
 pub mod kitchen;
 pub mod legal;
 pub mod lieferservice;
+pub mod locality;
 pub mod menu;
 pub mod order;
 pub mod push;

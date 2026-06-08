@@ -116,7 +116,10 @@ fn generated_copy(p: &AreaPage) -> String {
         format!("für {} Liefergebühr", format_eur(p.fee_cents))
     };
     let minord = if p.min_order_cents > 0 {
-        format!(" ab einem Mindestbestellwert von {}", format_eur(p.min_order_cents))
+        format!(
+            " ab einem Mindestbestellwert von {}",
+            format_eur(p.min_order_cents)
+        )
     } else {
         String::new()
     };
@@ -136,7 +139,7 @@ pub fn DeliveryAreaPage() -> impl IntoView {
     let slug = move || params.read().get("area_slug").unwrap_or_default();
     // Blocking so an unknown slug sets HTTP 404 before the head flushes and
     // the canonical/meta land in <head>.
-    let data = Resource::new_blocking(slug.clone(), |s| async move { load_delivery_area(s).await });
+    let data = Resource::new_blocking(slug, |s| async move { load_delivery_area(s).await });
 
     let base = crate::pages::home::site_url();
     let base = base.trim_end_matches('/').to_string();

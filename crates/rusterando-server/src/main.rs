@@ -258,11 +258,13 @@ async fn main() {
 
     // Online-order pause switch — same boot read + write-through pattern.
     // Default false (orders follow opening hours only).
-    let orders_paused_initial =
-        rusterando_frontend::pages::settings::ssr::orders_paused(&db).await;
+    let orders_paused_initial = rusterando_frontend::pages::settings::ssr::orders_paused(&db).await;
     let orders_paused =
         rusterando_frontend::pages::settings::OrdersPausedHandle::new(orders_paused_initial);
-    tracing::info!(paused = orders_paused_initial, "orders-paused toggle at boot");
+    tracing::info!(
+        paused = orders_paused_initial,
+        "orders-paused toggle at boot"
+    );
 
     // Live customer channel hub (SSE). In-memory broadcast; nothing to
     // seed from the DB.
@@ -292,11 +294,8 @@ async fn main() {
                     let mut backoff_s: u64 = 1;
                     loop {
                         let started = std::time::Instant::now();
-                        match rusterando_server::kitchen::run_listener(
-                            listener_chan.clone(),
-                            addr,
-                        )
-                        .await
+                        match rusterando_server::kitchen::run_listener(listener_chan.clone(), addr)
+                            .await
                         {
                             Ok(()) => {
                                 tracing::info!("kitchen listener ended cleanly — respawning");
@@ -413,9 +412,8 @@ async fn main() {
                 let i18n = state.i18n.clone();
                 let orders_paused = state.orders_paused.clone();
                 let live = state.live.clone();
-                let uploads = rusterando_frontend::pages::settings::UploadsDir(
-                    state.uploads_dir.clone(),
-                );
+                let uploads =
+                    rusterando_frontend::pages::settings::UploadsDir(state.uploads_dir.clone());
                 let jsonld = state.jsonld.clone();
                 move || {
                     provide_context(db.clone());
@@ -577,9 +575,7 @@ async fn main() {
     // [[feedback-in-memory-first]] in the memory store. The whole
     // thing is in-process (one readdir + one getrlimit per tick)
     // — no disk writes, no nginx round-trip, no external probe.
-    rusterando_server::health::spawn_self_monitor(
-        std::time::Duration::from_secs(30),
-    );
+    rusterando_server::health::spawn_self_monitor(std::time::Duration::from_secs(30));
 
     tracing::info!("davidspizzeria listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
@@ -644,11 +640,7 @@ async fn main() {
     // by a 2-s timeout so a wedged checkpoint doesn't hold the
     // shutdown forever.
     tracing::info!("shutting down sqlite pool");
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        db_for_shutdown.close(),
-    )
-    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), db_for_shutdown.close()).await;
     tracing::info!("graceful shutdown complete");
 }
 
@@ -726,12 +718,13 @@ async fn backfill_category_slugs(db: &SqlitePool) -> Result<(), sqlx::Error> {
     use rusterando_shared::models::seo_slug;
 
     // Existing non-empty slugs, so generated ones don't collide with them.
-    let mut taken: std::collections::HashSet<String> =
-        sqlx::query_scalar::<_, String>("SELECT slug FROM menu_categories WHERE slug IS NOT NULL AND slug <> ''")
-            .fetch_all(db)
-            .await?
-            .into_iter()
-            .collect();
+    let mut taken: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT slug FROM menu_categories WHERE slug IS NOT NULL AND slug <> ''",
+    )
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .collect();
 
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, name FROM menu_categories WHERE slug IS NULL OR slug = '' ORDER BY sort_order, id",
@@ -741,7 +734,11 @@ async fn backfill_category_slugs(db: &SqlitePool) -> Result<(), sqlx::Error> {
 
     for (id, name) in rows {
         let base = seo_slug(&name);
-        let base = if base.is_empty() { "kategorie".to_string() } else { base };
+        let base = if base.is_empty() {
+            "kategorie".to_string()
+        } else {
+            base
+        };
         let mut slug = base.clone();
         let mut n = 2;
         while taken.contains(&slug) {
@@ -911,8 +908,9 @@ async fn robots_handler() -> impl axum::response::IntoResponse {
 async fn live_order_sse_handler(
     axum::extract::Path(order_id): axum::extract::Path<String>,
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
-{
+) -> axum::response::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use futures::StreamExt;
 
@@ -940,9 +938,7 @@ async fn live_order_sse_handler(
     // half-open for minutes/hours. Empirically (2026-05-30) this leaks
     // ~1 fd per 8 closed clients with the 15s default; 5s reduces the
     // window 3× and brings steady-state fds in line with active clients.
-    Sse::new(stream).keep_alive(
-        KeepAlive::new().interval(std::time::Duration::from_secs(5)),
-    )
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))
 }
 
 /// `/api/live/shop` — SSE stream of global shop open/closed changes. Home +
@@ -950,8 +946,9 @@ async fn live_order_sse_handler(
 /// live (no reload). Filters the shared hub to `ShopStatus` events.
 async fn live_shop_sse_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>
-{
+) -> axum::response::Sse<
+    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use futures::StreamExt;
     use rusterando_shared::models::LiveKind;
@@ -968,9 +965,7 @@ async fn live_shop_sse_handler(
     });
 
     // 5s keep-alive (see live_order_sse_handler for the why).
-    Sse::new(stream).keep_alive(
-        KeepAlive::new().interval(std::time::Duration::from_secs(5)),
-    )
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))
 }
 
 /// Max upload size — keeps decompression bombs out and matches what a
@@ -1946,7 +1941,10 @@ async fn menu_pdf_handler(
     };
     // Ingredients are ON by default (full hand-out menu). `?condensed=1`
     // (also accepts "true"/"yes") flips to the title+price-only in-house menu.
-    let condensed = matches!(p.condensed.as_deref(), Some("1") | Some("true") | Some("yes"));
+    let condensed = matches!(
+        p.condensed.as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    );
     let show_ingredients = !condensed;
     // Distinct download filename per format + variant.
     let variant = if condensed { "-kompakt" } else { "" };
@@ -2024,9 +2022,8 @@ async fn server_fn_handler(
             let i18n = state.i18n.clone();
             let orders_paused = state.orders_paused.clone();
             let live = state.live.clone();
-            let uploads = rusterando_frontend::pages::settings::UploadsDir(
-                state.uploads_dir.clone(),
-            );
+            let uploads =
+                rusterando_frontend::pages::settings::UploadsDir(state.uploads_dir.clone());
             let jsonld = state.jsonld.clone();
             move || {
                 provide_context(db.clone());

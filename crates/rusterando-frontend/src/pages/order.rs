@@ -189,6 +189,13 @@ pub struct AddressValidation {
     pub longitude: Option<f64>,
     /// Echo of normalised parts — UI can show what we resolved against.
     pub matched_label: Option<String>,
+    /// When `ok == false`: if the shop has the paid-bypass configured
+    /// and the rejection is `wrong_municipality` / `wrong_suburb` (the
+    /// kinds the bypass would save), this carries the threshold in
+    /// cents so the cart drawer can render a "ab X € online bezahlt
+    /// liefern wir trotzdem" hint. `None` when bypass isn't configured
+    /// or the rejection wouldn't be saved by it (e.g. out_of_radius).
+    pub bypass_hint_min_cents: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -635,10 +642,6 @@ pub mod ssr {
             Err(_) => utc.to_string(),
         }
     }
-    /// Default closing time for an ad-hoc force-open day ("Jetzt öffnen"
-    /// on a Ruhetag): orders run from now until this local time.
-    pub const DEFAULT_FORCE_CLOSE: &str = "22:00";
-
     pub fn now_local() -> chrono::DateTime<Local> {
         Local::now()
     }
@@ -660,7 +663,7 @@ pub mod ssr {
     /// With no override, the weekday rows in `opening_hours` apply as before.
     /// Today's open windows as raw `(open "HH:MM", close "HH:MM")` strings,
     /// with the full precedence: a planned `special_hours` row wins; else an
-    /// ad-hoc force-open synthesises a now→DEFAULT_FORCE_CLOSE window (even
+    /// ad-hoc force-open synthesises a now→`force_open_until` window (even
     /// on a Ruhetag); else the weekday schedule (possibly multiple shifts).
     /// The manual *pause* is NOT considered here — it's checked separately
     /// in the gate / `shop_open_state`. Shared by `today_slots` and the
@@ -687,12 +690,13 @@ pub mod ssr {
             Some(_) => Vec::new(),
             // No planned override.
             None => {
-                if crate::pages::settings::ssr::force_open_until(db).await.is_some() {
-                    // Ad-hoc force-open: open from now until the default
-                    // close time, regardless of the weekday schedule.
+                if let Some(until) = crate::pages::settings::ssr::force_open_until(db).await {
+                    // Ad-hoc force-open: open from now until the admin's
+                    // chosen deadline (DB-driven, no hardcoded ceiling),
+                    // regardless of the weekday schedule.
                     vec![(
                         now.format("%H:%M").to_string(),
-                        DEFAULT_FORCE_CLOSE.to_string(),
+                        until.with_timezone(&Local).format("%H:%M").to_string(),
                     )]
                 } else {
                     // The weekday schedule (may be multiple shifts).
@@ -769,13 +773,12 @@ pub mod ssr {
     pub async fn is_ruhetag_today(db: &sqlx::SqlitePool) -> bool {
         let now = now_local();
         let weekday = now.weekday().num_days_from_sunday() as i64;
-        let rows = sqlx::query_as::<_, (i64,)>(
-            "SELECT is_closed FROM opening_hours WHERE weekday = ?1",
-        )
-        .bind(weekday)
-        .fetch_all(db)
-        .await
-        .unwrap_or_default();
+        let rows =
+            sqlx::query_as::<_, (i64,)>("SELECT is_closed FROM opening_hours WHERE weekday = ?1")
+                .bind(weekday)
+                .fetch_all(db)
+                .await
+                .unwrap_or_default();
         // Rows exist and all are closed (a true Ruhetag), or no rows at all.
         rows.iter().all(|(c,)| *c != 0)
     }
@@ -787,23 +790,28 @@ pub mod ssr {
     ///   2. timed snooze               → closed, "ab HH:MM Uhr wieder da"
     ///   3. no slot today              → closed, "Heute Ruhetag" or hours
     ///   4. else                       → open
+    ///
     /// (force-open is already reflected in `today_slots`, so it makes the
     /// no-slot branch fall through to open.)
+    ///
     /// Is the shop within an open window *right now*? (open ≤ now < close
     /// for some window today.) This is "open at this very moment", distinct
     /// from "has a bookable future slot today" — at 08:00 with an 11:30
     /// window there's a pre-order slot but the shop is not open *now*.
     pub async fn open_right_now(db: &sqlx::SqlitePool) -> bool {
         let now = now_local().time();
-        today_windows(db).await.into_iter().any(|(open_s, close_s)| {
-            match (
-                NaiveTime::parse_from_str(&open_s, "%H:%M"),
-                NaiveTime::parse_from_str(&close_s, "%H:%M"),
-            ) {
-                (Ok(o), Ok(c)) => o <= now && now < c,
-                _ => false,
-            }
-        })
+        today_windows(db)
+            .await
+            .into_iter()
+            .any(|(open_s, close_s)| {
+                match (
+                    NaiveTime::parse_from_str(&open_s, "%H:%M"),
+                    NaiveTime::parse_from_str(&close_s, "%H:%M"),
+                ) {
+                    (Ok(o), Ok(c)) => o <= now && now < c,
+                    _ => false,
+                }
+            })
     }
 
     /// Earliest window-open time strictly later than `now` today, as
@@ -831,6 +839,7 @@ pub mod ssr {
     ///   3. a slot exists now   → Open (green)
     ///   4. opens later today   → OpensLater (amber) "Heute ab HH:MM geöffnet"
     ///   5. else                → Closed (red) Ruhetag / outside hours
+    ///
     /// Any pause is amber (temporary, self-resolving); red is reserved for a
     /// hard close with nothing more today.
     pub async fn shop_open_state(
@@ -842,8 +851,7 @@ pub mod ssr {
         let (paused, resume_at) = sset::order_pause_state(db).await;
         if paused {
             let reason = match resume_at {
-                Some(t) => crate::i18n::t("shop_status.paused_until")
-                    .replace("{time}", &t),
+                Some(t) => crate::i18n::t("shop_status.paused_until").replace("{time}", &t),
                 None => {
                     let msg = sset::orders_paused_message(db).await;
                     if msg.is_empty() {
@@ -889,8 +897,7 @@ pub mod ssr {
         let (paused, resume_at) = sset::order_pause_state(db).await;
         if paused {
             let reason = match resume_at {
-                Some(t) => crate::i18n::t("shop_status.gate_back_at")
-                    .replace("{time}", &t),
+                Some(t) => crate::i18n::t("shop_status.gate_back_at").replace("{time}", &t),
                 None => {
                     let msg = sset::orders_paused_message(db).await;
                     if msg.is_empty() {
@@ -939,7 +946,9 @@ pub mod ssr {
         .bind(&body)
         .fetch_one(db)
         .await;
-        let Ok((msg_id, created_at)) = inserted else { return };
+        let Ok((msg_id, created_at)) = inserted else {
+            return;
+        };
         if let Some(hub) = use_context::<crate::live::LiveHub>() {
             hub.send(rusterando_shared::models::LiveEvent {
                 order_id: order_id.to_string(),
@@ -1269,53 +1278,308 @@ pub mod ssr {
         2.0 * R * h.sqrt().asin()
     }
 
-    /// Pure classifier — testable, no I/O. Maps an OSM result onto our three
-    /// zone IDs. Returns None for "out of delivery area" (any reason: too
-    /// far away, wrong city, unknown suburb shape).
+    /// Why `classify_zone` rejected an address. Drives both the customer-
+    /// facing message (mapped to a friendly German string in
+    /// `validate_address`) and the `address_attempts` audit row's
+    /// `rejection_reason` column.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum RejectionReason {
+        /// Resolved point is farther than `SANITY_RADIUS_KM` from the
+        /// shop. Hard floor — applies even to paid-bypass orders. `f64`
+        /// is the actual distance in km.
+        OutOfRadius(f64),
+        /// Resolved municipality (`city`/`town`/`municipality`) didn't
+        /// match any entry in `delivery_areas.served_municipalities`,
+        /// AND no `extra_circles` rule caught the resolved lat/lon,
+        /// AND the order didn't qualify for the paid-bypass rule.
+        WrongMunicipality { got: String, served: Vec<String> },
+        /// A served-municipality matched, but the resolved suburb wasn't
+        /// in its `zone_routing` AND no `"*"` wildcard fallback was
+        /// configured.
+        WrongSuburb { got: String, municipality: String },
+        /// The resolved zone_id from config doesn't exist (or is
+        /// inactive) in `delivery_zones`. Indicates an admin
+        /// misconfiguration; the customer message points to the phone.
+        NoZone(String),
+    }
+    impl RejectionReason {
+        pub fn slug(&self) -> &'static str {
+            match self {
+                Self::OutOfRadius(_) => "out_of_radius",
+                Self::WrongMunicipality { .. } => "wrong_municipality",
+                Self::WrongSuburb { .. } => "wrong_suburb",
+                Self::NoZone(_) => "no_zone",
+            }
+        }
+        pub fn detail(&self) -> String {
+            match self {
+                Self::OutOfRadius(km) => {
+                    format!("{:.1} km from shop (limit {} km)", km, SANITY_RADIUS_KM as i64)
+                }
+                Self::WrongMunicipality { got, served } => {
+                    if served.is_empty() {
+                        format!("city='{got}'; no served_municipalities configured")
+                    } else {
+                        format!(
+                            "city='{got}' not in [{}]; no extra-circle match",
+                            served.join(", ")
+                        )
+                    }
+                }
+                Self::WrongSuburb { got, municipality } => format!(
+                    "municipality '{municipality}' matched but suburb '{got}' not in zone_routing (no '*' fallback)"
+                ),
+                Self::NoZone(zid) => format!("configured zone_id '{zid}' missing or inactive"),
+            }
+        }
+    }
+
+    /// Friendly German customer message for each rejection. `phone` is
+    /// appended as a call-to-action so the customer always has an out —
+    /// even when our classifier disagrees with reality. Empty phone is
+    /// handled gracefully (no trailing "rufen Sie uns an: " with nothing).
+    pub fn rejection_message(reason: &RejectionReason, phone: &str) -> String {
+        let call_to_action = if phone.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" Bei Fragen rufen Sie uns an: {phone}.")
+        };
+        match reason {
+            RejectionReason::OutOfRadius(_) => {
+                format!("Diese Adresse liegt außerhalb unseres Liefergebiets.{call_to_action}")
+            }
+            RejectionReason::WrongMunicipality { served, .. } => {
+                if served.is_empty() {
+                    format!("Diese Adresse können wir nicht zuordnen.{call_to_action}")
+                } else {
+                    let list = served.join(", ");
+                    format!(
+                        "Wir liefern in {list}. Sollten Sie dort wohnen, bitte den Ortsnamen prüfen.{call_to_action}"
+                    )
+                }
+            }
+            RejectionReason::WrongSuburb { municipality, .. } => format!(
+                "Adresse in {municipality} liegt außerhalb unseres Liefergebiets.{call_to_action}"
+            ),
+            RejectionReason::NoZone(_) => {
+                format!("Liefergebiet zur Zeit nicht zuzuordnen.{call_to_action}")
+            }
+        }
+    }
+
+    /// All rejection-reason slugs the audit table accepts. The classifier
+    /// produces `out_of_radius` / `wrong_municipality` / `wrong_suburb` /
+    /// `no_zone`; `validate_address` also writes `no_results` (Nominatim
+    /// found nothing) and `http_error` (Nominatim unreachable / 5xx)
+    /// before classify_zone is even reached.
+    pub const REJECTION_NO_RESULTS: &str = "no_results";
+    pub const REJECTION_HTTP_ERROR: &str = "http_error";
+
+    /// Optional paid-bypass context. When `Some` AND the order is online-
+    /// paid AND `total_cents >= bypass_paid_min_cents`, classify_zone
+    /// returns `bypass_zone_id` instead of rejecting
+    /// `WrongMunicipality` / `WrongSuburb`. The 30 km sanity wall still
+    /// applies (Nominatim mis-resolves are still rejected).
+    #[derive(Debug, Clone, Default)]
+    pub struct BypassContext {
+        /// "card" / "cash" / "voucher". Bypass only fires on online-paid
+        /// (card OR voucher reducing total to zero).
+        pub payment_method: String,
+        pub total_cents: i64,
+        /// The configured bypass threshold (`shop_bypass_paid_min_cents`).
+        pub min_cents: i64,
+        /// The configured bypass zone (`shop_bypass_zone_id`). Empty =
+        /// bypass disabled even if the threshold is met.
+        pub zone_id: String,
+    }
+    impl BypassContext {
+        /// Does this context enable a bypass? Both knobs must be set
+        /// AND the order must be online-paid (card OR voucher to zero).
+        pub fn would_apply(&self) -> bool {
+            if self.min_cents <= 0 || self.zone_id.trim().is_empty() {
+                return false;
+            }
+            if self.total_cents < self.min_cents {
+                return false;
+            }
+            // Only online payment. Cash by definition isn't paid yet, so
+            // the bypass risk profile doesn't apply.
+            matches!(self.payment_method.as_str(), "card" | "voucher")
+        }
+    }
+
+    /// Append one row to `address_attempts`. Best-effort: errors are
+    /// logged but never bubble — failing to write the audit log must not
+    /// block a customer from seeing the rejection message.
+    ///
+    /// Bounds the log size on the way in: trims rows older than 60 days,
+    /// then enforces a 5_000-row cap by deleting the oldest if we'd
+    /// otherwise exceed it. Both run cheap on the index — at the volumes
+    /// expected (a few rejections a day) the DELETE statements are
+    /// effectively free.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_address_attempt(
+        db: &sqlx::SqlitePool,
+        street: &str,
+        house_number: &str,
+        postcode: &str,
+        city: &str,
+        resolved_lat: Option<f64>,
+        resolved_lon: Option<f64>,
+        resolved_city: Option<&str>,
+        resolved_suburb: Option<&str>,
+        distance_km: Option<f64>,
+        rejection_reason: &str,
+        rejection_detail: Option<&str>,
+        raw_nominatim_json: Option<&str>,
+        customer_phone: Option<&str>,
+        customer_email: Option<&str>,
+    ) {
+        let id = uuid::Uuid::new_v4().to_string();
+        let insert = sqlx::query(
+            "INSERT INTO address_attempts
+                (id, input_street, input_house_number, input_postcode, input_city,
+                 resolved_lat, resolved_lon, resolved_city, resolved_suburb,
+                 distance_km, rejection_reason, rejection_detail,
+                 raw_nominatim_json, customer_phone, customer_email)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        )
+        .bind(&id)
+        .bind(street)
+        .bind(house_number)
+        .bind(postcode)
+        .bind(city)
+        .bind(resolved_lat)
+        .bind(resolved_lon)
+        .bind(resolved_city)
+        .bind(resolved_suburb)
+        .bind(distance_km)
+        .bind(rejection_reason)
+        .bind(rejection_detail)
+        .bind(raw_nominatim_json)
+        .bind(customer_phone)
+        .bind(customer_email)
+        .execute(db)
+        .await;
+        if let Err(e) = insert {
+            log::warn!("[address_attempts] insert failed: {e}");
+            return;
+        }
+        // Soft prune: keep the table bounded. Both statements are cheap on
+        // the idx_address_attempts_at index.
+        let _ = sqlx::query(
+            "DELETE FROM address_attempts
+             WHERE attempted_at < datetime('now', '-60 days')",
+        )
+        .execute(db)
+        .await;
+        let _ = sqlx::query(
+            "DELETE FROM address_attempts
+             WHERE id IN (
+                 SELECT id FROM address_attempts
+                 ORDER BY attempted_at DESC
+                 LIMIT -1 OFFSET 5000
+             )",
+        )
+        .execute(db)
+        .await;
+    }
+
+    /// Pure classifier — testable, no I/O. Walks the configured
+    /// delivery-area model and returns either the matched `zone_id` or
+    /// the precise `RejectionReason`. Callers translate the reason to a
+    /// customer message + an audit-log row.
+    ///
+    /// Match order:
+    ///
+    ///   1. 30 km sanity wall — Nominatim-mis-resolves can't slip past,
+    ///      not even via the paid-bypass.
+    ///   2. `extra_circles` — first whose haversine to the resolved
+    ///      point is within `radius_km` wins. Cheap exact-match for
+    ///      admin-configured outliers.
+    ///   3. `served_municipalities` — first whose `match_names` matches
+    ///      the resolved city/town/municipality, then walk its
+    ///      `zone_routing` (specific suburb match → `"*"` fallback).
+    ///   4. Paid-bypass — if the order is online-paid AND total ≥
+    ///      threshold AND a bypass zone is configured, return that zone
+    ///      INSTEAD OF `WrongMunicipality` / `WrongSuburb`. Does NOT
+    ///      override step 1.
+    ///   5. Else → `WrongMunicipality` (or `WrongSuburb` if the
+    ///      municipality matched but the suburb didn't).
     pub fn classify_zone(
         lat: f64,
         lon: f64,
         suburb: Option<&str>,
         city: Option<&str>,
-        expected_city: &str,
-    ) -> Option<&'static str> {
-        // Skip the sanity-radius check when the shop hasn't set its
-        // own coordinates yet (fresh install / demo deploy). Same
-        // fail-open posture as the expected_city check below — better
-        // to let an order through than block every customer until
-        // /admin/branding is filled in.
-        let shop = pizzeria_coords();
-        if shop != (0.0, 0.0) && haversine_km(shop, (lat, lon)) > SANITY_RADIUS_KM {
-            return None;
-        }
-        let city = city.unwrap_or("");
-        // expected_city comes from BrandingHandle.shop_city. If the
-        // shop hasn't filled it in yet we fail open here (return None
-        // would block all orders) — admin nags via /admin/branding to
-        // set it before going live.
-        if !expected_city.is_empty() && !city.eq_ignore_ascii_case(expected_city) {
-            return None;
-        }
-        let suburb = suburb.unwrap_or("").trim();
-        if suburb.eq_ignore_ascii_case("Seppenrade") {
-            return Some("dz-seppenrade");
-        }
-        // Empty suburb OR Nominatim's "<City> (Stadt)" district label both
-        // mean "city proper" — base zone. Any *other* suburb name within
-        // the expected city → outlying-zone fallback.
-        if suburb.is_empty() || is_city_proper_district(suburb, city) {
-            return Some("dz-luedinghausen");
-        }
-        Some("dz-bauerschaften")
-    }
+        areas: &crate::pages::locality::DeliveryAreas,
+        bypass: &BypassContext,
+    ) -> Result<String, RejectionReason> {
+        use crate::pages::locality::{municipality_matches, route_suburb};
 
-    /// Nominatim sometimes labels the city centre as `<City> (Stadt)` in
-    /// `city_district`. That's still the base zone, not an outlying suburb.
-    fn is_city_proper_district(suburb: &str, city: &str) -> bool {
-        let s = suburb.trim();
-        // Strip a trailing "(Stadt)" / "(Stadtteil)" / "(Kernstadt)" marker.
-        let bare = s.split('(').next().unwrap_or(s).trim();
-        bare.eq_ignore_ascii_case(city)
+        // 1. Hard sanity wall. Applies to everything, paid or not.
+        let shop = pizzeria_coords();
+        if shop != (0.0, 0.0) {
+            let km = haversine_km(shop, (lat, lon));
+            if km > SANITY_RADIUS_KM {
+                return Err(RejectionReason::OutOfRadius(km));
+            }
+        }
+
+        // 2. Extra circles (explicit outliers like Nordkirchen-Bauerschaften).
+        //    Cheap and first because admin-configured points should win
+        //    over any name-based heuristic.
+        for c in &areas.extra_circles {
+            if !c.radius_km.is_finite() || c.radius_km <= 0.0 {
+                continue;
+            }
+            let km = haversine_km((c.center_lat, c.center_lon), (lat, lon));
+            if km <= c.radius_km {
+                return Ok(c.zone_id.clone());
+            }
+        }
+
+        // 3. Served-municipality match.
+        let resolved_city = city.unwrap_or("").trim();
+        let resolved_suburb = suburb.unwrap_or("").trim();
+        let matched_muni = areas
+            .served_municipalities
+            .iter()
+            .find(|m| municipality_matches(m, resolved_city));
+
+        if let Some(m) = matched_muni {
+            if let Some(route) = route_suburb(&m.zone_routing, resolved_suburb) {
+                return Ok(route.zone_id.clone());
+            }
+            // Municipality matched but no suburb route (no specific
+            // match AND no wildcard). Paid-bypass can save this.
+            if bypass.would_apply() {
+                return Ok(bypass.zone_id.clone());
+            }
+            return Err(RejectionReason::WrongSuburb {
+                got: resolved_suburb.to_string(),
+                municipality: m
+                    .match_names
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| resolved_city.to_string()),
+            });
+        }
+
+        // 4. No name match AND no circle match. Paid-bypass can save it.
+        if bypass.would_apply() {
+            return Ok(bypass.zone_id.clone());
+        }
+
+        // 5. Final rejection — collect served names for the message.
+        let served: Vec<String> = areas
+            .served_municipalities
+            .iter()
+            .flat_map(|m| m.match_names.clone())
+            .collect();
+        Err(RejectionReason::WrongMunicipality {
+            got: resolved_city.to_string(),
+            served,
+        })
     }
 
     /// Nominatim raw response — only the fields we care about.
@@ -1938,11 +2202,18 @@ pub async fn place_order(
             ));
         }
 
+        // Paid-bypass: pass the chosen payment_method + cart subtotal
+        // so an online-paid order over the threshold accepts an
+        // out-of-area address. validate_address re-checks the bypass
+        // configuration server-side; the customer can't fake it from
+        // the client.
         let v = validate_address(
             street_v.clone(),
             house_v.clone(),
             postcode_v.clone(),
             city_v.clone(),
+            Some(payment_method.to_string()),
+            Some(subtotal),
         )
         .await?;
         if !v.ok {
@@ -2567,12 +2838,14 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
     .unwrap_or_default();
     let messages = msg_rows
         .into_iter()
-        .map(|(id, body, created_at, delivered_at)| rusterando_shared::models::OrderMessage {
-            id,
-            body,
-            created_at: ssr::fmt_msg_time(&created_at),
-            delivered: delivered_at.is_some(),
-        })
+        .map(
+            |(id, body, created_at, delivered_at)| rusterando_shared::models::OrderMessage {
+                id,
+                body,
+                created_at: ssr::fmt_msg_time(&created_at),
+                delivered: delivered_at.is_some(),
+            },
+        )
         .collect();
 
     Ok(OrderDetail {
@@ -2789,6 +3062,14 @@ pub async fn validate_address(
     house_number: String,
     postcode: String,
     city: String,
+    /// Optional bypass context. Cart drawer leaves these `None` (no
+    /// bypass attempt on the *display* path — the customer hasn't
+    /// committed to pay yet); place_order passes the real chosen
+    /// payment_method + final total so the server-side hard gate
+    /// honours the paid-bypass rule.
+    #[server(default)]
+    payment_method: Option<String>,
+    #[server(default)] cart_total_cents: Option<i64>,
 ) -> Result<AddressValidation, ServerFnError> {
     use sqlx::SqlitePool;
 
@@ -2815,6 +3096,36 @@ pub async fn validate_address(
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
+    let branding_snapshot = use_context::<crate::branding::BrandingHandle>().map(|h| h.get());
+    let areas: crate::pages::locality::DeliveryAreas = branding_snapshot
+        .as_ref()
+        .map(|b| b.delivery_areas.clone())
+        .unwrap_or_default();
+    let phone = branding_snapshot
+        .as_ref()
+        .map(|b| b.shop_phone.clone())
+        .unwrap_or_default();
+    // Build the bypass context from branding + the (optional) caller-
+    // supplied payment hint. Cart drawer omits the hint → bypass
+    // won't apply, but the rejection response still carries
+    // `bypass_hint_min_cents` so the UI can nudge "pay X+ online to
+    // bypass". place_order passes the real chosen method + final total
+    // so the server-side gate honours the bypass when it should.
+    let (bypass_min_cents, bypass_zone_id) = branding_snapshot
+        .as_ref()
+        .map(|b| (b.bypass_paid_min_cents, b.bypass_zone_id.clone()))
+        .unwrap_or((0, String::new()));
+    let bypass = ssr::BypassContext {
+        payment_method: payment_method.clone().unwrap_or_default(),
+        total_cents: cart_total_cents.unwrap_or(0),
+        min_cents: bypass_min_cents,
+        zone_id: bypass_zone_id.clone(),
+    };
+    // For the customer-side "would the bypass save you?" hint we don't
+    // care about payment_method (cart drawer doesn't have it yet); only
+    // whether the bypass is *configured at all*.
+    let bypass_configured = bypass_min_cents > 0 && !bypass_zone_id.trim().is_empty();
+
     // Cache-by-DB: if we've already geocoded this (street, house, postcode),
     // reuse the lat/lon/zone we stored last time. We don't scope by customer
     // here — the resolution itself is identical across customers, so first
@@ -2837,24 +3148,78 @@ pub async fn validate_address(
     let (lat, lon, _suburb, zone_id) = match cached {
         Some((Some(lat), Some(lon), suburb, Some(zid))) => (lat, lon, suburb, zid),
         _ => {
-            // Cache miss — call Nominatim.
-            let hit = ssr::nominatim_lookup(&street, &house_number, &postcode, &city_eff)
+            // Cache miss — call Nominatim. An error here means the geocoder
+            // itself is unreachable / 5xx; log it as `http_error` and tell
+            // the customer to try again.
+            let hit = match ssr::nominatim_lookup(&street, &house_number, &postcode, &city_eff)
                 .await
-                .map_err(|e| {
-                    // Hard reject when the geocoder is down; the customer sees
-                    // a helpful message rather than a 500.
-                    ServerFnError::new(format!(
-                        "Adressprüfung gerade nicht möglich, bitte gleich nochmal versuchen ({e})"
-                    ))
-                })?;
+            {
+                Ok(hit) => hit,
+                Err(e) => {
+                    ssr::record_address_attempt(
+                        &db,
+                        &street,
+                        &house_number,
+                        &postcode,
+                        &city_eff,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        ssr::REJECTION_HTTP_ERROR,
+                        Some(&format!("{e}")),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                    let msg = if phone.trim().is_empty() {
+                        "Adressprüfung gerade nicht möglich, bitte gleich nochmal versuchen."
+                            .to_string()
+                    } else {
+                        format!(
+                            "Adressprüfung gerade nicht möglich. Bitte gleich nochmal versuchen — oder rufen Sie uns an: {phone}."
+                        )
+                    };
+                    return Ok(AddressValidation {
+                        ok: false,
+                        reason: Some(msg),
+                        ..Default::default()
+                    });
+                }
+            };
 
             let Some(found) = hit else {
+                ssr::record_address_attempt(
+                    &db,
+                    &street,
+                    &house_number,
+                    &postcode,
+                    &city_eff,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    ssr::REJECTION_NO_RESULTS,
+                    Some("Nominatim returned 0 hits"),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                let msg = if phone.trim().is_empty() {
+                    "Adresse konnte nicht gefunden werden. Bitte Straße/Hausnummer prüfen."
+                        .to_string()
+                } else {
+                    format!(
+                        "Adresse konnte nicht gefunden werden. Bitte Straße und Hausnummer prüfen — oder rufen Sie uns an: {phone}."
+                    )
+                };
                 return Ok(AddressValidation {
                     ok: false,
-                    reason: Some(
-                        "Adresse konnte nicht gefunden werden. Bitte Straße/Hausnummer prüfen."
-                            .to_string(),
-                    ),
+                    reason: Some(msg),
                     ..Default::default()
                 });
             };
@@ -2869,39 +3234,89 @@ pub async fn validate_address(
             let suburb_resolved = found.address.suburb_or_district().map(String::from);
             let resolved_city = found.address.place().map(String::from);
 
-            // The customer's city-field input takes precedence when it
-            // names a known Stadtteil. Reason: geocoders sometimes
-            // normalise sub-areas under the parent city, so without
-            // honouring the customer's hint we'd misclassify them all
-            // as the base zone.
-            let expected_city = use_context::<crate::branding::BrandingHandle>()
-                .map(|h| h.get().shop_city)
-                .unwrap_or_default();
-            let effective_suburb = if !expected_city.is_empty()
-                && !city_eff.eq_ignore_ascii_case(&expected_city)
-                && suburb_resolved.is_none()
-            {
-                Some(city_eff.clone())
-            } else {
-                suburb_resolved.clone()
-            };
+            // Pass the geocoder's resolved suburb through unchanged.
+            // The old "customer-typed city as Stadtteil hint" trick is
+            // gone: the new served_municipalities config decides what
+            // counts as which suburb, so we don't second-guess
+            // Nominatim. If Nominatim says suburb=Westrup, classify_zone
+            // looks up Westrup in zone_routing (or falls to the "*"
+            // wildcard); if Nominatim says no suburb, the "*" wildcard
+            // (when present) catches the city-proper case.
+            let effective_suburb = suburb_resolved.clone();
 
-            let Some(zid) = ssr::classify_zone(
+            let zid = match ssr::classify_zone(
                 lat,
                 lon,
                 effective_suburb.as_deref(),
                 resolved_city.as_deref(),
-                &expected_city,
-            ) else {
-                return Ok(AddressValidation {
-                    ok: false,
-                    reason: Some(
-                        "Diese Adresse liegt außerhalb unseres Liefergebiets.".to_string(),
-                    ),
-                    ..Default::default()
-                });
+                &areas,
+                &bypass,
+            ) {
+                Ok(zid) => zid,
+                Err(reason) => {
+                    let detail = reason.detail();
+                    let raw = serde_json::to_string_pretty(&serde_json::json!({
+                        "lat": found.lat,
+                        "lon": found.lon,
+                        "display_name": found.display_name,
+                        "address": {
+                            "city": found.address.city,
+                            "town": found.address.town,
+                            "village": found.address.village,
+                            "suburb": found.address.suburb,
+                            "city_district": found.address.city_district,
+                            "postcode": found.address.postcode,
+                        }
+                    }))
+                    .ok();
+                    let distance = if matches!(reason, ssr::RejectionReason::OutOfRadius(_)) {
+                        let shop = ssr::pizzeria_coords();
+                        Some(ssr::haversine_km(shop, (lat, lon)))
+                    } else {
+                        None
+                    };
+                    ssr::record_address_attempt(
+                        &db,
+                        &street,
+                        &house_number,
+                        &postcode,
+                        &city_eff,
+                        Some(lat),
+                        Some(lon),
+                        resolved_city.as_deref(),
+                        suburb_resolved.as_deref(),
+                        distance,
+                        reason.slug(),
+                        Some(&detail),
+                        raw.as_deref(),
+                        None,
+                        None,
+                    )
+                    .await;
+                    // Bypass hint: only show when (a) the shop has it
+                    // configured AND (b) the rejection is the kind
+                    // bypass would actually save. OutOfRadius can't be
+                    // bypassed; NoZone is an admin misconfig, not the
+                    // customer's problem.
+                    let bypass_hint_min_cents = if bypass_configured
+                        && matches!(
+                            &reason,
+                            ssr::RejectionReason::WrongMunicipality { .. }
+                                | ssr::RejectionReason::WrongSuburb { .. }
+                        ) {
+                        Some(bypass_min_cents)
+                    } else {
+                        None
+                    };
+                    return Ok(AddressValidation {
+                        ok: false,
+                        reason: Some(ssr::rejection_message(&reason, &phone)),
+                        bypass_hint_min_cents,
+                        ..Default::default()
+                    });
+                }
             };
-            (lat, lon, effective_suburb, zid.to_string())
+            (lat, lon, effective_suburb, zid)
         }
     };
 
@@ -2941,6 +3356,7 @@ pub async fn validate_address(
         latitude: Some(lat),
         longitude: Some(lon),
         matched_label: zname,
+        bypass_hint_min_cents: None,
     })
 }
 
@@ -3627,8 +4043,8 @@ pub fn status_label_de(s: &str) -> &'static str {
 /// fallback contract as [`payment_status_label`].
 pub fn status_label(s: &str) -> String {
     let key = match s {
-        "pending_payment" | "received" | "preparing" | "ready_for_pickup"
-        | "picked_up" | "out_for_delivery" | "delivered" | "cancelled" => s,
+        "pending_payment" | "received" | "preparing" | "ready_for_pickup" | "picked_up"
+        | "out_for_delivery" | "delivered" | "cancelled" => s,
         _ => "unknown",
     };
     crate::i18n::t(&format!("status.{key}"))
@@ -3778,14 +4194,12 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
     } else if shop_address.is_empty() {
         crate::t!("order_confirm.payment_hint_cash_pickup")
     } else {
-        crate::t!("order_confirm.payment_hint_cash_pickup_addr")
-            .replace("{address}", &shop_address)
+        crate::t!("order_confirm.payment_hint_cash_pickup_addr").replace("{address}", &shop_address)
     };
     let payment_failed: String = if shop_phone.is_empty() {
         crate::t!("order_confirm.payment_hint_failed")
     } else {
-        crate::t!("order_confirm.payment_hint_failed_phone")
-            .replace("{phone}", &shop_phone)
+        crate::t!("order_confirm.payment_hint_failed_phone").replace("{phone}", &shop_phone)
     };
     let payment_hint: String = match o.payment_status.as_str() {
         "cash_on_pickup" => cash_label,
@@ -4294,6 +4708,83 @@ fn Form(
     // can read from it.)
     let validator = ServerAction::<ValidateAddress>::new();
 
+    // -- Locality autofill (PLZ ↔ Ort) --------------------------------------
+    //
+    // Fetch the shop's PLZ → Ort hint list once on mount. Drives:
+    //   * placeholder defaults for the PLZ and Ort fields (no more "12345"),
+    //   * PLZ → city autofill: type "59348" → city becomes "Lüdinghausen",
+    //   * city → PLZ autofill: type "Lüdinghausen" → PLZ → "59348",
+    //   * a polite "PLZ 59348 = Lüdinghausen — stimmt das?" hint when the
+    //     two fields are both filled in but disagree (so we don't silently
+    //     overwrite something the customer might have typed deliberately).
+    //
+    // These hints are PURELY COSMETIC; the classifier never reads them.
+    // Aliases are no longer needed at this layer because Nominatim
+    // handles its own search-side fuzz on whatever the customer types.
+    let hints_res: Resource<Vec<crate::pages::locality::PostcodeHint>> = Resource::new(
+        || (),
+        |_| async move {
+            crate::pages::locality::get_postcode_hints()
+                .await
+                .unwrap_or_default()
+        },
+    );
+    let conflict_hint: RwSignal<Option<String>> = RwSignal::new(None);
+
+    Effect::new(move |_| {
+        if !is_delivery.get() {
+            conflict_hint.set(None);
+            return;
+        }
+        let Some(hints) = hints_res.get() else {
+            return; // not loaded yet
+        };
+        if hints.is_empty() {
+            return;
+        }
+
+        let plz_typed = postcode_sig.get().trim().to_string();
+        let city_typed = city_sig.get().trim().to_string();
+
+        let plz_match = crate::pages::locality::hint_lookup_plz(&hints, &plz_typed).cloned();
+        let city_match = crate::pages::locality::hint_lookup_city(&hints, &city_typed).cloned();
+
+        // City → PLZ. Fill in the PLZ when the customer typed a known
+        // city and the PLZ field is empty.
+        if plz_typed.is_empty() {
+            if let Some(e) = city_match.as_ref() {
+                postcode_sig.set(e.plz.clone());
+            }
+        }
+
+        // PLZ → City. Fill canonical when the city field is empty.
+        if let Some(e) = plz_match.as_ref() {
+            if city_typed.is_empty() {
+                city_sig.set(e.city.clone());
+            }
+        }
+
+        // Conflict hint: both fields filled, PLZ recognised, but the
+        // typed city doesn't match the PLZ's canonical. We do NOT
+        // overwrite — the customer may have a reason. We just ask.
+        let plz_now = postcode_sig.get().trim().to_string();
+        let city_now = city_sig.get().trim().to_string();
+        let new_hint = if !plz_now.is_empty() && !city_now.is_empty() {
+            match crate::pages::locality::hint_lookup_plz(&hints, &plz_now) {
+                Some(e)
+                    if crate::pages::locality::normalize(&e.city)
+                        != crate::pages::locality::normalize(&city_now) =>
+                {
+                    Some(format!("PLZ {} = {} — stimmt das?", e.plz, e.city))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        conflict_hint.set(new_hint);
+    });
+
     // Trigger: re-validate when in delivery mode and all four fields are set.
     Effect::new(move |_| {
         if !is_delivery.get() {
@@ -4308,11 +4799,18 @@ fn Form(
             validation.set(None);
             return;
         }
+        // Cart-side validation: don't push the payment hint. The
+        // bypass server-side hard gate only runs from place_order
+        // (where the real method + total are known); here we just
+        // want the rejection signal + the bypass_hint_min_cents
+        // back-channel for the customer-facing nudge.
         validator.dispatch(ValidateAddress {
             street: s,
             house_number: h,
             postcode: p,
             city: c,
+            payment_method: None,
+            cart_total_cents: None,
         });
     });
 
@@ -4515,8 +5013,23 @@ fn Form(
                                 } else {
                                     let reason = av.reason.clone()
                                         .unwrap_or_else(|| crate::t!("checkout.address_invalid"));
+                                    // Paid-bypass hint: if the shop has it
+                                    // configured AND the rejection is the kind
+                                    // bypass could save, nudge the customer
+                                    // toward online payment over the
+                                    // threshold. Cash orders never qualify;
+                                    // the message says so.
+                                    let bypass_msg = av.bypass_hint_min_cents.map(|min_cents| {
+                                        format!(
+                                            "📍 Außerhalb des Standardgebiets — ab {} online bezahlt liefern wir trotzdem (Zustellung kann länger dauern).",
+                                            format_eur(min_cents)
+                                        )
+                                    });
                                     view! {
                                         <p class="zone-status err">"⚠️ " {reason}</p>
+                                        {bypass_msg.map(|m| view! {
+                                            <p class="zone-status hint">{m}</p>
+                                        })}
                                     }.into_any()
                                 }
                             } else {
@@ -4544,17 +5057,29 @@ fn Form(
                         <label>
                             <span>{crate::t!("checkout.postcode")}</span>
                             <input type="text" name="postcode" autocomplete="postal-code"
-                                   placeholder="12345" inputmode="numeric"
+                                   placeholder=move || {
+                                       hints_res.get()
+                                           .and_then(|e| e.first().map(|x| x.plz.clone()))
+                                           .unwrap_or_else(|| "PLZ".to_string())
+                                   }
+                                   inputmode="numeric"
                                    prop:value=move || postcode_sig.get()
                                    on:input=move |ev| postcode_sig.set(event_target_value(&ev))/>
                         </label>
                         <label>
                             <span>{crate::t!("checkout.city")}</span>
                             <input type="text" name="city" autocomplete="address-level2"
-                                   placeholder="Lüdinghausen"
+                                   placeholder=move || {
+                                       hints_res.get()
+                                           .and_then(|e| e.first().map(|x| x.city.clone()))
+                                           .unwrap_or_else(|| "Ort".to_string())
+                                   }
                                    prop:value=move || city_sig.get()
                                    on:input=move |ev| city_sig.set(event_target_value(&ev))/>
                         </label>
+                        {move || conflict_hint.get().map(|h| view! {
+                            <p class="zone-status hint">"ℹ️ " {h}</p>
+                        })}
                         <label>
                             <span>{crate::t!("checkout.address_note")}</span>
                             <input type="text" name="address_notes"

@@ -32,13 +32,13 @@ struct HashedNames {
 
 /// Read `hash.txt` exactly once for the lifetime of the process.
 /// SSR-only — hydrate path never calls this. The `current_exe` lookup
-/// + `read_to_string` happen on the first SSR render after boot; every
-/// subsequent render returns the cached `&'static HashedNames` for
-/// free.
+/// and `read_to_string` happen on the first SSR render after boot; every
+/// subsequent render returns the cached `&'static HashedNames` for free.
 ///
 /// Returns empty strings (= no hash suffix appended) when:
 ///   * `hash_files` is off in `LeptosOptions`, or
 ///   * `hash.txt` doesn't exist next to the binary.
+///
 /// Both match leptos's own fallback behaviour, so a missing file is
 /// non-fatal (the bundle URLs just lose their cache-busting suffix).
 fn hashed_names(options: &LeptosOptions) -> &'static HashedNames {
@@ -67,7 +67,9 @@ fn hashed_names(options: &LeptosOptions) -> &'static HashedNames {
             if line.is_empty() {
                 continue;
             }
-            let Some((file, hash)) = line.split_once(':') else { continue };
+            let Some((file, hash)) = line.split_once(':') else {
+                continue;
+            };
             let hash = hash.trim();
             match file {
                 "js" => out.js = hash.to_string(),

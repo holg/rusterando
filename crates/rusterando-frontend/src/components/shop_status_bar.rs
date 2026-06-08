@@ -24,8 +24,7 @@ pub fn ShopStatusBar(
     init_reason: String,
 ) -> impl IntoView {
     // Live override from SSE; `None` until a ShopStatus event arrives.
-    let (shop_override, set_shop_override) =
-        signal::<Option<(ShopLevel, String)>>(None);
+    let (shop_override, set_shop_override) = signal::<Option<(ShopLevel, String)>>(None);
     crate::utils::subscribe_shop_status(set_shop_override);
 
     move || {

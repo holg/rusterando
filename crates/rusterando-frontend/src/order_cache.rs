@@ -6,8 +6,8 @@
 //! Layout (one key per order, plus an index):
 //!   * `dp_order:<id>`  → JSON of `OrderDetail`
 //!   * `dp_orders`      → JSON `["<id1>","<id2>",…]` newest-first,
-//!                        capped to MAX_CACHED entries. On overflow
-//!                        the oldest entry's blob is deleted too.
+//!     capped to MAX_CACHED entries. On overflow the oldest entry's
+//!     blob is deleted too.
 //!
 //! Why one-key-per-order rather than a single big array: avoids
 //! rewriting MAX_CACHED blobs on every save, and lets the eviction
@@ -89,7 +89,9 @@ pub fn save(order: &OrderDetail) {
         let id = &order.id;
         // Serialise FIRST — if this fails we don't want to mutate
         // the index.
-        let Ok(blob) = serde_json::to_string(order) else { return };
+        let Ok(blob) = serde_json::to_string(order) else {
+            return;
+        };
         let blob_key = format!("{BLOB_PREFIX}{id}");
         // setItem can fail if the quota is hit (5 MB-ish on most
         // browsers). Swallow the error — the cache is a "nice to

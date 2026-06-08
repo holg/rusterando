@@ -571,12 +571,15 @@ pub async fn claim_giveaway(sauce_option_id: String) -> Result<CartView, ServerF
     // 1) Promo enabled?
     let gcfg = crate::pages::settings::ssr::giveaway_config(&db).await;
     if !gcfg.enabled {
-        return Err(ServerFnError::new("Die Gratis-Beigabe ist derzeit nicht verfügbar."));
+        return Err(ServerFnError::new(
+            "Die Gratis-Beigabe ist derzeit nicht verfügbar.",
+        ));
     }
 
     // 2) Recompute the PAID subtotal from the DB (authoritative — never trust
     //    a client number) and check the threshold. Also detect an existing
     //    giveaway line so we never add a second.
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(i64, i64, Option<String>, Option<String>, i64)> = sqlx::query_as(
         "SELECT ci.quantity, ci.unit_price_cents, ci.extras_json,
                 ci.selected_options_json, ci.is_giveaway

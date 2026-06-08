@@ -40,6 +40,29 @@ pub struct Branding {
     /// the homepage `<head>`; empty → not rendered. Stored per-shop in
     /// `app_settings` (the token is confidential, lives only in the shop's DB).
     pub shop_google_site_verification: String,
+    /// Two-layer delivery-area config: served municipalities (with per-
+    /// suburb zone routing) + extra circles for outliers. Edited on
+    /// /admin/localities. Stored as JSON in
+    /// `app_settings.shop_delivery_areas`. See the locality module
+    /// docstring for the full model.
+    #[serde(default)]
+    pub delivery_areas: crate::pages::locality::DeliveryAreas,
+    /// PLZ → Ort autofill hints used by the cart drawer. PURELY
+    /// COSMETIC — does NOT affect classify_zone. Stored as JSON in
+    /// `app_settings.shop_postcode_hints`.
+    #[serde(default)]
+    pub postcode_hints: Vec<crate::pages::locality::PostcodeHint>,
+    /// Paid-bypass threshold in cents. When > 0 AND the order is
+    /// ONLINE-PAID AND total >= this, classify_zone returns
+    /// `bypass_zone_id` instead of rejecting a wrong_municipality /
+    /// wrong_suburb address. 0 = feature off.
+    #[serde(default)]
+    pub bypass_paid_min_cents: i64,
+    /// Which delivery_zone to use for paid-bypass deliveries (typically
+    /// a dedicated zone with longer ETA / higher fee). Empty = feature
+    /// off, even if the threshold is set.
+    #[serde(default)]
+    pub bypass_zone_id: String,
 }
 
 impl Branding {
@@ -123,9 +146,15 @@ fn apply_kv_inner(b: &mut Branding, key: &str, value: &str) {
         "shop_bank_name" => b.shop_bank_name = value.to_string(),
         "shop_bank_iban" => b.shop_bank_iban = value.to_string(),
         "shop_bank_bic" => b.shop_bank_bic = value.to_string(),
-        "shop_google_site_verification" => {
-            b.shop_google_site_verification = value.to_string()
+        "shop_google_site_verification" => b.shop_google_site_verification = value.to_string(),
+        "shop_delivery_areas" => {
+            b.delivery_areas = crate::pages::locality::parse_delivery_areas(value)
         }
+        "shop_postcode_hints" => {
+            b.postcode_hints = crate::pages::locality::parse_postcode_hints(value)
+        }
+        "shop_bypass_paid_min_cents" => b.bypass_paid_min_cents = value.parse().unwrap_or(0),
+        "shop_bypass_zone_id" => b.bypass_zone_id = value.to_string(),
         _ => {}
     }
 }
@@ -147,6 +176,10 @@ pub const BRANDING_KEYS: &[&str] = &[
     "shop_bank_iban",
     "shop_bank_bic",
     "shop_google_site_verification",
+    "shop_delivery_areas",
+    "shop_postcode_hints",
+    "shop_bypass_paid_min_cents",
+    "shop_bypass_zone_id",
 ];
 
 #[cfg(feature = "ssr")]

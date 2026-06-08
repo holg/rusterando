@@ -452,8 +452,8 @@ pub fn MenuCategoryPage() -> impl IntoView {
 /// chip show the same live three-level open/closed indicator. Reuses the
 /// canonical `shop_open_state`.
 #[server(name = ShopStatus, prefix = "/api", endpoint = "shop_status")]
-pub async fn shop_status(
-) -> Result<(rusterando_shared::models::ShopLevel, String), ServerFnError> {
+pub async fn shop_status() -> Result<(rusterando_shared::models::ShopLevel, String), ServerFnError>
+{
     use sqlx::SqlitePool;
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
