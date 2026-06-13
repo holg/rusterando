@@ -14,7 +14,6 @@ use crate::pages::admin::history::AdminHistoryPage;
 use crate::pages::admin::home::AdminHomePage;
 use crate::pages::admin::home_admin::HomeAdminPage;
 use crate::pages::admin::hours::HoursAdminPage;
-use crate::pages::admin::localities::LocalitiesAdminPage;
 use crate::pages::admin::login::AdminLoginPage;
 use crate::pages::admin::menu_admin::AdminMenuPage;
 use crate::pages::admin::orders::{AdminOrderDetailPage, AdminOrdersPage};
@@ -321,7 +320,11 @@ pub fn App() -> impl IntoView {
                     <Route path=(StaticSegment("admin"), StaticSegment("customers"), ParamSegment("id")) view=AdminCustomerDetailPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("vouchers")) view=VouchersAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("zones")) view=ZonesAdminPage/>
-                    <Route path=(StaticSegment("admin"), StaticSegment("localities")) view=LocalitiesAdminPage/>
+                    // /admin/localities → redirect to /admin/zones (kept for any
+                    // bookmarked links from the previous split layout).
+                    <Route path=(StaticSegment("admin"), StaticSegment("localities")) view=|| view! {
+                        <leptos_meta::Meta http_equiv="refresh" content="0; url=/admin/zones"/>
+                    }/>
                     <Route path=(StaticSegment("admin"), StaticSegment("address-attempts")) view=AddressAttemptsPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("pdf")) view=PdfAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("pricing")) view=PricingAdminPage/>

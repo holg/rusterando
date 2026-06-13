@@ -241,13 +241,13 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
         }
     };
     let group_sql = format!(
-        "SELECT mg.menu_item_id, g.id, {group_label} AS label, g.min_select, g.max_select, g.sort_order
+        "SELECT mg.menu_item_id, g.id, {group_label} AS label, g.min_select, g.max_select, g.sort_order, g.hide_zero_price
          FROM menu_item_option_groups mg
          JOIN item_option_groups g ON g.id = mg.group_id
          WHERE g.is_active = 1
          ORDER BY mg.menu_item_id, g.sort_order, g.id"
     );
-    let group_rows = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(&group_sql)
+    let group_rows = sqlx::query_as::<_, (String, String, String, i64, i64, i64, i64)>(&group_sql)
         .fetch_all(db)
         .await
         .map_err(|e| ServerFnError::new(format!("load option groups: {e}")))?;
@@ -280,7 +280,7 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
     }
 
     let mut groups_by_item: HashMap<String, Vec<OptionGroup>> = HashMap::new();
-    for (mi_id, gid, glabel, min_sel, max_sel, sort_order) in group_rows {
+    for (mi_id, gid, glabel, min_sel, max_sel, sort_order, hide_zero) in group_rows {
         let options = options_by_group.get(&gid).cloned().unwrap_or_default();
         groups_by_item.entry(mi_id).or_default().push(OptionGroup {
             id: gid,
@@ -288,6 +288,7 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
             min_select: min_sel,
             max_select: max_sel,
             sort_order,
+            hide_zero_price: hide_zero != 0,
             options,
         });
     }
@@ -1239,6 +1240,9 @@ fn OptionGroupsPicker(
                 let single = g.max_select == 1;
                 let max_select = g.max_select;
                 let min_select = g.min_select;
+                // When set, suppress the "gratis" label for 0 € options in
+                // this group (variant pickers like drink flavour).
+                let hide_zero_price = g.hide_zero_price;
                 view! {
                     <fieldset class="option-group">
                         <legend>
@@ -1260,7 +1264,13 @@ fn OptionGroupsPicker(
                                     })
                                 });
                                 let price_label = if opt_price == 0 {
-                                    "gratis".to_string()
+                                    // Variant pickers hide the 0 € label entirely
+                                    // so "gratis" doesn't imply the item is free.
+                                    if hide_zero_price {
+                                        String::new()
+                                    } else {
+                                        "gratis".to_string()
+                                    }
                                 } else {
                                     format!("+{}", format_eur(opt_price))
                                 };
@@ -1291,7 +1301,9 @@ fn OptionGroupsPicker(
                                                     });
                                                 }/>
                                             <span class="option-label">{opt_label}</span>
-                                            <span class="option-price">{price_label}</span>
+                                            {(!price_label.is_empty()).then(|| view! {
+                                                <span class="option-price">{price_label}</span>
+                                            })}
                                         </label>
                                     </li>
                                 }

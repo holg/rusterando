@@ -6,7 +6,6 @@ pub mod history;
 pub mod home;
 pub mod home_admin;
 pub mod hours;
-pub mod localities;
 pub mod login;
 pub mod menu_admin;
 pub mod options_admin;

@@ -189,6 +189,12 @@ pub struct OptionGroup {
     pub min_select: i64,
     pub max_select: i64,
     pub sort_order: i64,
+    /// When true, 0 € options in this group render WITHOUT a "gratis"
+    /// label — used for pure variant pickers (drink flavour, etc.) where
+    /// "gratis" would wrongly imply the item itself is free. Priced
+    /// options still show their "+X,XX €". Default false.
+    #[serde(default)]
+    pub hide_zero_price: bool,
     pub options: Vec<OptionItem>,
 }
 

@@ -909,6 +909,18 @@ pub mod ssr {
             };
             return (true, reason);
         }
+        // A shop that's open *right now* can ALWAYS take a walk-in / ASAP
+        // order, even when no scheduled 15-min pickup slot still fits
+        // before closing. Without this, the last ~PREP_BUFFER_MIN+15 min
+        // before close wrongly disabled the order button while the banner
+        // stayed green (the prep-buffer pushed every remaining slot past
+        // closing time → today_slots empty → gate closed). The customer
+        // standing at the counter wanting to pay by app got "Bestellung
+        // nicht möglich" on a visibly-open shop. The prep buffer should
+        // inform the ETA, never block an order while we're open.
+        if open_right_now(db).await {
+            return (false, String::new());
+        }
         if today_slots(db).await.is_empty() {
             let reason = if is_ruhetag_today(db).await {
                 crate::i18n::t("shop_status.ruhetag")

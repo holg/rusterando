@@ -242,6 +242,174 @@ pub async fn create_menu_item(
     Ok(id)
 }
 
+// ---------------------------------------------------------------------------
+// Category CRUD — rename / reorder / activate-toggle / create / delete.
+//
+// `menu_categories` rows are the section headers on /menu + /admin/menu.
+// Renaming "Pute" → "Hähnchen" is a single UPDATE of `name`; items keep
+// their `category_id` FK untouched. We also recompute the SEO `slug` so
+// /menu/<slug> follows the new name (with a -N collision suffix), mirroring
+// the boot-time backfill in main.rs::backfill_category_slugs.
+// ---------------------------------------------------------------------------
+
+/// Build a unique slug for `name`, avoiding any slug already used by a
+/// DIFFERENT category. Mirrors the boot backfill's collision handling so
+/// admin renames and the backfill never diverge.
+#[cfg(feature = "ssr")]
+async fn unique_category_slug(
+    db: &sqlx::SqlitePool,
+    name: &str,
+    exclude_id: &str,
+) -> Result<String, ServerFnError> {
+    use rusterando_shared::models::seo_slug;
+    let base = seo_slug(name);
+    let base = if base.is_empty() {
+        "kategorie".to_string()
+    } else {
+        base
+    };
+    let taken: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT slug FROM menu_categories
+         WHERE slug IS NOT NULL AND slug <> '' AND id <> ?1",
+    )
+    .bind(exclude_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load slugs: {e}")))?
+    .into_iter()
+    .collect();
+    if !taken.contains(&base) {
+        return Ok(base);
+    }
+    let mut n = 2;
+    loop {
+        let cand = format!("{base}-{n}");
+        if !taken.contains(&cand) {
+            return Ok(cand);
+        }
+        n += 1;
+    }
+}
+
+/// Rename a category + optionally change its sort_order / active flag.
+/// The rename recomputes the SEO slug. Items are untouched (they FK to
+/// the category id, not the name).
+#[server(name = UpdateCategory, prefix = "/api", endpoint = "update_category")]
+pub async fn update_category(
+    id: String,
+    name: String,
+    sort_order: i64,
+    is_active: bool,
+) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    crate::pages::admin::require_admin().await?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(ServerFnError::new("Name darf nicht leer sein"));
+    }
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let slug = unique_category_slug(&db, &name, &id).await?;
+
+    let res = sqlx::query(
+        "UPDATE menu_categories
+         SET name = ?1, sort_order = ?2, is_active = ?3, slug = ?4
+         WHERE id = ?5",
+    )
+    .bind(&name)
+    .bind(sort_order)
+    .bind(if is_active { 1_i64 } else { 0_i64 })
+    .bind(&slug)
+    .bind(&id)
+    .execute(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("update category: {e}")))?;
+
+    if res.rows_affected() == 0 {
+        return Err(ServerFnError::new("Kategorie nicht gefunden"));
+    }
+
+    // Category name/slug feeds the public menu, the sitemap, and the
+    // JSON-LD — refresh the cache so the change is visible immediately.
+    crate::pages::seo::rebuild_jsonld_cache().await;
+    Ok(())
+}
+
+/// Create a new (empty) category. Lands at the end of the list
+/// (max sort_order + 10) so it doesn't reshuffle existing sections.
+#[server(name = CreateCategory, prefix = "/api", endpoint = "create_category")]
+pub async fn create_category(name: String) -> Result<String, ServerFnError> {
+    use sqlx::SqlitePool;
+
+    crate::pages::admin::require_admin().await?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err(ServerFnError::new("Name darf nicht leer sein"));
+    }
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let next_sort: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(sort_order), 0) + 10 FROM menu_categories")
+            .fetch_one(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("next sort: {e}")))?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let slug = unique_category_slug(&db, &name, &id).await?;
+
+    sqlx::query(
+        "INSERT INTO menu_categories (id, name, sort_order, is_active, slug)
+         VALUES (?1, ?2, ?3, 1, ?4)",
+    )
+    .bind(&id)
+    .bind(&name)
+    .bind(next_sort)
+    .bind(&slug)
+    .execute(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("create category: {e}")))?;
+
+    crate::pages::seo::rebuild_jsonld_cache().await;
+    Ok(id)
+}
+
+/// Delete a category. Refused if it still holds any items — the admin
+/// must move or delete those first, so an FK orphan can never happen.
+#[server(name = DeleteCategory, prefix = "/api", endpoint = "delete_category")]
+pub async fn delete_category(id: String) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let item_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM menu_items WHERE category_id = ?1")
+            .bind(&id)
+            .fetch_one(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("count items: {e}")))?;
+    if item_count > 0 {
+        return Err(ServerFnError::new(format!(
+            "Kategorie enthält noch {item_count} Artikel — bitte erst verschieben oder löschen."
+        )));
+    }
+
+    sqlx::query("DELETE FROM menu_categories WHERE id = ?1")
+        .bind(&id)
+        .execute(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("delete category: {e}")))?;
+
+    crate::pages::seo::rebuild_jsonld_cache().await;
+    Ok(())
+}
+
 /// Normalize a comma-separated code list: trim, lowercase letter codes,
 /// drop empties, dedup. Returns None for an empty result.
 #[cfg(feature = "ssr")]
@@ -271,9 +439,22 @@ use rusterando_shared::models::{LegendEntry, MenuCategory, MenuItem};
 pub fn AdminMenuPage() -> impl IntoView {
     let saver = ServerAction::<UpdateMenuItem>::new();
     let creator = ServerAction::<CreateMenuItem>::new();
+    // Category CRUD actions. The menu Resource re-reads whenever any of
+    // these fire so a rename / new category / delete shows immediately.
+    let cat_saver = ServerAction::<UpdateCategory>::new();
+    let cat_creator = ServerAction::<CreateCategory>::new();
+    let cat_deleter = ServerAction::<DeleteCategory>::new();
 
     let menu = Resource::new(
-        move || (saver.version().get(), creator.version().get()),
+        move || {
+            (
+                saver.version().get(),
+                creator.version().get(),
+                cat_saver.version().get(),
+                cat_creator.version().get(),
+                cat_deleter.version().get(),
+            )
+        },
         |_| async move { list_admin_menu().await },
     );
     // All option-groups for the per-item multi-select. Stable enough
@@ -305,7 +486,8 @@ pub fn AdminMenuPage() -> impl IntoView {
                                 <p class="error">{format!("Auswahl-Gruppen: {e}")}</p>
                             }.into_any(),
                             (Some(Ok(payload)), Some(Ok(group_list))) => view! {
-                                <Editor payload group_list saver creator/>
+                                <Editor payload group_list saver creator
+                                    cat_saver cat_creator cat_deleter/>
                             }.into_any(),
                             _ => view! { <p>"Lädt…"</p> }.into_any(),
                         }
@@ -322,6 +504,21 @@ pub fn AdminMenuPage() -> impl IntoView {
                     Some(Err(e)) => Some(view! { <p class="toast error">{format!("Anlegen fehlgeschlagen: {e}")}</p> }.into_any()),
                     None => None,
                 }}
+                {move || match cat_saver.value().get() {
+                    Some(Ok(()))  => Some(view! { <p class="toast ok">"Kategorie gespeichert."</p> }.into_any()),
+                    Some(Err(e)) => Some(view! { <p class="toast error">{format!("Kategorie: {e}")}</p> }.into_any()),
+                    None => None,
+                }}
+                {move || match cat_creator.value().get() {
+                    Some(Ok(_))  => Some(view! { <p class="toast ok">"Neue Kategorie angelegt."</p> }.into_any()),
+                    Some(Err(e)) => Some(view! { <p class="toast error">{format!("Kategorie anlegen: {e}")}</p> }.into_any()),
+                    None => None,
+                }}
+                {move || match cat_deleter.value().get() {
+                    Some(Ok(()))  => Some(view! { <p class="toast ok">"Kategorie gelöscht."</p> }.into_any()),
+                    Some(Err(e)) => Some(view! { <p class="toast error">{format!("Kategorie löschen: {e}")}</p> }.into_any()),
+                    None => None,
+                }}
             </section>
         </AdminShell>
     }
@@ -334,6 +531,9 @@ fn Editor(
     group_list: Vec<crate::pages::admin::options_admin::OptionGroupAdminRow>,
     saver: ServerAction<UpdateMenuItem>,
     creator: ServerAction<CreateMenuItem>,
+    cat_saver: ServerAction<UpdateCategory>,
+    cat_creator: ServerAction<CreateCategory>,
+    cat_deleter: ServerAction<DeleteCategory>,
 ) -> impl IntoView {
     let MenuPayload {
         categories,
@@ -538,8 +738,38 @@ fn Editor(
                 let additives = additives.clone();
                 let cats_for_select = cats_for_select.clone();
                 let group_list = group_list.clone();
-                view! { <CategoryBlock cat cat_items allergens additives cats_for_select group_list saver creator/> }
+                view! { <CategoryBlock cat cat_items allergens additives cats_for_select group_list saver creator cat_saver cat_deleter/> }
             }).collect_view()}
+
+            <NewCategoryRow cat_creator/>
+        </div>
+    }
+}
+
+/// "+ neue Kategorie" — create an empty category. It lands at the end of
+/// the list; the admin then adds items to it via each item's category
+/// <select>, or via the per-category "+ neuer Artikel" row.
+#[component]
+fn NewCategoryRow(cat_creator: ServerAction<CreateCategory>) -> impl IntoView {
+    let name = RwSignal::new(String::new());
+    let on_create = move |_| {
+        let n = name.get().trim().to_string();
+        if n.is_empty() {
+            return;
+        }
+        cat_creator.dispatch(CreateCategory { name: n });
+        name.set(String::new());
+    };
+    view! {
+        <div class="new-category-row">
+            <input
+                type="text"
+                placeholder="Neue Kategorie (z. B. Hähnchen)"
+                prop:value=move || name.get()
+                on:input=move |ev| name.set(event_target_value(&ev))/>
+            <button class="btn primary" type="button" on:click=on_create>
+                "+ Kategorie anlegen"
+            </button>
         </div>
     }
 }
@@ -554,22 +784,124 @@ fn CategoryBlock(
     group_list: Vec<crate::pages::admin::options_admin::OptionGroupAdminRow>,
     saver: ServerAction<UpdateMenuItem>,
     creator: ServerAction<CreateMenuItem>,
+    cat_saver: ServerAction<UpdateCategory>,
+    cat_deleter: ServerAction<DeleteCategory>,
 ) -> impl IntoView {
     let count = cat_items.len();
     let cat_id = cat.id.clone();
     let cat_name = cat.name.clone();
+    let cat_sort = cat.sort_order;
     // Anchor target for the sticky-nav pills. <details> starts
     // collapsed; on pill click we set the `open` attribute imperatively
     // (see Editor::on_pill_click) so the anchor scroll lands on an
     // expanded section.
     let details_id = format!("admin-cat-{cat_id}");
 
+    // Inline category-edit state. Starts collapsed (just the name + count
+    // in the summary); the ✏️ toggle reveals a rename/sort/delete row.
+    let editing = RwSignal::new(false);
+    let name_sig = RwSignal::new(cat_name.clone());
+    let sort_sig = RwSignal::new(cat_sort);
+
+    let on_save_cat = {
+        let cat_id = cat_id.clone();
+        move |_| {
+            let n = name_sig.get().trim().to_string();
+            if n.is_empty() {
+                return;
+            }
+            cat_saver.dispatch(UpdateCategory {
+                id: cat_id.clone(),
+                name: n,
+                sort_order: sort_sig.get(),
+                is_active: true,
+            });
+            editing.set(false);
+        }
+    };
+    let on_delete_cat = {
+        let cat_id = cat_id.clone();
+        move |_| {
+            cat_deleter.dispatch(DeleteCategory { id: cat_id.clone() });
+        }
+    };
+    let can_delete = count == 0;
+
+    let details_id_for_toggle = details_id.clone();
+
     view! {
         <details class="cat-block" id=details_id>
             <summary>
-                <strong>{cat_name}</strong>
+                <strong>{move || name_sig.get()}</strong>
                 <span class="muted">" (" {count} ")"</span>
+                // The ✏️ button toggles the edit row. It's inside <summary>,
+                // so we stop the click from also toggling the <details>
+                // open/closed state. Because the edit row lives inside the
+                // <details> body (which the browser hides while collapsed),
+                // we imperatively force the <details> open when turning
+                // editing ON — otherwise the revealed row would stay
+                // invisible behind the collapsed section.
+                <button class="btn ghost cat-edit-toggle" type="button"
+                    on:click={
+                        let details_id = details_id_for_toggle.clone();
+                        move |ev| {
+                            ev.prevent_default();
+                            ev.stop_propagation();
+                            let turning_on = !editing.get();
+                            editing.set(turning_on);
+                            #[cfg(feature = "hydrate")]
+                            if turning_on {
+                                if let Some(doc) =
+                                    web_sys::window().and_then(|w| w.document())
+                                {
+                                    if let Some(el) =
+                                        doc.get_element_by_id(&details_id)
+                                    {
+                                        el.set_attribute("open", "").ok();
+                                    }
+                                }
+                            }
+                            #[cfg(not(feature = "hydrate"))]
+                            let _ = &details_id;
+                        }
+                    }>"✏️ Kategorie"</button>
             </summary>
+
+            {move || editing.get().then(|| view! {
+                <div class="cat-edit-row">
+                    <label>
+                        <span>"Name"</span>
+                        <input type="text"
+                            prop:value=move || name_sig.get()
+                            on:input=move |ev| name_sig.set(event_target_value(&ev))/>
+                    </label>
+                    <label>
+                        <span>"Reihenfolge"</span>
+                        <input type="number" step="1"
+                            prop:value=move || sort_sig.get().to_string()
+                            on:input=move |ev| {
+                                let v: i64 = event_target_value(&ev).parse().unwrap_or(0);
+                                sort_sig.set(v);
+                            }/>
+                    </label>
+                    <div class="cat-edit-actions">
+                        <button class="btn primary" type="button" on:click=on_save_cat.clone()>
+                            "Speichern"
+                        </button>
+                        {can_delete.then(|| view! {
+                            <button class="btn ghost danger" type="button" on:click=on_delete_cat.clone()>
+                                "Kategorie löschen"
+                            </button>
+                        })}
+                        {(!can_delete).then(|| view! {
+                            <span class="muted small">
+                                "Zum Löschen erst alle Artikel verschieben/entfernen."
+                            </span>
+                        })}
+                    </div>
+                </div>
+            })}
+
             <div class="cat-rows">
                 {cat_items.into_iter().map(|it| {
                     let allergens = allergens.clone();

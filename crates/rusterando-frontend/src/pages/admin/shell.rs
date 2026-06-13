@@ -137,7 +137,6 @@ pub fn AdminShell(children: Children) -> impl IntoView {
                     <a href="/admin/customers">"Kunden"</a>
                     <a href="/admin/vouchers">"Gutscheine"</a>
                     <a href="/admin/zones">"Liefergebiete"</a>
-                    <a href="/admin/localities">"PLZ ↔ Ort"</a>
                     <a href="/admin/address-attempts">"Abgelehnte Adressen"</a>
                     <a href="/admin/hours">"Öffnungszeiten"</a>
                     <a href="/admin/pdf">"PDF-Editor"</a>

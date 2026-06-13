@@ -24,6 +24,9 @@ pub struct OptionGroupAdminRow {
     pub max_select: i64,
     pub sort_order: i64,
     pub is_active: bool,
+    /// Suppress the "gratis" label on 0 € options (variant pickers).
+    #[serde(default)]
+    pub hide_zero_price: bool,
     pub options: Vec<OptionAdminRow>,
 }
 
@@ -52,8 +55,8 @@ pub async fn list_option_groups_admin() -> Result<Vec<OptionGroupAdminRow>, Serv
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
-    let groups: Vec<(String, String, i64, i64, i64, i64)> = sqlx::query_as(
-        "SELECT id, label, min_select, max_select, sort_order, is_active
+    let groups: Vec<(String, String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT id, label, min_select, max_select, sort_order, is_active, hide_zero_price
          FROM item_option_groups
          ORDER BY sort_order, label",
     )
@@ -88,18 +91,21 @@ pub async fn list_option_groups_admin() -> Result<Vec<OptionGroupAdminRow>, Serv
 
     Ok(groups
         .into_iter()
-        .map(|(id, label, min_s, max_s, sort_order, is_active)| {
-            let opts = by_group.remove(&id).unwrap_or_default();
-            OptionGroupAdminRow {
-                id,
-                label,
-                min_select: min_s,
-                max_select: max_s,
-                sort_order,
-                is_active: is_active != 0,
-                options: opts,
-            }
-        })
+        .map(
+            |(id, label, min_s, max_s, sort_order, is_active, hide_zero)| {
+                let opts = by_group.remove(&id).unwrap_or_default();
+                OptionGroupAdminRow {
+                    id,
+                    label,
+                    min_select: min_s,
+                    max_select: max_s,
+                    sort_order,
+                    is_active: is_active != 0,
+                    hide_zero_price: hide_zero != 0,
+                    options: opts,
+                }
+            },
+        )
         .collect())
 }
 
@@ -112,6 +118,7 @@ pub async fn create_option_group(
     label: String,
     min_select: i64,
     max_select: i64,
+    #[server(default)] hide_zero_price: bool,
 ) -> Result<String, ServerFnError> {
     use sqlx::SqlitePool;
     crate::pages::admin::require_admin().await?;
@@ -134,14 +141,15 @@ pub async fn create_option_group(
             .unwrap_or(10);
 
     sqlx::query(
-        "INSERT INTO item_option_groups (id, label, min_select, max_select, sort_order)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO item_option_groups (id, label, min_select, max_select, sort_order, hide_zero_price)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(&id)
     .bind(label.trim())
     .bind(min_select)
     .bind(max_select)
     .bind(next_sort)
+    .bind(if hide_zero_price { 1_i64 } else { 0_i64 })
     .execute(&db)
     .await
     .map_err(|e| ServerFnError::new(format!("insert group: {e}")))?;
@@ -160,6 +168,7 @@ pub async fn update_option_group(
     max_select: i64,
     sort_order: i64,
     is_active: bool,
+    #[server(default)] hide_zero_price: bool,
 ) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
     crate::pages::admin::require_admin().await?;
@@ -176,7 +185,7 @@ pub async fn update_option_group(
     sqlx::query(
         "UPDATE item_option_groups
          SET label = ?2, min_select = ?3, max_select = ?4, sort_order = ?5,
-             is_active = ?6, updated_at = CURRENT_TIMESTAMP
+             is_active = ?6, hide_zero_price = ?7, updated_at = CURRENT_TIMESTAMP
          WHERE id = ?1",
     )
     .bind(&id)
@@ -185,6 +194,7 @@ pub async fn update_option_group(
     .bind(max_select)
     .bind(sort_order)
     .bind(if is_active { 1 } else { 0 })
+    .bind(if hide_zero_price { 1_i64 } else { 0_i64 })
     .execute(&db)
     .await
     .map_err(|e| ServerFnError::new(format!("update group: {e}")))?;
@@ -613,6 +623,7 @@ fn GroupCard(
     let max_sel = RwSignal::new(g.max_select.to_string());
     let sort_order = RwSignal::new(g.sort_order.to_string());
     let is_active = RwSignal::new(g.is_active);
+    let hide_zero_price = RwSignal::new(g.hide_zero_price);
 
     let new_opt_label = RwSignal::new(String::new());
     let new_opt_price = RwSignal::new("0".to_string());
@@ -654,6 +665,7 @@ fn GroupCard(
             max_select: mx,
             sort_order: so,
             is_active: is_active.get(),
+            hide_zero_price: hide_zero_price.get(),
         });
     };
     let on_delete_group = move |_| {
@@ -713,6 +725,12 @@ fn GroupCard(
                             prop:checked=move || is_active.get()
                             on:change=move |ev| is_active.set(event_target_checked(&ev))/>
                         <span>"Aktiv"</span>
+                    </label>
+                    <label class="checkbox" title="Für reine Varianten-Auswahl (z.B. Getränke-Sorten): blendet \"gratis\" bei 0-€-Optionen aus, damit es nicht so aussieht, als wäre das Produkt kostenlos.">
+                        <input type="checkbox"
+                            prop:checked=move || hide_zero_price.get()
+                            on:change=move |ev| hide_zero_price.set(event_target_checked(&ev))/>
+                        <span>"\"gratis\" ausblenden"</span>
                     </label>
                 </div>
                 <div class="og-actions">

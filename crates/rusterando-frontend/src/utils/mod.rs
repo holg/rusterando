@@ -111,107 +111,159 @@ pub fn subscribe_order_live(
             return;
         }
         let url = format!("/api/live/orders/{order_id}");
-        let Ok(es) = web_sys::EventSource::new(&url) else {
-            return;
-        };
-        let oid = order_id.clone();
-        let on_msg =
-            Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |ev: web_sys::MessageEvent| {
-                let Some(text) = ev.data().as_string() else {
-                    return;
-                };
-                let Ok(event) = serde_json::from_str::<LiveEvent>(&text) else {
-                    return;
-                };
-                match event.kind {
-                    // Append to the chat-style log (oldest first).
-                    LiveKind::Message(m) => {
-                        let id = m.id;
-                        // Status changes are logged into the message stream too
-                        // (body "Status: …") AND arrive as a dedicated `Status`
-                        // event. Notify only via the `Status` branch so a single
-                        // status change doesn't pop two notifications — fire here
-                        // only for genuine admin-typed messages.
-                        if notify && !m.body.starts_with("Status: ") {
-                            notify_customer("📣 Nachricht vom Restaurant", &m.body, &oid);
+
+        // Per-order live channel WITH auto-reconnect. The browser's
+        // built-in EventSource reconnect does NOT fire once the stream
+        // goes to CLOSED (server-initiated close on deploy/restart, the
+        // 5s keep-alive reaping a momentarily-stalled client, or a proxy
+        // timeout). Before this, that left the customer's order page
+        // silently frozen — status + admin messages stopped arriving
+        // until a manual reload. We now mirror `subscribe_shop_status`:
+        // an `onerror` handler closes the dead socket and reschedules a
+        // connect with exponential backoff (1s → 30s cap), reset to 1s on
+        // any successful message.
+        //
+        // Single-threaded WASM ⇒ Rc/RefCell are sound. `connect` is
+        // self-referential (onerror re-calls it) so it's held behind an
+        // Rc<RefCell<Option<Rc<dyn Fn()>>>> to break the cycle.
+        let es_slot: Rc<RefCell<Option<web_sys::EventSource>>> = Rc::new(RefCell::new(None));
+        let backoff_ms: Rc<RefCell<u32>> = Rc::new(RefCell::new(1_000));
+        // Keep onmessage/onerror closures alive across reconnects.
+        let keepalive: Rc<RefCell<Vec<wasm_bindgen::JsValue>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let connect: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        let connect_clone = connect.clone();
+        let es_slot_c = es_slot.clone();
+        let backoff_c = backoff_ms.clone();
+        let keepalive_c = keepalive.clone();
+        let order_id_c = order_id.clone();
+
+        let connect_fn: Rc<dyn Fn()> = Rc::new(move || {
+            // Reuse a healthy socket; only (re)connect when absent/CLOSED.
+            let needs_new = es_slot_c
+                .borrow()
+                .as_ref()
+                .map_or(true, |es| es.ready_state() == web_sys::EventSource::CLOSED);
+            if !needs_new {
+                return;
+            }
+            if let Some(old) = es_slot_c.borrow_mut().take() {
+                old.close();
+            }
+            let Ok(es) = web_sys::EventSource::new(&url) else {
+                return;
+            };
+
+            let oid = order_id_c.clone();
+            let backoff_for_msg = backoff_c.clone();
+            let on_msg = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
+                move |ev: web_sys::MessageEvent| {
+                    // Any successful message proves the link is healthy →
+                    // reset the backoff so the next blip starts from 1s.
+                    *backoff_for_msg.borrow_mut() = 1_000;
+                    let Some(text) = ev.data().as_string() else {
+                        return;
+                    };
+                    let Ok(event) = serde_json::from_str::<LiveEvent>(&text) else {
+                        return;
+                    };
+                    match event.kind {
+                        // Append to the chat-style log (oldest first).
+                        LiveKind::Message(m) => {
+                            let id = m.id;
+                            // Status changes are logged into the message stream too
+                            // (body "Status: …") AND arrive as a dedicated `Status`
+                            // event. Notify only via the `Status` branch so a single
+                            // status change doesn't pop two notifications — fire here
+                            // only for genuine admin-typed messages.
+                            if notify && !m.body.starts_with("Status: ") {
+                                notify_customer("📣 Nachricht vom Restaurant", &m.body, &oid);
+                            }
+                            messages.update(|v| v.push(m));
+                            if ack_on_receive {
+                                let oid = oid.clone();
+                                leptos::task::spawn_local(async move {
+                                    let _ = crate::pages::order::ack_order_message(oid, id).await;
+                                });
+                            }
                         }
-                        messages.update(|v| v.push(m));
-                        if ack_on_receive {
-                            // Confirm delivery back to the server (customer side).
-                            let oid = oid.clone();
-                            leptos::task::spawn_local(async move {
-                                let _ = crate::pages::order::ack_order_message(oid, id).await;
+                        LiveKind::MessageAck { message_id } => {
+                            messages.update(|v| {
+                                if let Some(m) = v.iter_mut().find(|m| m.id == message_id) {
+                                    m.delivered = true;
+                                }
                             });
                         }
-                    }
-                    // Flip the matching message to delivered (admin side).
-                    LiveKind::MessageAck { message_id } => {
-                        messages.update(|v| {
-                            if let Some(m) = v.iter_mut().find(|m| m.id == message_id) {
-                                m.delivered = true;
+                        LiveKind::Status(s) => {
+                            if notify {
+                                let label = crate::pages::order::status_label(&s);
+                                notify_customer(
+                                    &crate::t!("notify.order_updated"),
+                                    &crate::t!("notify.status_prefix").replace("{label}", &label),
+                                    &oid,
+                                );
                             }
-                        });
-                    }
-                    LiveKind::Status(s) => {
-                        if notify {
-                            let label = crate::pages::order::status_label(&s);
-                            notify_customer(
-                                &crate::t!("notify.order_updated"),
-                                &crate::t!("notify.status_prefix").replace("{label}", &label),
-                                &oid,
-                            );
+                            status.set(Some(s));
                         }
-                        status.set(Some(s));
+                        LiveKind::ShopStatus { .. } => {}
                     }
-                    LiveKind::ShopStatus { .. } => {}
+                },
+            );
+            es.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
+
+            // onerror: close + reschedule with the current backoff, then
+            // double it (cap 30s). Reconnect routes through `connect`,
+            // which checks readyState first so a flaky link can't pile up
+            // duplicate sockets.
+            let reconnect = connect_clone.clone();
+            let es_slot_err = es_slot_c.clone();
+            let backoff_err = backoff_c.clone();
+            let on_err = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+                if let Some(old) = es_slot_err.borrow_mut().take() {
+                    old.close();
+                }
+                let delay = {
+                    let cur = *backoff_err.borrow();
+                    let next = cur.saturating_mul(2).min(30_000);
+                    *backoff_err.borrow_mut() = next;
+                    cur
+                };
+                if let Some(f) = reconnect.borrow().clone() {
+                    leptos::leptos_dom::helpers::set_timeout(
+                        move || f(),
+                        std::time::Duration::from_millis(delay as u64),
+                    );
                 }
             });
-        es.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
+            es.set_onerror(Some(on_err.as_ref().unchecked_ref()));
 
-        // Stash the EventSource + closure in a per-effect RefCell so the
-        // owner's on_cleanup hook can drop them. Previously we
-        // `forget()`-ed both, which is fine on full-page navigation
-        // (browser tears down the tab's EventSources) but LEAKS on
-        // Leptos client-side routing: the OrderConfirmationPage unmounts,
-        // the effect is disposed, but the leaked ES stays connected
-        // forever. A second visit to /orders/<id> then opens ANOTHER
-        // EventSource on top, doubling the server's fd count per revisit.
-        //
-        // !Send web_sys types can't go through `on_cleanup` directly
-        // (the signature requires Send+Sync). We bridge via a thread_local
-        // slot: the cleanup hook just sets a flag; the next time the
-        // tokio/leptos event loop yields we close + drop the ES. Single-
-        // threaded WASM makes this race-free.
-        let es_slot: Rc<RefCell<Option<web_sys::EventSource>>> = Rc::new(RefCell::new(Some(es)));
-        let closure_slot: Rc<RefCell<Option<Closure<dyn FnMut(web_sys::MessageEvent)>>>> =
-            Rc::new(RefCell::new(Some(on_msg)));
+            // Hold the closures alive for the lifetime of the subscription
+            // (across reconnects). They're dropped wholesale in on_cleanup.
+            keepalive_c.borrow_mut().push(on_msg.into_js_value());
+            keepalive_c.borrow_mut().push(on_err.into_js_value());
+            *es_slot_c.borrow_mut() = Some(es);
+        });
+        *connect.borrow_mut() = Some(connect_fn.clone());
+        connect_fn();
 
-        // Register the close+drop hook on the current owner. The
-        // !Send Rc<RefCell<…>> values we want to drop wouldn't satisfy
-        // on_cleanup's `FnOnce + Send + Sync` bound on their own, but
-        // WASM is single-threaded so `send_wrapper::SendWrapper` is
-        // sound here: it asserts Send/Sync, then panics if anyone
-        // actually moves it off its origin thread. Inside the
-        // browser there IS no other thread, so the panic path is
-        // unreachable.
+        // Cleanup on unmount: close the socket, drop the held closures,
+        // and clear `connect` so any in-flight set_timeout reconnect
+        // no-ops. SendWrapper bridges the !Send Rc/RefCell through
+        // on_cleanup's Send+Sync bound (sound: single-threaded WASM).
         use send_wrapper::SendWrapper;
         let es_for_drop = SendWrapper::new(es_slot.clone());
-        let closure_for_drop = SendWrapper::new(closure_slot.clone());
+        let keepalive_for_drop = SendWrapper::new(keepalive.clone());
+        let connect_for_drop = SendWrapper::new(connect.clone());
         leptos::prelude::on_cleanup(move || {
-            // Take + close synchronously. The browser EventSource API
-            // is allowed to run on whatever thread we're on (it's all
-            // the main JS thread in WASM), so no spawn_local needed.
             if let Some(es) = es_for_drop.borrow_mut().take() {
                 es.close();
             }
-            // Dropping the closure frees the JS-side allocation; the
-            // browser's onmessage handler is detached as soon as the
-            // EventSource is closed above.
-            let _ = closure_for_drop.borrow_mut().take();
+            keepalive_for_drop.borrow_mut().clear();
+            // Drop the connect fn so a pending reconnect timer finds None.
+            let _ = connect_for_drop.borrow_mut().take();
         });
-        // Keep the slots alive for the lifetime of the effect: dropping
-        // them here would close the ES immediately.
-        let _ = (es_slot, closure_slot);
+        // Keep everything alive for the effect's lifetime.
+        let _ = (es_slot, backoff_ms, keepalive, connect);
     });
 }
 

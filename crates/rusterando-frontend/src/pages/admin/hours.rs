@@ -65,6 +65,34 @@ pub struct HoursAdmin {
     /// The customer-facing reason string for `shop_level` (e.g. "Heute ab
     /// 16:00 Uhr geöffnet"). Empty when plainly open.
     pub shop_reason: String,
+    /// Authoritative "can a customer actually place an order RIGHT NOW?" —
+    /// the exact result of the `place_order` gate (`shop_closed_state`).
+    /// Distinct from `shop_level`: the banner can read green while the
+    /// gate is closed near closing time (pre-buffer pushed all slots past
+    /// close). Surfaced so the admin status line can warn explicitly
+    /// instead of showing a misleading green. `false` = the order button
+    /// is disabled for customers right now.
+    pub gate_open: bool,
+    /// The customer-facing gate-closed reason when `gate_open == false`.
+    pub gate_reason: String,
+    /// Today's current effective OPEN time as "HH:MM" (earliest window
+    /// open). Empty when no window today. Drives the "früher öffnen"
+    /// side of the same-day control.
+    pub today_open: String,
+    /// Today's current effective close time as "HH:MM" (latest window
+    /// close — schedule, special-hours override, or force-open). Empty
+    /// when the shop has no window today (Ruhetag / closed). Drives the
+    /// "Heute länger offen" control's relative bumps + display.
+    pub today_close: String,
+    /// True when today's hours come from a `special_hours` override with
+    /// the "Heute verlängert" note — i.e. the admin already extended
+    /// today. Lets the UI show "Heute bis HH:MM (verlängert) — zurück zum
+    /// Plan" with an undo.
+    pub today_extended: bool,
+    /// Today's date "YYYY-MM-DD" (server-computed in shop TZ) — used by
+    /// the undo button to delete today's special_hours row without
+    /// client-side date math.
+    pub today_date: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +196,41 @@ pub async fn load_hours_admin() -> Result<HoursAdmin, ServerFnError> {
     // sees amber/red — e.g. "closed now, opens 16:00".
     let (shop_level, shop_reason) = crate::pages::order::ssr::shop_open_state(&db).await;
 
+    // The ACTUAL order gate — identical to what place_order enforces. When
+    // this is closed but shop_level is green, the admin sees an explicit
+    // warning instead of a misleading "läuft".
+    let (gate_closed, gate_reason) = crate::pages::order::ssr::shop_closed_state(&db).await;
+
+    // Today's current effective open + close, and whether it's an admin
+    // same-day adjustment. `today_windows` resolves special-hours /
+    // force-open / schedule.
+    let today_windows = crate::pages::order::ssr::today_windows(&db).await;
+    let today_open = today_windows
+        .iter()
+        .map(|(o, _)| o.clone())
+        .min()
+        .unwrap_or_default();
+    let today_close = today_windows
+        .iter()
+        .map(|(_, c)| c.clone())
+        .max()
+        .unwrap_or_default();
+    // Did the admin adjust today? A special_hours row for today with our
+    // marker note is the signal.
+    let today_str = crate::pages::order::ssr::now_local()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+    let today_extended: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM special_hours
+         WHERE date = ?1 AND is_closed = 0 AND note = 'Heute angepasst'",
+    )
+    .bind(&today_str)
+    .fetch_one(&db)
+    .await
+    .map(|n| n > 0)
+    .unwrap_or(false);
+
     Ok(HoursAdmin {
         weekly,
         special,
@@ -177,6 +240,12 @@ pub async fn load_hours_admin() -> Result<HoursAdmin, ServerFnError> {
         effective_open,
         shop_level,
         shop_reason,
+        gate_open: !gate_closed,
+        gate_reason,
+        today_open,
+        today_close,
+        today_extended,
+        today_date: today_str,
     })
 }
 
@@ -277,6 +346,128 @@ pub async fn upsert_special_hours(
     .execute(&db)
     .await
     .map_err(|e| ServerFnError::new(format!("upsert special hours: {e}")))?;
+    Ok(())
+}
+
+/// "Heute länger / früher offen" — adjust today's window edges via a
+/// `special_hours` row for today. The deliberate "we're open differently
+/// today" lever, distinct from the 24h-ish Notbetrieb force-open.
+/// special_hours wins over the weekday schedule in `today_windows`, so
+/// the banner / slots / order gate all follow automatically, and the
+/// override auto-expires at midnight when the date rolls over.
+///
+/// Both edges are optional and independent:
+///   * `new_open`  — pull today's OPEN earlier ("we open at 15:00 today").
+///                   Only EARLIER allowed (refuse later than current open;
+///                   to open later, use the schedule/Sondertag editor).
+///   * `new_close` — push today's CLOSE later ("we stay open until 23:00").
+///                   Only LATER allowed; refuse a close in the past.
+/// The unspecified edge keeps today's current effective value (or `now`
+/// for a closed day's open). Result must be a valid open < close window.
+#[server(name = SetTodayHours, prefix = "/api", endpoint = "set_today_hours")]
+pub async fn set_today_hours(
+    #[server(default)] new_open: Option<String>,
+    #[server(default)] new_close: Option<String>,
+) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    crate::pages::admin::require_admin().await?;
+    let new_open = new_open
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let new_close = new_close
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if new_open.is_none() && new_close.is_none() {
+        return Err(ServerFnError::new("Keine Zeit angegeben."));
+    }
+    if let Some(o) = &new_open {
+        if !valid_hhmm(o) {
+            return Err(ServerFnError::new("Öffnungszeit ungültig (HH:MM)."));
+        }
+    }
+    if let Some(c) = &new_close {
+        if !valid_hhmm(c) {
+            return Err(ServerFnError::new("Schließzeit ungültig (HH:MM)."));
+        }
+    }
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let now_hhmm = crate::pages::order::ssr::now_local()
+        .format("%H:%M")
+        .to_string();
+    let windows = crate::pages::order::ssr::today_windows(&db).await;
+    let cur_open = windows.iter().map(|(o, _)| o.clone()).min();
+    let cur_close = windows.iter().map(|(_, c)| c.clone()).max();
+
+    // Resolve each edge: use the requested value, else keep current.
+    // Closed day has no current open → default the open edge to now.
+    let open_time = new_open
+        .clone()
+        .or_else(|| cur_open.clone())
+        .unwrap_or_else(|| now_hhmm.clone());
+    let close_time = new_close
+        .clone()
+        .or_else(|| cur_close.clone())
+        .ok_or_else(|| {
+            ServerFnError::new(
+                "Heute ist kein regulärer Betrieb — bitte auch eine Schließzeit angeben.",
+            )
+        })?;
+
+    // Earlier-only on open: refuse moving the open LATER than it is now.
+    if let (Some(req), Some(cur)) = (&new_open, &cur_open) {
+        if req > cur {
+            return Err(ServerFnError::new(format!(
+                "Heute ist ab {cur} Uhr geöffnet. Dieser Schalter macht nur FRÜHER auf — für später den Wochenplan/Sondertag nutzen."
+            )));
+        }
+    }
+    // Later-only on close: refuse moving the close EARLIER than it is now.
+    if let (Some(req), Some(cur)) = (&new_close, &cur_close) {
+        if req < cur {
+            return Err(ServerFnError::new(format!(
+                "Heute ist bis {cur} Uhr geöffnet. Dieser Schalter macht nur LÄNGER auf — zum Verkürzen den Wochenplan/Sondertag nutzen."
+            )));
+        }
+        if req <= &now_hhmm {
+            return Err(ServerFnError::new(
+                "Die neue Schließzeit liegt in der Vergangenheit.",
+            ));
+        }
+    }
+    if close_time <= open_time {
+        return Err(ServerFnError::new(
+            "Die Schließzeit muss nach der Öffnungszeit liegen.",
+        ));
+    }
+
+    let today = crate::pages::order::ssr::now_local()
+        .date_naive()
+        .format("%Y-%m-%d")
+        .to_string();
+
+    sqlx::query(
+        "INSERT INTO special_hours (date, is_closed, open_time, close_time, note)
+         VALUES (?1, 0, ?2, ?3, 'Heute angepasst')
+         ON CONFLICT(date) DO UPDATE SET
+             is_closed = 0,
+             open_time = excluded.open_time,
+             close_time = excluded.close_time,
+             note = excluded.note",
+    )
+    .bind(&today)
+    .bind(&open_time)
+    .bind(&close_time)
+    .execute(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("set today hours: {e}")))?;
+
+    // Customer banners + cart should flip live (today's hours changed),
+    // same as the quick-toggle path.
+    broadcast_shop().await;
     Ok(())
 }
 
@@ -458,6 +649,7 @@ pub fn HoursAdminPage() -> impl IntoView {
     let open_setter = ServerAction::<SetOrdersOpen>::new();
     let scheduler = ServerAction::<SetOrdersSchedule>::new();
     let snoozer = ServerAction::<SnoozeOrders>::new();
+    let extender = ServerAction::<SetTodayHours>::new();
 
     let data = Resource::new(
         move || {
@@ -468,6 +660,7 @@ pub fn HoursAdminPage() -> impl IntoView {
                 open_setter.version().get(),
                 scheduler.version().get(),
                 snoozer.version().get(),
+                extender.version().get(),
             )
         },
         |_| async move { load_hours_admin().await },
@@ -483,7 +676,7 @@ pub fn HoursAdminPage() -> impl IntoView {
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
                     {move || data.get().map(|res| match res {
                         Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                        Ok(d) => view! { <HoursBody d row_updater special_upsert special_delete open_setter scheduler snoozer/> }.into_any(),
+                        Ok(d) => view! { <HoursBody d row_updater special_upsert special_delete open_setter scheduler snoozer extender/> }.into_any(),
                     })}
                 </Suspense>
             </section>
@@ -500,6 +693,7 @@ fn HoursBody(
     open_setter: ServerAction<SetOrdersOpen>,
     scheduler: ServerAction<SetOrdersSchedule>,
     snoozer: ServerAction<SnoozeOrders>,
+    extender: ServerAction<SetTodayHours>,
 ) -> impl IntoView {
     use rusterando_shared::models::ShopLevel;
 
@@ -508,6 +702,15 @@ fn HoursBody(
     let snoozing = !snooze_label.is_empty();
     let force_label = d.force_open_label.clone();
     let forced = !force_label.is_empty();
+    // The real order gate at load time. When it's closed while the shop
+    // otherwise looks open (near closing, prep buffer ate the last slots),
+    // we surface an explicit warning + the one-click "Notbetrieb" rescue.
+    let gate_open_initial = d.gate_open;
+    let gate_reason = d.gate_reason.clone();
+    // "Heute länger / früher offen" state.
+    let today_open = d.today_open.clone();
+    let today_close = d.today_close.clone();
+    let today_extended = d.today_extended;
 
     // The customer-facing 3-level status, seeded from SSR and kept live via
     // the same `/api/live/shop` SSE channel the customer banner + shell chip
@@ -540,6 +743,91 @@ fn HoursBody(
         move |_| {
             snoozer.dispatch(SnoozeOrders { minutes: mins });
         }
+    };
+    // "Notbetrieb" — accept everything right now, ASAP, no questions.
+    // This is the in-the-shop panic button: a customer is standing at the
+    // counter wanting to pay by app and the gate is closed for any reason
+    // (near closing, Ruhetag, outside hours). Force-open until end of day
+    // makes `open_right_now` true → the gate opens and ASAP is allowed.
+    let on_notbetrieb = move |_| {
+        open_setter.dispatch(SetOrdersOpen { open: true });
+    };
+
+    // "Heute länger / früher offen" — adjust today's window edges. Relative
+    // bumps shift the current open earlier / close later; the pickers set
+    // absolute times. All route through `set_today_hours`, which validates
+    // (earlier-only on open, later-only on close) + writes today's
+    // special_hours row. HH:MM math here is a UX convenience; the server
+    // re-validates everything.
+    let open_picker = RwSignal::new(String::new());
+    let close_picker = RwSignal::new(String::new());
+
+    // Parse "HH:MM" → minutes-since-midnight, default fallback supplied.
+    fn hhmm_to_min(s: &str, default_h: i64) -> i64 {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() == 2 {
+            parts[0].parse::<i64>().unwrap_or(default_h) * 60 + parts[1].parse::<i64>().unwrap_or(0)
+        } else {
+            default_h * 60
+        }
+    }
+    fn min_to_hhmm(total: i64) -> String {
+        let t = total.clamp(0, 23 * 60 + 59);
+        format!("{:02}:{:02}", t / 60, t % 60)
+    }
+
+    // Push the close LATER by `add_min` from today's current close.
+    let close_for_bump = today_close.clone();
+    let bump_close = move |add_min: i64| {
+        let base = close_for_bump.clone();
+        move |_| {
+            let new_close = min_to_hhmm(hhmm_to_min(&base, 22) + add_min);
+            extender.dispatch(SetTodayHours {
+                new_open: None,
+                new_close: Some(new_close),
+            });
+        }
+    };
+    // Pull the open EARLIER by `sub_min` from today's current open.
+    let open_for_bump = today_open.clone();
+    let bump_open = move |sub_min: i64| {
+        let base = open_for_bump.clone();
+        move |_| {
+            let new_open = min_to_hhmm(hhmm_to_min(&base, 16) - sub_min);
+            extender.dispatch(SetTodayHours {
+                new_open: Some(new_open),
+                new_close: None,
+            });
+        }
+    };
+    let on_open_picker = move |_| {
+        let v = open_picker.get();
+        if v.trim().is_empty() {
+            return;
+        }
+        extender.dispatch(SetTodayHours {
+            new_open: Some(v),
+            new_close: None,
+        });
+        open_picker.set(String::new());
+    };
+    let on_close_picker = move |_| {
+        let v = close_picker.get();
+        if v.trim().is_empty() {
+            return;
+        }
+        extender.dispatch(SetTodayHours {
+            new_open: None,
+            new_close: Some(v),
+        });
+        close_picker.set(String::new());
+    };
+    // Undo today's adjustment = delete today's special row → back to plan.
+    let today_date_for_undo = d.today_date.clone();
+    let on_undo_extend = move |_| {
+        special_delete.dispatch(DeleteSpecialHours {
+            date: today_date_for_undo.clone(),
+        });
     };
 
     // Group weekday rows for the table (Mon-first display order).
@@ -607,6 +895,92 @@ fn HoursBody(
              danach automatisch wieder frei. \"Auf Plan zurücksetzen\" hebt jede manuelle \
              Übersteuerung auf, sodass wieder der Wochenplan gilt (inkl. Ruhetag)."
         </p>
+
+        // ----- Notbetrieb: explicit gate warning + rescue button -----
+        // When the order gate is CLOSED but the shop otherwise looks open
+        // (e.g. near closing, prep buffer ate the last slots), the customer
+        // sees a disabled order button. This warns the admin explicitly and
+        // offers the one-click rescue.
+        {(!gate_open_initial).then(|| {
+            let reason = if gate_reason.is_empty() {
+                "Kund:innen können gerade NICHT bestellen.".to_string()
+            } else {
+                format!("Kund:innen können gerade NICHT bestellen: {gate_reason}")
+            };
+            view! {
+                <div class="gate-warning">
+                    <strong>"⚠ Bestell-Sperre aktiv"</strong>
+                    <p>{reason}</p>
+                </div>
+            }
+        })}
+        <div class="notbetrieb-row">
+            <button class="btn primary big" on:click=on_notbetrieb
+                    title="Nimmt sofort alle Bestellungen an (ASAP, bis Tagesende) — egal ob Ruhetag, ausserhalb der Zeiten oder kurz vor Schluss. Für \"Kunde steht vor mir und will per App zahlen\".">
+                "🚨 Notbetrieb: alles sofort annehmen"
+            </button>
+        </div>
+
+        // ----- Heute früher / länger offen -----
+        // Deliberate same-day hours adjustment. Writes a special_hours row
+        // for today (auto-expires at midnight). Distinct from Notbetrieb
+        // (24h-ish panic). "Früher" pulls the open earlier; "Länger" pushes
+        // the close later.
+        <div class="extend-today">
+            <div class="extend-head">
+                <strong>"Heute früher / länger offen"</strong>
+                {
+                    let to = today_open.clone();
+                    let tc = today_close.clone();
+                    move || if tc.is_empty() {
+                        view! { <span class="muted">" — heute kein regulärer Betrieb"</span> }.into_any()
+                    } else {
+                        view! {
+                            <span class="muted">
+                                " — aktuell " {to.clone()} "–" {tc.clone()} " Uhr"
+                                {today_extended.then(|| view! { <span class="ext-badge">" (angepasst)"</span> })}
+                            </span>
+                        }.into_any()
+                    }
+                }
+            </div>
+
+            // Früher öffnen
+            <div class="extend-actions">
+                <span class="extend-sep">"Früher öffnen:"</span>
+                <button class="btn ghost" on:click=bump_open(30)>"−30 Min"</button>
+                <button class="btn ghost" on:click=bump_open(60)>"−1 Std"</button>
+                <span class="extend-sep">"oder ab"</span>
+                <input type="time" class="extend-picker"
+                    prop:value=move || open_picker.get()
+                    on:input=move |ev| open_picker.set(event_target_value(&ev))/>
+                <button class="btn primary" on:click=on_open_picker>"Setzen"</button>
+            </div>
+
+            // Länger offen
+            <div class="extend-actions">
+                <span class="extend-sep">"Länger offen:"</span>
+                <button class="btn ghost" on:click=bump_close(30)>"+30 Min"</button>
+                <button class="btn ghost" on:click=bump_close(60)>"+1 Std"</button>
+                <span class="extend-sep">"oder bis"</span>
+                <input type="time" class="extend-picker"
+                    prop:value=move || close_picker.get()
+                    on:input=move |ev| close_picker.set(event_target_value(&ev))/>
+                <button class="btn primary" on:click=on_close_picker>"Setzen"</button>
+                {today_extended.then(|| view! {
+                    <button class="btn ghost danger" on:click=on_undo_extend
+                            title="Anpassung aufheben — heute gilt wieder der Wochenplan.">
+                        "↺ Anpassung aufheben"
+                    </button>
+                })}
+            </div>
+
+            {move || match extender.value().get() {
+                Some(Ok(())) => Some(view! { <p class="ok small">"✓ Öffnungszeit für heute angepasst."</p> }.into_any()),
+                Some(Err(e)) => Some(view! { <p class="error small">{format!("{e}")}</p> }.into_any()),
+                None => None,
+            }}
+        </div>
 
         // ----- Weekly schedule -----
         <h2>"Wöchentliche Öffnungszeiten"</h2>

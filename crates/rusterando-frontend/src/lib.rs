@@ -27,6 +27,9 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::admin::login::AdminLogout>();
     leptos::server_fn::axum::register_explicit::<pages::admin::menu_admin::UpdateMenuItem>();
     leptos::server_fn::axum::register_explicit::<pages::admin::menu_admin::CreateMenuItem>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::menu_admin::UpdateCategory>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::menu_admin::CreateCategory>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::menu_admin::DeleteCategory>();
     leptos::server_fn::axum::register_explicit::<pages::admin::extras_admin::ListExtrasAdmin>();
     leptos::server_fn::axum::register_explicit::<pages::admin::extras_admin::ListPizzaExtras>();
     leptos::server_fn::axum::register_explicit::<pages::admin::extras_admin::UpdateExtra>();
@@ -45,8 +48,8 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::locality::GetDeliveryAreas>();
     leptos::server_fn::axum::register_explicit::<pages::locality::SetDeliveryAreas>();
     leptos::server_fn::axum::register_explicit::<pages::locality::GeocodeForAdmin>();
-    leptos::server_fn::axum::register_explicit::<pages::admin::localities::LoadLocalitiesAdmin>();
-    leptos::server_fn::axum::register_explicit::<pages::admin::localities::SaveBypassSettings>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::zones::LoadLocalitiesAdmin>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::zones::SaveBypassSettings>();
     leptos::server_fn::axum::register_explicit::<pages::order::StartTour>();
     leptos::server_fn::axum::register_explicit::<pages::order::GetTour>();
     leptos::server_fn::axum::register_explicit::<pages::order::TourStopDelivered>();
@@ -126,6 +129,7 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::admin::hours::SetOrdersOpen>();
     leptos::server_fn::axum::register_explicit::<pages::admin::hours::SetOrdersSchedule>();
     leptos::server_fn::axum::register_explicit::<pages::admin::hours::SnoozeOrders>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::hours::SetTodayHours>();
     // Live customer channel: admin → customer order message + delivery ack.
     leptos::server_fn::axum::register_explicit::<pages::order::SetOrderMessage>();
     leptos::server_fn::axum::register_explicit::<pages::order::AckOrderMessage>();
