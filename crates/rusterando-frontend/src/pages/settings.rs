@@ -208,6 +208,12 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
             "menu_category_overlay muss '0' / '1' (oder 'true' / 'false') sein.",
         ));
     }
+    if key == "printer_theme" && !matches!(value.trim(), "rusterando-default" | "rusterando-rando")
+    {
+        return Err(ServerFnError::new(
+            "printer_theme muss 'rusterando-default' oder 'rusterando-rando' sein.",
+        ));
+    }
     if key == "orders_paused" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
         return Err(ServerFnError::new(
             "orders_paused muss '0' / '1' (oder 'true' / 'false') sein.",

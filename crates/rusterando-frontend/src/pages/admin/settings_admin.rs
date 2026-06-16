@@ -112,6 +112,7 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
     // live euro preview. Recognised by the key suffix.
     let is_cents = key.ends_with("_cents");
     let is_theme = key == "theme";
+    let is_printer_theme = key == "printer_theme";
     let is_stripe_mode = key == "stripe_mode";
     let is_i18n_toggle = key == "i18n_enabled";
     let is_category_overlay = key == "menu_category_overlay";
@@ -142,6 +143,16 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
                 on:change=move |ev| value.set(event_target_value(&ev))>
                 <option value="warm">"warm — beige/rot (Standard)"</option>
                 <option value="dark">"dark — dunkel mit roten Akzenten"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_printer_theme {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="rusterando-default">"rusterando-default — klassisch (nur Text)"</option>
+                <option value="rusterando-rando">"rusterando-rando — mit Symbol oben (Tüte/Roller)"</option>
             </select>
         }
         .into_any()

@@ -635,20 +635,68 @@ pub async fn build_order_for_kitchen(
     };
     let created_at_label = fmt_local(created_at_unix);
     let accepted_at_label = accepted_at_unix.map(fmt_local);
-    // Pickup/delivery time label. Same-day pre-orders show just "HH:MM"
-    // (compact, the common case); a different calendar day (rare far-out
-    // pre-order) shows "DD.MM. HH:MM" so the date isn't lost. Compared in
-    // the shop's local TZ, same as the receipt timestamps.
-    let pickup_time_label: Option<String> = scheduled_for_unix.map(|sched_unix| {
+
+    // Effective "due" unixtime for the receipt's scheduled-time line:
+    //   * scheduled_for set (pre-order)  → use it exactly.
+    //   * ASAP DELIVERY                  → created_at + the zone's ETA, so
+    //     the kitchen still sees a target ("Lieferung 20:15") instead of
+    //     a blank. The zone id is snapshotted in delivery_address_json;
+    //     its eta_minutes lives on delivery_zones.
+    //   * ASAP pickup                    → None (no meaningful ETA; the
+    //     Eingang line implies "now").
+    let due_unix: Option<i64> = if let Some(s) = scheduled_for_unix {
+        Some(s)
+    } else if order_type == "delivery" {
+        // Zone id from the snapshot JSON → eta_minutes.
+        let zone_id = delivery_address_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| {
+                v.get("zone_id")
+                    .and_then(|z| z.as_str())
+                    .map(|s| s.to_string())
+            })
+            .filter(|s| !s.is_empty());
+        let eta_minutes: Option<i64> = if let Some(zid) = zone_id {
+            sqlx::query_scalar::<_, i64>("SELECT eta_minutes FROM delivery_zones WHERE id = ?1")
+                .bind(zid)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        eta_minutes.map(|eta| created_at_unix + eta * 60)
+    } else {
+        None
+    };
+
+    // Format the due time the same way for both pre-orders and ETA:
+    // same calendar day → "HH:MM"; another day → "DD.MM. HH:MM".
+    let pickup_time_label: Option<String> = due_unix.and_then(|due| {
         use chrono::{Local, TimeZone};
-        let sched = Local.timestamp_opt(sched_unix, 0).single();
+        let due_dt = Local.timestamp_opt(due, 0).single();
         let created = Local.timestamp_opt(created_at_unix, 0).single();
-        match (sched, created) {
-            (Some(s), Some(c)) if s.date_naive() == c.date_naive() => s.format("%H:%M").to_string(),
-            (Some(s), _) => s.format("%d.%m. %H:%M").to_string(),
-            (None, _) => String::new(),
+        match (due_dt, created) {
+            (Some(d), Some(c)) if d.date_naive() == c.date_naive() => {
+                Some(d.format("%H:%M").to_string())
+            }
+            (Some(d), _) => Some(d.format("%d.%m. %H:%M").to_string()),
+            (None, _) => None,
         }
     });
+
+    // Receipt layout theme (app_settings.printer_theme). Empty / missing
+    // → the Pi renders the default layout. Read live so an admin change
+    // applies to the next order without a server restart.
+    let printer_theme: String =
+        sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'printer_theme'")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
 
     Ok(OrderForKitchen {
         order_id: OrderId(hasher.finish()),
@@ -678,5 +726,6 @@ pub async fn build_order_for_kitchen(
         voucher_code,
         voucher_discount_cents: voucher_discount_cents.max(0) as u32,
         pickup_time_label,
+        printer_theme,
     })
 }

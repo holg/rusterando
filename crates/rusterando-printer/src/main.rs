@@ -1,5 +1,6 @@
 mod client;
 mod config;
+mod icons;
 mod idempotency;
 mod printer;
 

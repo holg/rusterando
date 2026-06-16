@@ -108,6 +108,26 @@ fn render(
             .bold(false)?;
     }
 
+    // ===== Channel logo (rusterando-rando theme only) =====
+    // A big bitmap symbol directly above the channel word — the first
+    // thing the eye lands on: a bag for pickup, a scooter for delivery.
+    // Only the "rusterando-rando" theme prints it; the default theme
+    // (and unknown / empty theme values, e.g. an older server) skips it.
+    // Rendered as a raw GS v 0 raster via custom() — no image crate.
+    if order.printer_theme == "rusterando-rando" {
+        let icon = match order.channel {
+            OrderChannel::Delivery { .. } => Some(crate::icons::scooter_bitmap()),
+            OrderChannel::Pickup => Some(crate::icons::bag_bitmap()),
+            // Dine-in has no obvious logo; skip (channel word still prints).
+            OrderChannel::DineIn { .. } => None,
+        };
+        if let Some(bm) = icon {
+            p.justify(JustifyMode::CENTER)?
+                .custom(&bm.gs_v0())?
+                .feed()?;
+        }
+    }
+
     // ===== Channel banner (LIEFERUNG / ABHOLUNG / TISCH) =====
     let channel_label = match &order.channel {
         OrderChannel::Delivery { .. } => "LIEFERUNG".to_string(),
@@ -121,11 +141,17 @@ fn render(
         .reset_size()?
         .bold(false)?;
 
-    // ===== Fällig / Eingang timestamp =====
-    // Prefer the server-formatted label (shop's local TZ baked in); fall
-    // back to formatting the epoch with Local only for older servers that
-    // didn't send a label (then the Pi's TZ matters, but that's the legacy
-    // path; current servers always populate created_at_label).
+    // ===== Eingang + scheduled fulfillment time =====
+    // Two big+bold centered lines (size 1,2 = double height only, so each
+    // fits one ~42-col line):
+    //   * "Eingang: <ts>"     — when the order came in.
+    //   * "(Lieferung HH:MM)" / "(Abholung HH:MM)" — the scheduled due
+    //     time (omitted for ASAP, where there's no scheduled time).
+    //
+    // ORDER depends on channel: for DELIVERY the kitchen cares most about
+    // WHEN it's due (a far-out pre-order), so the scheduled line goes ON
+    // TOP. For pickup/dine-in, Eingang stays first (ASAP pickups have no
+    // scheduled line anyway, so the swap would be invisible there).
     let created_ts = if !order.created_at_label.is_empty() {
         format!("Eingang: {}", order.created_at_label)
     } else {
@@ -135,34 +161,46 @@ fn render(
             .map(|t| t.format("Eingang: %d. %B, %H:%M").to_string())
             .unwrap_or_else(|| "Eingang: —".into())
     };
-    // Big + bold: this is when the order came in — a field the kitchen
-    // reads at a glance, so it gets emphasis like the channel + label.
-    // size(1,2) doubles the height only (keeps it on one ~42-col line;
-    // a full 2×2 would overrun the width with the date + time).
-    p.justify(JustifyMode::CENTER)?
-        .bold(true)?
-        .size(1, 2)?
-        .writeln(&created_ts)?
-        .reset_size()?
-        .bold(false)?;
+    let scheduled_line = order
+        .pickup_time_label
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|when| {
+            let verb = match order.channel {
+                OrderChannel::Delivery { .. } => "Lieferung",
+                OrderChannel::Pickup => "Abholung",
+                OrderChannel::DineIn { .. } => "Servieren",
+            };
+            format!("({verb} {when})")
+        });
 
-    // Scheduled fulfillment time, in brackets right under the Eingang
-    // line. Channel decides the word: "Abholung" for pickup/dine-in,
-    // "Lieferung" for delivery. A far-out pre-order (2h, or another day)
-    // is exactly when the kitchen needs this. ASAP orders (None) print
-    // nothing extra — the Eingang line already implies "now".
-    if let Some(when) = order.pickup_time_label.as_deref().filter(|s| !s.is_empty()) {
-        let verb = match order.channel {
-            OrderChannel::Delivery { .. } => "Lieferung",
-            OrderChannel::Pickup => "Abholung",
-            OrderChannel::DineIn { .. } => "Servieren",
-        };
+    // Emit one centered, bold, double-height line.
+    let big_line = |p: &mut EscposPrinter<FileDriver>, text: &str| -> Result<()> {
         p.justify(JustifyMode::CENTER)?
             .bold(true)?
             .size(1, 2)?
-            .writeln(&format!("({verb} {when})"))?
+            .writeln(text)?
             .reset_size()?
             .bold(false)?;
+        Ok(())
+    };
+
+    let scheduled_first = matches!(order.channel, OrderChannel::Delivery { .. });
+    match (&scheduled_line, scheduled_first) {
+        (Some(sched), true) => {
+            // Delivery: due time on top, then Eingang.
+            big_line(p, sched)?;
+            big_line(p, &created_ts)?;
+        }
+        (Some(sched), false) => {
+            // Pickup/dine-in with a scheduled time: Eingang first.
+            big_line(p, &created_ts)?;
+            big_line(p, sched)?;
+        }
+        (None, _) => {
+            // ASAP: just the Eingang line.
+            big_line(p, &created_ts)?;
+        }
     }
 
     p.justify(JustifyMode::CENTER)?.feed()?;

@@ -130,6 +130,16 @@ pub struct OrderForKitchen {
     /// → older Pi binaries simply omit it.
     #[serde(default)]
     pub pickup_time_label: Option<String>,
+    /// Receipt layout theme, chosen by the admin
+    /// (`app_settings.printer_theme`). Known values:
+    ///   * "" / "rusterando-default" → classic text-only layout.
+    ///   * "rusterando-rando"        → adds a big channel logo (bag for
+    ///     pickup, scooter for delivery) at the top of the receipt.
+    /// The Pi decides what to render; unknown values fall back to
+    /// default. `#[serde(default)]` → older Pi binaries ignore it (they
+    /// always render the default layout, which is correct).
+    #[serde(default)]
+    pub printer_theme: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -377,6 +387,7 @@ mod tests {
             voucher_code: String::new(),
             voucher_discount_cents: 0,
             pickup_time_label: Some("13:30".into()),
+            printer_theme: "rusterando-rando".into(),
         }
     }
 
@@ -446,4 +457,3 @@ mod tests {
         }
     }
 }
-

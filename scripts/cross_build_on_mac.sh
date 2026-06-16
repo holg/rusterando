@@ -432,6 +432,16 @@ export CARGO_INCREMENTAL=0
 
 echo "Using profile: $PROFILE"
 
+# PRINTER_ONLY=1 skips the (slow) full server + WASM leptos build and
+# jumps straight to the Pi printer binary below. Used by
+# deploy_printer.sh so a printer deploy doesn't rebuild the whole
+# server stack. The aarch64 cross-toolchain env (CC_/AR_/LINKER/shim/
+# sysroots) set up earlier in this script is exactly what the printer
+# crate needs, so we reuse it.
+if [ "${PRINTER_ONLY:-0}" = "1" ]; then
+  echo "PRINTER_ONLY=1 — skipping server/WASM build, going straight to the Pi binary"
+  LEPTOS_RC=0
+else
 # One binary, one feature set. Per-deployment behaviour (theme,
 # i18n, Stripe mode, branding) lives in the DB via app_settings and
 # the admin can flip toggles at runtime — no rebuild per shop.
@@ -441,13 +451,17 @@ LEPTOS_HASH_FILES=true \
     --bin-cargo-args="--config=build.incremental=true" \
     -v
 
-# Check if the build was successful
 LEPTOS_RC=$?
+fi
+
+# Check if the build was successful
 if [ $LEPTOS_RC -eq 0 ]; then
-  echo "Server build completed successfully!"
-  BINARY_PATH="target/$TARGET_TRIPLE/$PROFILE/davidspizzeria-server"
-  if [ -f "$BINARY_PATH" ]; then
-    echo "Server binary size: $(du -h "$BINARY_PATH" | cut -f1)"
+  if [ "${PRINTER_ONLY:-0}" != "1" ]; then
+    echo "Server build completed successfully!"
+    BINARY_PATH="target/$TARGET_TRIPLE/$PROFILE/davidspizzeria-server"
+    if [ -f "$BINARY_PATH" ]; then
+      echo "Server binary size: $(du -h "$BINARY_PATH" | cut -f1)"
+    fi
   fi
 
   # Cross-build the Pi binary (rusterando-printer) for aarch64 targets.
