@@ -18,8 +18,8 @@ pub async fn run(cfg: Config) -> Result<()> {
         .with_context(|| format!("open printer {}", cfg.printer_path.display()))?;
     info!("printer device opened");
 
-    let mut idempotency = IdempotencyCache::load(&cfg.state_dir)
-        .context("load idempotency cache")?;
+    let mut idempotency =
+        IdempotencyCache::load(&cfg.state_dir).context("load idempotency cache")?;
 
     let mut backoff = cfg.reconnect_min_ms;
     loop {

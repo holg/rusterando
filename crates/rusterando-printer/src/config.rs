@@ -34,16 +34,28 @@ pub struct Config {
     pub reconnect_max_ms: u64,
 }
 
-fn default_server_addr() -> String { "127.0.0.1:9001".into() }
-fn default_shop_slug() -> String { "rusterando".into() }
-fn default_version() -> String { env!("CARGO_PKG_VERSION").into() }
-fn default_printer_path() -> PathBuf { "/dev/usb/lp0".into() }
+fn default_server_addr() -> String {
+    "127.0.0.1:9001".into()
+}
+fn default_shop_slug() -> String {
+    "rusterando".into()
+}
+fn default_version() -> String {
+    env!("CARGO_PKG_VERSION").into()
+}
+fn default_printer_path() -> PathBuf {
+    "/dev/usb/lp0".into()
+}
 fn default_state_dir() -> PathBuf {
     // Matches systemd's StateDirectory=rusterando-printer.
     "/var/lib/rusterando-printer".into()
 }
-fn default_reconnect_min() -> u64 { 1_000 }
-fn default_reconnect_max() -> u64 { 30_000 }
+fn default_reconnect_min() -> u64 {
+    1_000
+}
+fn default_reconnect_max() -> u64 {
+    30_000
+}
 
 impl Config {
     /// If $PRINTER_CONFIG points at a TOML file, load that. Otherwise pull
@@ -52,16 +64,24 @@ impl Config {
     /// during development.
     pub fn from_env_or_file() -> Result<Self> {
         if let Ok(path) = std::env::var("PRINTER_CONFIG") {
-            let text = std::fs::read_to_string(&path)
-                .with_context(|| format!("read config {path}"))?;
+            let text =
+                std::fs::read_to_string(&path).with_context(|| format!("read config {path}"))?;
             return toml::from_str(&text).context("parse config TOML");
         }
         Ok(Self {
             server_addr: env_or("PRINTER_SERVER_ADDR", default_server_addr()),
             shop_slug: env_or("PRINTER_SHOP_SLUG", default_shop_slug()),
             version: default_version(),
-            printer_path: env_or("PRINTER_PATH", default_printer_path().to_string_lossy().into_owned()).into(),
-            state_dir: env_or("PRINTER_STATE_DIR", default_state_dir().to_string_lossy().into_owned()).into(),
+            printer_path: env_or(
+                "PRINTER_PATH",
+                default_printer_path().to_string_lossy().into_owned(),
+            )
+            .into(),
+            state_dir: env_or(
+                "PRINTER_STATE_DIR",
+                default_state_dir().to_string_lossy().into_owned(),
+            )
+            .into(),
             reconnect_min_ms: env_parse("PRINTER_RECONNECT_MIN_MS", default_reconnect_min()),
             reconnect_max_ms: env_parse("PRINTER_RECONNECT_MAX_MS", default_reconnect_max()),
         })
@@ -73,5 +93,8 @@ fn env_or(key: &str, default: String) -> String {
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }

@@ -408,7 +408,8 @@ pub async fn build_order_for_kitchen(
                 total_cents, payment_status, status, notes, stripe_mode,
                 voucher_code, voucher_discount_cents,
                 strftime('%s', created_at) AS created_at_unix,
-                strftime('%s', updated_at) AS updated_at_unix
+                strftime('%s', updated_at) AS updated_at_unix,
+                strftime('%s', scheduled_for) AS scheduled_for_unix
          FROM orders
          WHERE id = ?1",
     )
@@ -442,6 +443,13 @@ pub async fn build_order_for_kitchen(
     // SQLite returns strftime('%s', ...) as text. Parse to i64.
     let created_at_unix: i64 = row.get::<String, _>("created_at_unix").parse().unwrap_or(0);
     let updated_at_unix: i64 = row.get::<String, _>("updated_at_unix").parse().unwrap_or(0);
+    // Scheduled fulfillment time. NULL (= ASAP) → None. strftime returns
+    // NULL as a SQL NULL, so try_get gives Option<String>.
+    let scheduled_for_unix: Option<i64> = row
+        .try_get::<Option<String>, _>("scheduled_for_unix")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok());
 
     // Order is "accepted" once it advances past the initial state.
     // pending_payment → waiting for Stripe; received → kitchen has it.
@@ -627,6 +635,20 @@ pub async fn build_order_for_kitchen(
     };
     let created_at_label = fmt_local(created_at_unix);
     let accepted_at_label = accepted_at_unix.map(fmt_local);
+    // Pickup/delivery time label. Same-day pre-orders show just "HH:MM"
+    // (compact, the common case); a different calendar day (rare far-out
+    // pre-order) shows "DD.MM. HH:MM" so the date isn't lost. Compared in
+    // the shop's local TZ, same as the receipt timestamps.
+    let pickup_time_label: Option<String> = scheduled_for_unix.map(|sched_unix| {
+        use chrono::{Local, TimeZone};
+        let sched = Local.timestamp_opt(sched_unix, 0).single();
+        let created = Local.timestamp_opt(created_at_unix, 0).single();
+        match (sched, created) {
+            (Some(s), Some(c)) if s.date_naive() == c.date_naive() => s.format("%H:%M").to_string(),
+            (Some(s), _) => s.format("%d.%m. %H:%M").to_string(),
+            (None, _) => String::new(),
+        }
+    });
 
     Ok(OrderForKitchen {
         order_id: OrderId(hasher.finish()),
@@ -655,5 +677,6 @@ pub async fn build_order_for_kitchen(
         is_test_mode,
         voucher_code,
         voucher_discount_cents: voucher_discount_cents.max(0) as u32,
+        pickup_time_label,
     })
 }

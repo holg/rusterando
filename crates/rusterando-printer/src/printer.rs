@@ -39,8 +39,8 @@ impl Printer {
     pub fn open(path: &Path) -> Result<Self> {
         // Probe by opening and immediately dropping. If the device isn't
         // there (printer off, cable unplugged), fail fast at startup.
-        let _probe = FileDriver::open(path)
-            .with_context(|| format!("probe open {}", path.display()))?;
+        let _probe =
+            FileDriver::open(path).with_context(|| format!("probe open {}", path.display()))?;
         Ok(Self {
             path: path.to_path_buf(),
             write_lock: Mutex::new(()),
@@ -57,11 +57,7 @@ impl Printer {
         // ISO-8859-15 transcoder in escpos's `Protocol::text`. Without
         // this, the crate sends raw UTF-8 bytes and the firmware paints
         // mojibake.
-        let options = PrinterOptions::new(
-            Some(RECEIPT_PAGE_CODE),
-            None,
-            RECEIPT_WIDTH as u8,
-        );
+        let options = PrinterOptions::new(Some(RECEIPT_PAGE_CODE), None, RECEIPT_WIDTH as u8);
         let mut p = EscposPrinter::new(driver, Protocol::default(), Some(options));
 
         render(&mut p, order, is_reprint).context("render order")?;
@@ -139,9 +135,37 @@ fn render(
             .map(|t| t.format("Eingang: %d. %B, %H:%M").to_string())
             .unwrap_or_else(|| "Eingang: —".into())
     };
+    // Big + bold: this is when the order came in — a field the kitchen
+    // reads at a glance, so it gets emphasis like the channel + label.
+    // size(1,2) doubles the height only (keeps it on one ~42-col line;
+    // a full 2×2 would overrun the width with the date + time).
     p.justify(JustifyMode::CENTER)?
+        .bold(true)?
+        .size(1, 2)?
         .writeln(&created_ts)?
-        .feed()?;
+        .reset_size()?
+        .bold(false)?;
+
+    // Scheduled fulfillment time, in brackets right under the Eingang
+    // line. Channel decides the word: "Abholung" for pickup/dine-in,
+    // "Lieferung" for delivery. A far-out pre-order (2h, or another day)
+    // is exactly when the kitchen needs this. ASAP orders (None) print
+    // nothing extra — the Eingang line already implies "now".
+    if let Some(when) = order.pickup_time_label.as_deref().filter(|s| !s.is_empty()) {
+        let verb = match order.channel {
+            OrderChannel::Delivery { .. } => "Lieferung",
+            OrderChannel::Pickup => "Abholung",
+            OrderChannel::DineIn { .. } => "Servieren",
+        };
+        p.justify(JustifyMode::CENTER)?
+            .bold(true)?
+            .size(1, 2)?
+            .writeln(&format!("({verb} {when})"))?
+            .reset_size()?
+            .bold(false)?;
+    }
+
+    p.justify(JustifyMode::CENTER)?.feed()?;
 
     // ===== Big bold display_label =====
     // Full server-assigned label ("DP-1105-0001") so the staff can
@@ -181,10 +205,7 @@ fn render(
             None => true,
         };
         if cat_changed && !cat.is_empty() {
-            p.feed()?
-                .bold(true)?
-                .writeln(cat)?
-                .bold(false)?;
+            p.feed()?.bold(true)?.writeln(cat)?.bold(false)?;
         }
         last_category = Some(cat);
 
@@ -198,11 +219,7 @@ fn render(
         // small indent and the `+ ` prefix.
         for (i, m) in item.modifications.iter().enumerate() {
             let pretty = format!("+ {m}");
-            let price = item
-                .modification_prices_cents
-                .get(i)
-                .copied()
-                .unwrap_or(0);
+            let price = item.modification_prices_cents.get(i).copied().unwrap_or(0);
             if price > 0 {
                 write_wrapped_pair(p, &format!("   {pretty}"), &format_euro(price))?;
             } else {
@@ -419,11 +436,7 @@ fn render_test_banner(p: &mut EscposPrinter<FileDriver>) -> Result<()> {
 /// `left` onto multiple lines and right-align `right` on the LAST
 /// wrapped line. Matches Lieferando's "item name wraps under itself,
 /// price stays on the right of the bottom row" behaviour.
-fn write_wrapped_pair(
-    p: &mut EscposPrinter<FileDriver>,
-    left: &str,
-    right: &str,
-) -> Result<()> {
+fn write_wrapped_pair(p: &mut EscposPrinter<FileDriver>, left: &str, right: &str) -> Result<()> {
     let right_w = right.chars().count();
     // Leave one space gap minimum between left and right.
     let max_left = RECEIPT_WIDTH.saturating_sub(right_w + 1);

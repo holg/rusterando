@@ -121,6 +121,15 @@ pub struct OrderForKitchen {
     pub voucher_code: String,
     #[serde(default)]
     pub voucher_discount_cents: u32,
+    /// Customer's scheduled fulfillment time, server-formatted in the
+    /// shop's timezone (e.g. "13:30", or "25.05. 15:00" for a far-out
+    /// pre-order). `None` = ASAP (no scheduled time chosen). The printer
+    /// renders it in brackets after the big order-received timestamp,
+    /// labelled per channel ("Abholung" / "Lieferung"), so the kitchen
+    /// sees both when it came in AND when it's due. `#[serde(default)]`
+    /// → older Pi binaries simply omit it.
+    #[serde(default)]
+    pub pickup_time_label: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -367,6 +376,7 @@ mod tests {
             is_test_mode: false,
             voucher_code: String::new(),
             voucher_discount_cents: 0,
+            pickup_time_label: Some("13:30".into()),
         }
     }
 
@@ -436,3 +446,4 @@ mod tests {
         }
     }
 }
+
