@@ -79,6 +79,7 @@ pub mod ssr {
                 i64,
                 Option<String>,
                 Option<String>,
+                Option<String>,
                 i64,
             ),
         >(
@@ -103,6 +104,7 @@ pub mod ssr {
                             ci.unit_price_cents,
                             ci.extras_json,
                             ci.selected_options_json,
+                            ci.removals_json,
                             ci.is_giveaway
                      FROM cart_items ci
                      JOIN menu_items mi ON mi.id = ci.menu_item_id
@@ -134,6 +136,7 @@ pub mod ssr {
             unit_price_cents,
             extras_json,
             selected_options_json,
+            removals_json,
             is_giveaway_i,
         ) in rows
         {
@@ -143,6 +146,10 @@ pub mod ssr {
                 .and_then(|j| serde_json::from_str(j).ok())
                 .unwrap_or_default();
             let selected_options: Vec<CartSelectedOption> = selected_options_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default();
+            let removals: Vec<rusterando_shared::models::CartRemoval> = removals_json
                 .as_deref()
                 .and_then(|j| serde_json::from_str(j).ok())
                 .unwrap_or_default();
@@ -174,6 +181,7 @@ pub mod ssr {
                 extras_unit_cents,
                 extras,
                 selected_options,
+                removals,
                 line_total_cents: line_total,
                 is_giveaway,
             });
@@ -253,6 +261,12 @@ pub async fn add_to_cart(
     /// item has no option groups attached.
     #[server(default)]
     selected_option_ids: Vec<String>,
+    /// Catalog ids of ingredients the customer wants left OFF ("ohne X").
+    /// Server validates each against THIS item's removable set (derived
+    /// from its description × the extras catalog) and snapshots the bare
+    /// label at price 0. Empty for items with no removable ingredients.
+    #[server(default)]
+    removal_ids: Vec<String>,
 ) -> Result<CartView, ServerFnError> {
     use sqlx::SqlitePool;
 
@@ -394,6 +408,51 @@ pub async fn add_to_cart(
         )
     };
 
+    // Resolve "ohne X" removals. We re-derive the item's removable set
+    // server-side (description × extras catalog) and accept only ids in it,
+    // so a client can't remove an ingredient the pizza doesn't have. The
+    // snapshot stores the BARE label ("Käse"), always free.
+    let removals_json: Option<String> = if removal_ids.is_empty() {
+        None
+    } else {
+        use rusterando_shared::models::{match_removable_ingredients, CartRemoval};
+        // Item description (locale-aware, same as the name above).
+        let desc_col = crate::i18n::coalesce_col("description", "");
+        let description: String = sqlx::query_scalar(&format!(
+            "SELECT COALESCE({desc_col}, '') FROM menu_items WHERE id = ?1"
+        ))
+        .bind(&menu_item_id)
+        .fetch_optional(&db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        // Full available catalog (with aliases) for the match.
+        let label_col = crate::i18n::coalesce_col("label", "");
+        let catalog =
+            crate::pages::admin::extras_admin::ssr::load_catalog_with_aliases(&db, &label_col)
+                .await;
+        let removable = match_removable_ingredients(&description, &catalog);
+        // Keep only requested ids that are genuinely removable, in the
+        // removable set's (catalog) order.
+        let snapshot: Vec<CartRemoval> = removable
+            .into_iter()
+            .filter(|r| removal_ids.iter().any(|id| id == &r.id))
+            .map(|r| CartRemoval {
+                id: r.id,
+                label: r.bare_label,
+            })
+            .collect();
+        if snapshot.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&snapshot)
+                    .map_err(|e| ServerFnError::new(format!("serialise removals: {e}")))?,
+            )
+        }
+    };
+
     // Resolve picked options against item_option_groups + item_options.
     // We need to know:
     //   1. which groups this item has (for min/max validation)
@@ -502,13 +561,15 @@ pub async fn add_to_cart(
         "SELECT id, quantity FROM cart_items
          WHERE cart_id = ?1 AND menu_item_id = ?2 AND options_json = ?3
                AND COALESCE(extras_json, '') = COALESCE(?4, '')
-               AND COALESCE(selected_options_json, '') = COALESCE(?5, '')",
+               AND COALESCE(selected_options_json, '') = COALESCE(?5, '')
+               AND COALESCE(removals_json, '') = COALESCE(?6, '')",
     )
     .bind(&cart_id)
     .bind(&menu_item_id)
     .bind(&opts_json)
     .bind(extras_json.as_deref())
     .bind(selected_options_json.as_deref())
+    .bind(removals_json.as_deref())
     .fetch_optional(&db)
     .await
     .map_err(|e| ServerFnError::new(format!("lookup existing: {e}")))?;
@@ -525,8 +586,8 @@ pub async fn add_to_cart(
         sqlx::query(
             "INSERT INTO cart_items
                 (id, cart_id, menu_item_id, quantity, options_json,
-                 unit_price_cents, extras_json, selected_options_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 unit_price_cents, extras_json, selected_options_json, removals_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
         .bind(&line_id)
         .bind(&cart_id)
@@ -536,6 +597,7 @@ pub async fn add_to_cart(
         .bind(unit_price)
         .bind(extras_json.as_deref())
         .bind(selected_options_json.as_deref())
+        .bind(removals_json.as_deref())
         .execute(&db)
         .await
         .map_err(|e| ServerFnError::new(format!("insert line: {e}")))?;

@@ -162,6 +162,9 @@ pub struct OrderDetailItem {
     /// them with their per-piece price contribution.
     #[serde(default)]
     pub extras: Vec<rusterando_shared::models::CartExtra>,
+    /// Ingredients left off ("ohne X"), snapshotted at order time. Free.
+    #[serde(default)]
+    pub removals: Vec<rusterando_shared::models::CartRemoval>,
 }
 
 /// What the phone-recall lookup returns when a known number is typed at
@@ -2546,12 +2549,21 @@ pub async fn place_order(
                     .map_err(|e| ServerFnError::new(format!("serialise options: {e}")))?,
             )
         };
+        // Carry the "ohne X" removals snapshot too.
+        let removals_json = if line.removals.is_empty() {
+            None
+        } else {
+            Some(
+                serde_json::to_string(&line.removals)
+                    .map_err(|e| ServerFnError::new(format!("serialise removals: {e}")))?,
+            )
+        };
         sqlx::query(
             "INSERT INTO order_items
                 (id, order_id, menu_item_id, name_snapshot, menu_number_snapshot,
                  quantity, options_json, unit_price_cents, line_total_cents,
-                 extras_json, selected_options_json, is_giveaway)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 extras_json, selected_options_json, is_giveaway, removals_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )
         .bind(&line_id)
         .bind(&order_id)
@@ -2565,6 +2577,7 @@ pub async fn place_order(
         .bind(extras_json.as_deref())
         .bind(selected_options_json.as_deref())
         .bind(line.is_giveaway as i64)
+        .bind(removals_json.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(|e| ServerFnError::new(format!("insert order_item: {e}")))?;
@@ -2796,10 +2809,11 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
             i64,
             i64,
             Option<String>,
+            Option<String>,
         ),
     >(
         "SELECT menu_number_snapshot, name_snapshot, options_json,
-                quantity, unit_price_cents, line_total_cents, extras_json
+                quantity, unit_price_cents, line_total_cents, extras_json, removals_json
          FROM order_items WHERE order_id = ?1
          ORDER BY id",
     )
@@ -2810,26 +2824,33 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
 
     let items = item_rows
         .into_iter()
-        .map(|(num, name, opts, qty, unit, total, extras_json)| {
-            let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
-            let variant = v
-                .get("size_label")
-                .and_then(|x| x.as_str())
-                .map(|s| s.to_string());
-            let extras: Vec<rusterando_shared::models::CartExtra> = extras_json
-                .as_deref()
-                .and_then(|j| serde_json::from_str(j).ok())
-                .unwrap_or_default();
-            OrderDetailItem {
-                menu_number: num.filter(|s| !s.is_empty()),
-                name,
-                variant,
-                quantity: qty,
-                unit_price_cents: unit,
-                line_total_cents: total,
-                extras,
-            }
-        })
+        .map(
+            |(num, name, opts, qty, unit, total, extras_json, removals_json)| {
+                let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
+                let variant = v
+                    .get("size_label")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                let extras: Vec<rusterando_shared::models::CartExtra> = extras_json
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str(j).ok())
+                    .unwrap_or_default();
+                let removals: Vec<rusterando_shared::models::CartRemoval> = removals_json
+                    .as_deref()
+                    .and_then(|j| serde_json::from_str(j).ok())
+                    .unwrap_or_default();
+                OrderDetailItem {
+                    menu_number: num.filter(|s| !s.is_empty()),
+                    name,
+                    variant,
+                    quantity: qty,
+                    unit_price_cents: unit,
+                    line_total_cents: total,
+                    extras,
+                    removals,
+                }
+            },
+        )
         .collect();
 
     let pickup_label = match row.6.as_deref() {
@@ -4324,6 +4345,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
             <ul class="confirm-items">
                 {o.items.into_iter().map(|it| {
                     let extras = it.extras.clone();
+                    let removals = it.removals.clone();
                     view! {
                         <li>
                             <span class="qty">{it.quantity} "×"</span>
@@ -4342,6 +4364,13 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                                                 format!("+{}", format_eur(e.price_cents))
                                             };
                                             view! { <li>"+ " {e.label} " " <span class="muted">{p}</span></li> }
+                                        }).collect_view()}
+                                    </ul>
+                                })}
+                                {(!removals.is_empty()).then(|| view! {
+                                    <ul class="extras removals">
+                                        {removals.into_iter().map(|r| view! {
+                                            <li>{crate::t!("menu.removal_prefix")}{r.label}</li>
                                         }).collect_view()}
                                     </ul>
                                 })}

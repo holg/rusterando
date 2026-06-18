@@ -70,8 +70,19 @@ pub fn provide_cart_ctx() {
     crate::utils::subscribe_shop_status(so_write);
     Effect::new(move |_| {
         if let Some((level, _)) = so_read.get() {
-            // The drawer only cares whether checkout is blocked.
-            shop_closed_override.set(Some(level.is_closed()));
+            // The drawer only cares whether checkout is BLOCKED — which is
+            // NOT the same as "not open right now". `OpensLater` (amber)
+            // means the shop is closed this minute but pre-orders for a
+            // later slot today are allowed; blocking checkout then wrongly
+            // stops a customer from ordering at 14:43 for a 16:00 pickup.
+            //
+            // `blocks_ordering()` returns None for that ambiguous amber
+            // state (it also covers snooze/pause, which the level alone
+            // can't distinguish) → we leave the override as None so the
+            // cart falls back to its authoritative `orders_closed` (from
+            // shop_closed_state, refreshed on the 30s poll). Only the
+            // hard-closed (red) and open (green) levels override live.
+            shop_closed_override.set(level.blocks_ordering());
         }
     });
 
@@ -424,6 +435,19 @@ fn Line(line: CartLine) -> impl IntoView {
         }
     });
 
+    // "ohne X" removals — free, rendered like extras but with the "ohne"
+    // prefix and no price.
+    let removals_render = (!line.removals.is_empty()).then(|| {
+        let items = line.removals.clone();
+        view! {
+            <ul class="extras removals">
+                {items.into_iter().map(|r| view! {
+                    <li>{crate::t!("menu.removal_prefix")}{r.label}</li>
+                }).collect_view()}
+            </ul>
+        }
+    });
+
     // The giveaway line is a single free item: render the chosen sauce, badge
     // it "Gratis", and drop the quantity stepper + edit button (it's fixed at
     // qty 1 and has no editable extras). It stays removable.
@@ -464,6 +488,7 @@ fn Line(line: CartLine) -> impl IntoView {
                     {format_eur(line.unit_price_cents)} " × " {line.quantity}
                 </div>
                 {extras_render}
+                {removals_render}
             </div>
             <div class="actions">
                 <div class="qty">

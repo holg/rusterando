@@ -203,11 +203,36 @@ async fn handle_client(
         shop_slug,
         version,
         last_seen_seq,
+        arch,
+        cached_rasters,
     } = hello
     else {
         anyhow::bail!("first message was not Hello");
     };
-    info!(%peer, %shop_slug, %version, ?last_seen_seq, "kitchen client hello");
+    info!(%peer, %shop_slug, %version, %arch, ?last_seen_seq,
+        cached = cached_rasters.len(), "kitchen client hello");
+    // Logo hashes the Pi already has cached → we send refs (empty svg) for
+    // these and full SVG bytes otherwise. Set for O(1) lookup at send time.
+    let cached: std::collections::HashSet<[u8; 32]> = cached_rasters.into_iter().collect();
+
+    // Record this Pi's running version + arch so the admin panel can show
+    // it (and so a version skew is never invisible again). Best-effort.
+    if let Err(e) = upsert_client(&channel.db, &shop_slug, &version, &arch).await {
+        warn!(error = %e, "kitchen_clients upsert failed");
+    }
+
+    // ===== Self-update handshake (admin-gated) =====
+    // If an admin armed an update for this shop and we hold a newer target
+    // binary for the Pi's arch, offer + stream it BEFORE the print loop.
+    // The Pi drives the transfer synchronously and won't print during it;
+    // on success it installs + exits + reconnects on the new binary. We do
+    // this on the un-split `framed` so request/response stays simple.
+    if let Err(e) = maybe_serve_update(&channel.db, &mut framed, &shop_slug, &version, &arch).await
+    {
+        // A failed update must not kill the session — fall through to normal
+        // printing so the Pi keeps working on its current binary.
+        warn!(error = %e, "update handshake error (continuing to serve prints)");
+    }
 
     // ===== Step 2: replay unacked from outbox =====
     let replay_from = last_seen_seq.unwrap_or(SeqId(0));
@@ -220,7 +245,8 @@ async fn handle_client(
     let mut rx = channel.subscribe();
 
     for msg in &backlog {
-        let body = postcard::to_allocvec(msg).context("encode replay")?;
+        let msg = ref_cached_rasters(msg.clone(), &cached);
+        let body = postcard::to_allocvec(&msg).context("encode replay")?;
         let frame = kitchen_protocol::encode_versioned(&body);
         framed
             .send(Bytes::from(frame))
@@ -241,6 +267,7 @@ async fn handle_client(
 
     // Reader: handle client → server messages (acks, heartbeats)
     let chan_for_acks = channel.clone();
+    let shop_for_hb = shop_slug.clone();
     let ack_task = tokio::spawn(async move {
         while let Some(frame) = input.next().await {
             let bytes = match frame {
@@ -275,9 +302,26 @@ async fn handle_client(
                         debug!(seq_id = %seq_id, "ack persisted");
                     }
                 }
-                ClientMessage::Heartbeat => debug!("heartbeat"),
+                ClientMessage::Heartbeat => {
+                    // Keep `last_seen_at` fresh so the admin Pi panel shows
+                    // a connected idle Pi as "online", not stale-since-Hello.
+                    let _ = sqlx::query(
+                        "UPDATE kitchen_clients SET last_seen_at = strftime('%s','now') \
+                         WHERE shop_slug = ?1",
+                    )
+                    .bind(&shop_for_hb)
+                    .execute(&chan_for_acks.db)
+                    .await;
+                    debug!("heartbeat");
+                }
                 ClientMessage::Hello { .. } => {
                     warn!("unexpected mid-session Hello; ignoring");
+                }
+                // These belong to the post-Hello update handshake, which
+                // runs synchronously before this reader starts. Seeing one
+                // here means an out-of-band/late frame — ignore it.
+                ClientMessage::FetchArtifact { .. } | ClientMessage::UpdateResult { .. } => {
+                    debug!("update-handshake message outside handshake; ignoring");
                 }
             }
         }
@@ -293,6 +337,7 @@ async fn handle_client(
                     debug!(seq_id = %msg.seq_id, "skipping live event already in replay");
                     continue;
                 }
+                let msg = ref_cached_rasters(msg, &cached);
                 let body = match postcard::to_allocvec(&msg) {
                     Ok(b) => b,
                     Err(e) => {
@@ -324,6 +369,219 @@ async fn handle_client(
 }
 
 // ---------------------------------------------------------------------------
+// Pi version tracking + in-band self-update (admin-gated)
+// ---------------------------------------------------------------------------
+
+/// Upsert the per-shop client row on Hello: running version, arch, last
+/// seen, and the wire-protocol major. Visible in the admin Pi panel so a
+/// version skew is never silent, and read by the deploy guard.
+///
+/// `protocol_major` is the SERVER's `SCHEMA_VERSION_MAJOR`: a Hello only
+/// reaches this point if the Pi's envelope major matched ours
+/// (`decode_versioned` rejects a mismatch before we get here), so the
+/// stored value is the major this Pi successfully spoke — i.e. the
+/// last-known-good protocol major for the shop.
+async fn upsert_client(
+    db: &SqlitePool,
+    shop_slug: &str,
+    version: &str,
+    arch: &str,
+) -> anyhow::Result<()> {
+    let protocol_major = kitchen_protocol::SCHEMA_VERSION_MAJOR as i64;
+    sqlx::query(
+        "INSERT INTO kitchen_clients (shop_slug, version, arch, last_seen_at, protocol_major) \
+         VALUES (?1, ?2, ?3, strftime('%s','now'), ?4) \
+         ON CONFLICT(shop_slug) DO UPDATE SET \
+           version = excluded.version, \
+           arch = excluded.arch, \
+           last_seen_at = excluded.last_seen_at, \
+           protocol_major = excluded.protocol_major",
+    )
+    .bind(shop_slug)
+    .bind(version)
+    .bind(arch)
+    .bind(protocol_major)
+    .execute(db)
+    .await
+    .context("upsert kitchen_clients")?;
+    Ok(())
+}
+
+/// If an admin armed an update for this shop AND we hold a newer target
+/// binary for the Pi's `arch`, run the full offer→stream handshake on
+/// `framed`. The Pi verifies + installs + exits on success and reports an
+/// `UpdateResult` either way; we clear the armed flag + record the outcome.
+///
+/// Returns `Ok(())` whether or not an update happened. Errors only on a
+/// stream failure the caller should treat as "continue serving".
+async fn maybe_serve_update(
+    db: &SqlitePool,
+    framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
+    shop_slug: &str,
+    running_version: &str,
+    arch: &str,
+) -> anyhow::Result<()> {
+    // Armed?
+    let armed: Option<(i64,)> =
+        sqlx::query_as("SELECT update_armed FROM kitchen_clients WHERE shop_slug = ?1")
+            .bind(shop_slug)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    if armed.map(|(a,)| a).unwrap_or(0) == 0 {
+        return Ok(());
+    }
+
+    // Do we hold a newer target for this arch?
+    let store = crate::printer_artifacts::store();
+    let Some(art) = store.artifact(arch) else {
+        info!(%arch, "update armed but no artifact for arch — skipping");
+        return Ok(());
+    };
+    if art.version == running_version {
+        info!(version = %running_version, "update armed but Pi already on target — disarming");
+        disarm(db, shop_slug).await;
+        return Ok(());
+    }
+
+    info!(%shop_slug, from = %running_version, to = %art.version, size = art.size(), "serving Pi self-update");
+
+    // ===== Offer =====
+    send_event(
+        framed,
+        KitchenEvent::UpdateOffer {
+            component: kitchen_protocol::Component::PrinterBinary,
+            target_version: art.version.clone(),
+            sha256: art.sha256,
+            size: art.size(),
+        },
+    )
+    .await
+    .context("send UpdateOffer")?;
+
+    // ===== Serve the Pi's FetchArtifact requests until it has the whole
+    // file, then read its UpdateResult. The Pi may also send an Ack for
+    // the offer's outbox row — we skip non-update frames here. =====
+    let chunk_sz = crate::printer_artifacts::CHUNK_BYTES;
+    loop {
+        let frame = match framed.next().await {
+            Some(Ok(b)) => b,
+            Some(Err(e)) => return Err(e).context("read during update"),
+            None => anyhow::bail!("Pi closed during update"),
+        };
+        let inner = match kitchen_protocol::decode_versioned(&frame) {
+            Ok((_m, i)) => i,
+            Err(_) => continue,
+        };
+        let msg: ClientMessage = match postcard::from_bytes(inner) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        match msg {
+            ClientMessage::FetchArtifact { offset, .. } => {
+                let start = offset as usize;
+                if start > art.bytes.len() {
+                    anyhow::bail!("Pi requested offset past artifact end");
+                }
+                let end = (start + chunk_sz).min(art.bytes.len());
+                let last = end >= art.bytes.len();
+                send_event(
+                    framed,
+                    KitchenEvent::ArtifactChunk {
+                        component: kitchen_protocol::Component::PrinterBinary,
+                        offset,
+                        bytes: art.bytes[start..end].to_vec(),
+                        last,
+                    },
+                )
+                .await
+                .context("send ArtifactChunk")?;
+            }
+            ClientMessage::UpdateResult { to, ok, error, .. } => {
+                record_update_result(db, shop_slug, &to, ok, &error).await;
+                if ok {
+                    info!(%shop_slug, %to, "Pi self-update succeeded — it will reconnect on the new binary");
+                } else {
+                    warn!(%shop_slug, %to, %error, "Pi self-update failed — kept current binary");
+                }
+                // Disarm regardless: a failed update shouldn't re-offer in a
+                // tight reconnect loop. The admin re-arms after fixing.
+                disarm(db, shop_slug).await;
+                return Ok(());
+            }
+            // Ack for the offer's outbox row, heartbeat, etc. — ignore and
+            // keep serving chunks.
+            _ => continue,
+        }
+    }
+}
+
+async fn send_event(
+    framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
+    event: KitchenEvent,
+) -> anyhow::Result<()> {
+    // seq_id 0: update frames are out-of-band w.r.t. the print outbox.
+    let msg = ServerMessage {
+        seq_id: SeqId(0),
+        event,
+    };
+    let body = postcard::to_allocvec(&msg).context("encode update event")?;
+    let frame = kitchen_protocol::encode_versioned(&body);
+    framed
+        .send(Bytes::from(frame))
+        .await
+        .context("send update frame")?;
+    Ok(())
+}
+
+async fn disarm(db: &SqlitePool, shop_slug: &str) {
+    let _ = sqlx::query("UPDATE kitchen_clients SET update_armed = 0 WHERE shop_slug = ?1")
+        .bind(shop_slug)
+        .execute(db)
+        .await;
+}
+
+/// Rewrite a `ServerMessage` so any `RasterSvg` whose hash the Pi already
+/// has cached becomes a *reference* (empty `svg`) — the Pi uses its cache,
+/// and we don't re-send the bytes. Hashes the Pi hasn't advertised keep
+/// their full SVG. Leaves non-Print events untouched.
+fn ref_cached_rasters(
+    mut msg: ServerMessage,
+    cached: &std::collections::HashSet<[u8; 32]>,
+) -> ServerMessage {
+    use kitchen_protocol::receipt::ReceiptLine;
+    if cached.is_empty() {
+        return msg;
+    }
+    if let KitchenEvent::Print(prog) = &mut msg.event {
+        for line in &mut prog.lines {
+            if let ReceiptLine::RasterSvg { hash, svg, .. } = line {
+                if !svg.is_empty() && cached.contains(hash) {
+                    svg.clear(); // → reference; Pi resolves from its cache
+                }
+            }
+        }
+    }
+    msg
+}
+
+async fn record_update_result(db: &SqlitePool, shop_slug: &str, to: &str, ok: bool, error: &str) {
+    let _ = sqlx::query(
+        "UPDATE kitchen_clients SET \
+           last_update_to = ?2, last_update_ok = ?3, \
+           last_update_error = ?4, last_update_at = strftime('%s','now') \
+         WHERE shop_slug = ?1",
+    )
+    .bind(shop_slug)
+    .bind(to)
+    .bind(if ok { 1 } else { 0 })
+    .bind(error)
+    .execute(db)
+    .await;
+}
+
+// ---------------------------------------------------------------------------
 // build_order_for_kitchen + KitchenSink impl
 // ---------------------------------------------------------------------------
 
@@ -342,17 +600,152 @@ use kitchen_protocol::{
 #[async_trait::async_trait]
 impl rusterando_frontend::pages::push::KitchenSink for KitchenChannel {
     async fn broadcast_new_order(&self, db: &SqlitePool, order_id: &str) -> anyhow::Result<()> {
-        let (shop_name, public_url_base) = resolve_brand_and_url(db).await;
-        let dto = build_order_for_kitchen(db, order_id, &shop_name, &public_url_base).await?;
-        self.broadcast(KitchenEvent::NewOrder(dto)).await?;
+        let program = self.compose_program(db, order_id, false).await?;
+        self.broadcast(KitchenEvent::Print(program)).await?;
         Ok(())
     }
 
     async fn broadcast_reprint(&self, db: &SqlitePool, order_id: &str) -> anyhow::Result<()> {
-        let (shop_name, public_url_base) = resolve_brand_and_url(db).await;
-        let dto = build_order_for_kitchen(db, order_id, &shop_name, &public_url_base).await?;
-        self.broadcast(KitchenEvent::Reprint(dto)).await?;
+        let program = self.compose_program(db, order_id, true).await?;
+        self.broadcast(KitchenEvent::Print(program)).await?;
         Ok(())
+    }
+
+    async fn broadcast_test_print(
+        &self,
+        db: &SqlitePool,
+        delivery: bool,
+        prepaid: bool,
+        theme: String,
+    ) -> anyhow::Result<()> {
+        use rusterando_frontend::pages::settings::ssr as settings;
+
+        let (shop_name, public_url_base) = resolve_brand_and_url(db).await;
+        // A representative fake order so the layout is realistic. Marked as
+        // test_mode so the *** TEST *** banner makes clear this isn't a real
+        // ticket. QR points at the shop's configured target (or homepage).
+        let mut dto = sample_order_for_test(&shop_name, &theme, delivery, prepaid);
+        dto.qr_url = settings::resolve_qr_url(db, &public_url_base, "TESTDRUCK").await;
+        let config = settings::receipt_config(db).await;
+
+        let site_root =
+            std::env::var("LEPTOS_SITE_ROOT").unwrap_or_else(|_| "target/site".to_string());
+        let provider = crate::bon_designer::provider(&site_root);
+        let program = kitchen_protocol::receipt::compose(&dto, false, &config, provider);
+        self.broadcast(KitchenEvent::Print(program)).await?;
+        Ok(())
+    }
+}
+
+/// A representative sample `OrderForKitchen` for the Bon-Editor test print.
+/// Mirrors the admin preview's sample so the printed paper matches the
+/// on-screen preview. `is_test_mode = true` stamps the TEST banner.
+fn sample_order_for_test(
+    shop_name: &str,
+    theme: &str,
+    delivery: bool,
+    prepaid: bool,
+) -> OrderForKitchen {
+    let channel = if delivery {
+        OrderChannel::Delivery {
+            address: DeliveryAddress {
+                street: "Hauptstraße 12".into(),
+                postal: "63739".into(),
+                city: "Aschaffenburg".into(),
+                bell: Some("Mustermann".into()),
+            },
+        }
+    } else {
+        OrderChannel::Pickup
+    };
+    let items = vec![
+        LineItem {
+            qty: 1,
+            name: "Pizza Margherita".into(),
+            modifications: vec!["extra Käse".into()],
+            unit_price_cents: 850,
+            category: "Pizza".into(),
+            modification_prices_cents: vec![100],
+        },
+        LineItem {
+            qty: 2,
+            name: "Pizza Funghi e Prosciutto".into(),
+            modifications: vec![],
+            unit_price_cents: 1150,
+            category: "Pizza".into(),
+            modification_prices_cents: vec![],
+        },
+    ];
+    let subtotal_cents = 850 + 100 + 2 * 1150;
+    let delivery_fee_cents = if delivery { 150 } else { 0 };
+    let voucher_discount_cents = 300;
+    let total_cents = subtotal_cents + delivery_fee_cents - voucher_discount_cents;
+    let payment = if prepaid {
+        PaymentStatus::Prepaid
+    } else {
+        PaymentStatus::CollectOnDelivery {
+            amount_cents: total_cents,
+        }
+    };
+    OrderForKitchen {
+        order_id: OrderId(0),
+        display_number: 0,
+        display_label: "TESTDRUCK".into(),
+        created_at_unix: 0,
+        created_at_label: "Probedruck".into(),
+        channel,
+        customer: Customer {
+            name: "Maria Mustermann".into(),
+            phone: Some("06021 123456".into()),
+        },
+        items,
+        subtotal_cents,
+        delivery_fee_cents,
+        total_cents,
+        payment,
+        note: Some("Probedruck aus dem Bon-Editor.".into()),
+        shop_name: shop_name.to_string(),
+        accepted_at_unix: None,
+        accepted_at_label: None,
+        qr_url: None,
+        is_test_mode: true,
+        voucher_code: "WILLKOMMEN".into(),
+        voucher_discount_cents,
+        pickup_time_label: Some("18:30".into()),
+        printer_theme: theme.to_string(),
+    }
+}
+
+impl KitchenChannel {
+    /// The server-side Bon-Designer step: build the order DTO, run the
+    /// shared `receipt::compose` with the file-backed raster provider to
+    /// resolve the theme into inline 1-bit bytes, and return a complete
+    /// `ReceiptProgram` for the Pi to execute. The Pi holds no themes or
+    /// assets — all artwork is resolved here.
+    async fn compose_program(
+        &self,
+        db: &SqlitePool,
+        order_id: &str,
+        is_reprint: bool,
+    ) -> anyhow::Result<kitchen_protocol::receipt::ReceiptProgram> {
+        use rusterando_frontend::pages::settings::ssr as settings;
+
+        let (shop_name, public_url_base) = resolve_brand_and_url(db).await;
+        let mut dto = build_order_for_kitchen(db, order_id, &shop_name, &public_url_base).await?;
+
+        // Apply the admin-editable Bon-Editor config: resolve the QR target
+        // per receipt_qr_mode (order-url vs static), and pass the rest of
+        // the config (header override, footer, block toggles) into compose.
+        dto.qr_url = settings::resolve_qr_url(db, &public_url_base, order_id).await;
+        let config = settings::receipt_config(db).await;
+
+        // leptos sets LEPTOS_SITE_ROOT at runtime; fall back to the dev path.
+        let site_root =
+            std::env::var("LEPTOS_SITE_ROOT").unwrap_or_else(|_| "target/site".to_string());
+        let provider = crate::bon_designer::provider(&site_root);
+        Ok(kitchen_protocol::receipt::compose(
+            &dto, is_reprint, &config, provider,
+        ))
     }
 }
 
@@ -514,7 +907,7 @@ pub async fn build_order_for_kitchen(
     // without a heading (better than panicking on a missing FK).
     let item_rows = sqlx::query(
         "SELECT oi.menu_number_snapshot, oi.name_snapshot, oi.quantity,
-                oi.options_json, oi.extras_json, oi.unit_price_cents,
+                oi.options_json, oi.extras_json, oi.removals_json, oi.unit_price_cents,
                 mc.name AS category_name
          FROM order_items oi
          LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
@@ -534,6 +927,7 @@ pub async fn build_order_for_kitchen(
         let quantity: i64 = r.get("quantity");
         let options_json: String = r.get("options_json");
         let extras_json: Option<String> = r.get("extras_json");
+        let removals_json: Option<String> = r.get("removals_json");
         let unit_price_cents: i64 = r.get("unit_price_cents");
         let category_name: Option<String> = r.get("category_name");
 
@@ -568,6 +962,18 @@ pub async fn build_order_for_kitchen(
                 for e in extras {
                     modifications.push(e.label);
                     modification_prices.push(e.price_cents.max(0) as u32);
+                }
+            }
+        }
+        // Removed ingredients ("ohne Käse") — always free, printed on their
+        // own line like extras. `label` is already the bare ingredient name.
+        if let Some(j) = removals_json.as_deref() {
+            if let Ok(removals) =
+                serde_json::from_str::<Vec<rusterando_shared::models::CartRemoval>>(j)
+            {
+                for rem in removals {
+                    modifications.push(format!("ohne {}", rem.label));
+                    modification_prices.push(0);
                 }
             }
         }

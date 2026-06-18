@@ -50,3 +50,6 @@ docs/
 # path is committed; per-shop overrides are not.
 public/.well-known/apple-app-site-association.*
 
+
+# OTA printer artifacts (built binaries staged for in-band Pi self-update)
+artifacts/

@@ -293,6 +293,11 @@ pub async fn update_hour_row(
     // Weekly hours changed → refresh the cached JSON-LD openingHours.
     // (Special-hours overrides are NOT in the JSON-LD, so their fns skip this.)
     crate::pages::seo::rebuild_jsonld_cache().await;
+    // Editing TODAY's weekday row changes the live shop status — push it
+    // so open customer tabs update without a reload. (Editing another
+    // weekday is a no-op for the broadcast, which only recomputes the
+    // current status.)
+    broadcast_shop().await;
     Ok(())
 }
 
@@ -346,6 +351,10 @@ pub async fn upsert_special_hours(
     .execute(&db)
     .await
     .map_err(|e| ServerFnError::new(format!("upsert special hours: {e}")))?;
+    // A Sondertag for TODAY changes the live shop status — push it so open
+    // customer tabs update without a reload. (A future date is a no-op for
+    // the broadcast, which only recomputes the current status.)
+    broadcast_shop().await;
     Ok(())
 }
 
@@ -483,6 +492,12 @@ pub async fn delete_special_hours(date: String) -> Result<(), ServerFnError> {
         .execute(&db)
         .await
         .map_err(|e| ServerFnError::new(format!("delete special hours: {e}")))?;
+    // Deleting today's override (e.g. "Anpassung aufheben" undoing a
+    // früher/länger adjustment) changes the live shop status — push it so
+    // open customer + admin tabs revert without a reload. Cheap + correct
+    // for any date: broadcast just recomputes the CURRENT status, which
+    // only differs when the deleted row was today's.
+    broadcast_shop().await;
     Ok(())
 }
 

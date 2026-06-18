@@ -70,12 +70,39 @@ fn i18n_enabled_sync() -> bool {
 #[component]
 pub fn SiteHeader() -> impl IntoView {
     let name_upper = shop_name_sync().to_uppercase();
+
+    // "Letzte Bestellung" link — the customer's most recent order, read
+    // from the localStorage cache so they can always jump back to its
+    // live status page after navigating away / reopening the tab.
+    //
+    // localStorage doesn't exist on SSR, so this MUST start empty and
+    // populate only in a post-hydration Effect — otherwise SSR and the
+    // first hydrate render would differ and tachys would panic. The link
+    // simply pops in a moment after load on pages where a cached order
+    // exists; absent otherwise. (Mirrors the hydration-safe pattern
+    // used by the cart badge.)
+    let last_order = RwSignal::new(None::<crate::order_cache::OrderRef>);
+    #[cfg(feature = "hydrate")]
+    {
+        Effect::new(move |_| {
+            last_order.set(crate::order_cache::latest());
+        });
+    }
+
     view! {
         <header class="site-header">
             <a class="brand" href="/">
                 <span class="brand-wordmark">{name_upper}</span>
             </a>
             <nav class="site-nav">
+                {move || last_order.get().map(|o| {
+                    let href = format!("/orders/{}", o.id);
+                    let label = crate::t!("header.last_order")
+                        .replace("{number}", &o.order_number);
+                    view! {
+                        <a class="pill last-order" href=href>{label}</a>
+                    }
+                })}
                 <a class="pill" href="/menu">{crate::t!("header.menu")}</a>
                 <a class="pill" href="/#delivery">{crate::t!("header.delivery_area")}</a>
                 <a class="pill" href="/#hours">{crate::t!("header.opening_hours")}</a>

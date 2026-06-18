@@ -125,3 +125,41 @@ pub fn save(order: &OrderDetail) {
         let _ = order;
     }
 }
+
+/// A compact pointer to a cached order — just enough to render a
+/// "Letzte Bestellung" link without loading the whole blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderRef {
+    pub id: String,
+    pub order_number: String,
+    pub status: String,
+}
+
+/// The most-recently-cached order (head of the recency index), if any.
+/// Drives a persistent "view my last order" link so a customer who
+/// navigated away or reopened the tab can always get back to their
+/// order's live status page. Returns `None` on SSR, when localStorage
+/// is unavailable, or when no order has been cached yet.
+pub fn latest() -> Option<OrderRef> {
+    #[cfg(feature = "hydrate")]
+    {
+        let s = storage()?;
+        let ids: Vec<String> = s
+            .get_item(INDEX_KEY)
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        let id = ids.first()?;
+        let o = load(id)?;
+        Some(OrderRef {
+            id: o.id,
+            order_number: o.order_number,
+            status: o.status,
+        })
+    }
+    #[cfg(not(feature = "hydrate"))]
+    {
+        None
+    }
+}

@@ -1,6 +1,10 @@
 [package]
 name = "rusterando-printer"
-version = "0.1.0"
+# 0.3.0: SVG-on-the-wire logos (kitchen-protocol 2.0.0) — the Pi
+# rasterizes the server-composed logo SVG to 1-bit and caches it by content
+# hash; bundles Poppins + resvg. 0.2.0 was the pure raster interpreter.
+# The startup log's `version=` proves which build is running on the Pi.
+version = "0.3.0"
 edition = "2021"
 
 # Pi binary. Cross-compiles to aarch64-unknown-linux-gnu using the
@@ -45,6 +49,17 @@ escpos = { version = "0.16", features = ["codes_2d"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 anyhow = "1"
+# Verify self-update artifacts against the server-supplied sha256 before
+# installing. Pure-Rust, cross-compiles cleanly to aarch64.
+sha2 = "0.10"
+# Rasterize the server-composed logo SVG to 1-bit on the Pi (cached by
+# content hash). All pure-Rust — no C deps — so the aarch64 cross-build
+# stays clean. `fontdb` + a bundled Poppins TTF render the brand-mark
+# <text> deterministically. `default-features=false` on resvg drops the
+# system-font/text-layout-via-system bits we don't want on a headless Pi;
+# we feed fonts explicitly. Adds ~700 KB to the binary.
+resvg = { version = "0.44", default-features = false, features = ["text", "raster-images"] }
+tiny-skia = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

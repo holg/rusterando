@@ -48,6 +48,19 @@ if [[ "${1:-}" == "-e" || "${1:-}" == "--env" ]]; then
     shift 2
 fi
 
+# --force bypasses the Pi protocol-skew guard (see check_pi_protocol_skew).
+# Strip it from the positional args wherever it appears so COMMAND parsing
+# downstream is unaffected.
+FORCE_DEPLOY="${FORCE_DEPLOY:-0}"
+_args=()
+for _a in "$@"; do
+    case "$_a" in
+        --force) FORCE_DEPLOY=1 ;;
+        *) _args+=("$_a") ;;
+    esac
+done
+set -- "${_args[@]}"
+
 # Split on comma into an array so the rest of the script can iterate.
 IFS=',' read -ra ENV_PROFILES <<< "$ENV_PROFILES_RAW"
 # Normalise: empty array → one anonymous "" entry (loads bare .env).
@@ -138,6 +151,14 @@ Options:
                        Each profile gets its own .env, DB, port, and
                        systemd unit; the JS/WASM bundle is shared.
 
+    --force            Skip the printer (Pi) protocol-skew guard. By
+                       default deploy/full refuse if this build's
+                       kitchen-protocol MAJOR differs from the connected
+                       Pi's (which would silently stop printing). Use only
+                       for a coordinated cutover where you deploy the Pi
+                       immediately after, or a deployment with no Pi.
+                       (SKIP_PI_CHECK=1 does the same.)
+
 Commands:
     build         Build the release binary for Linux (x86)
     deploy        Backup + Upload + Restart + Apply seeds
@@ -175,6 +196,110 @@ EOF
 # =============================================================================
 ssh_cmd() {
     ssh "$SSH_HOST" "$@"
+}
+
+# First dotted component ("major") of a version string. "2.0.0" → 2,
+# "0.3.0" → 0. Empty/garbage → empty.
+version_major() {
+    printf '%s' "$1" | sed -n 's/^\([0-9][0-9]*\).*/\1/p'
+}
+
+# kitchen-protocol major this checkout would BUILD into the server. The
+# server's wire schema major == the first component of the crate version
+# (see kitchen_protocol::SCHEMA_VERSION_MAJOR), so the Pi must match it or
+# its Hello is rejected at the envelope (the "decode Hello envelope" outage).
+kitchen_protocol_tree_major() {
+    local ver
+    ver="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' \
+        crates/kitchen-protocol/Cargo.toml | head -1)"
+    version_major "$ver"
+}
+
+# Guard against shipping a server whose kitchen-protocol MAJOR differs from
+# the Pi currently connected to THIS deployment — the skew that silently
+# kills printing (server major 2 ⟷ Pi major 1 → "decode Hello envelope",
+# and OTA can't cross a major break because it rides the protocol).
+#
+# Reads the connected Pi's running version from the live `kitchen_clients`
+# table over SSH. If they mismatch, abort and tell the operator to deploy
+# the Pi first (scripts/deploy_printer.sh). Override with --force or
+# SKIP_PI_CHECK=1 (e.g. a brand-new deployment with no Pi yet, or a
+# deliberate coordinated cutover where you'll deploy the Pi right after).
+#
+# Fails OPEN (warns, proceeds) when it genuinely can't determine the Pi's
+# version — a missing row, unreadable DB, or sqlite3 absent — so the guard
+# never blocks a legitimate first deploy. It only HARD-blocks on a
+# confirmed mismatch.
+check_pi_protocol_skew() {
+    if [[ "${FORCE_DEPLOY:-0}" == "1" || "${SKIP_PI_CHECK:-0}" == "1" ]]; then
+        echo "  (Pi protocol-skew check skipped: --force / SKIP_PI_CHECK)"
+        return 0
+    fi
+
+    local tree_major
+    tree_major="$(kitchen_protocol_tree_major)"
+    if [[ -z "$tree_major" ]]; then
+        echo "  ⚠ could not read kitchen-protocol version from the tree — skipping skew check"
+        return 0
+    fi
+
+    # Resolve the prod DB path the same way cmd_apply_seeds does.
+    local db_rel="${DATABASE_URL#sqlite:}"
+    db_rel="${db_rel#./}"
+    if [[ -z "$db_rel" || "$db_rel" == "$DATABASE_URL" ]]; then
+        db_rel="data/${ENV_PROFILE:-${APP_NAME%-server}}.db"
+    fi
+    local remote_db="$REMOTE_BASE/$db_rel"
+
+    # Pull each connected Pi's LAST-KNOWN-GOOD protocol major + crate
+    # version from kitchen_clients. The server writes protocol_major =
+    # its own SCHEMA_VERSION_MAJOR on a successful Hello, so this is the
+    # protocol major the Pi actually spoke (NOT the crate version, which
+    # doesn't track the protocol). Tolerate every failure mode (no DB, no
+    # table, no column, no row, no sqlite3) → empty → fail open.
+    local pi_rows
+    pi_rows="$(ssh_cmd "sudo sqlite3 -separator '|' '$remote_db' \
+        \"SELECT protocol_major, version FROM kitchen_clients WHERE version <> '';\" 2>/dev/null" \
+        2>/dev/null || true)"
+
+    if [[ -z "$pi_rows" ]]; then
+        echo "  ℹ no connected Pi recorded yet (or pre-protocol_major DB) — skew check is a no-op"
+        return 0
+    fi
+
+    # Any connected Pi whose last-spoken protocol major differs from the
+    # tree's blocks the deploy.
+    local mismatched=""
+    while IFS='|' read -r pm pv; do
+        [[ -z "$pm" ]] && continue
+        if [[ "$pm" != "$tree_major" ]]; then
+            mismatched+="    • Pi ${pv:-?} last spoke protocol major $pm — tree builds protocol major $tree_major"$'\n'
+        fi
+    done <<< "$pi_rows"
+
+    if [[ -n "$mismatched" ]]; then
+        echo ""
+        echo "✗ PROTOCOL SKEW — refusing to deploy."
+        echo ""
+        echo "  This server build would ship kitchen-protocol MAJOR $tree_major,"
+        echo "  but a connected printer Pi is on a different major:"
+        echo ""
+        printf '%s' "$mismatched"
+        echo ""
+        echo "  Deploying it would silently stop printing: the Pi's Hello would be"
+        echo "  rejected ('decode Hello envelope'), and OTA cannot rescue it because"
+        echo "  the update handshake rides the same protocol that's mismatched."
+        echo ""
+        echo "  Fix: deploy the matching Pi binary FIRST, then re-run this deploy."
+        echo "       ./scripts/deploy_printer.sh        # build + ship the new Pi binary"
+        echo ""
+        echo "  Override (you know what you're doing — e.g. coordinated cutover where"
+        echo "  you'll deploy the Pi immediately after): re-run with --force."
+        echo ""
+        exit 1
+    fi
+
+    echo "  ✓ Pi protocol major matches tree (major $tree_major)"
 }
 
 # =============================================================================
@@ -624,6 +749,11 @@ cmd_deploy() {
         exit 1
     fi
     echo "Using binary: $LOCAL_BUILD_DIR/$CARGO_BIN_NAME → server:$APP_NAME ($(du -h "$LOCAL_BUILD_DIR/$CARGO_BIN_NAME" | cut -f1))"
+    # Refuse if this server build's kitchen-protocol major would strand the
+    # connected Pi (the "decode Hello envelope" outage). Runs before backup/
+    # upload/restart so a skew aborts before anything on the box changes.
+    echo "=== Checking printer (Pi) protocol compatibility ==="
+    check_pi_protocol_skew
     cmd_backup
     cmd_upload
     cmd_restart

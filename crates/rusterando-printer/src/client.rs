@@ -20,10 +20,12 @@ pub async fn run(cfg: Config) -> Result<()> {
 
     let mut idempotency =
         IdempotencyCache::load(&cfg.state_dir).context("load idempotency cache")?;
+    let mut rasters =
+        crate::raster_cache::RasterCache::load(&cfg.state_dir).context("load raster cache")?;
 
     let mut backoff = cfg.reconnect_min_ms;
     loop {
-        match connect_and_run(&cfg, &printer, &mut idempotency).await {
+        match connect_and_run(&cfg, &printer, &mut idempotency, &mut rasters).await {
             Ok(()) => {
                 info!("session ended cleanly, reconnecting soon");
                 backoff = cfg.reconnect_min_ms;
@@ -41,6 +43,7 @@ async fn connect_and_run(
     cfg: &Config,
     printer: &Printer,
     idempotency: &mut IdempotencyCache,
+    rasters: &mut crate::raster_cache::RasterCache,
 ) -> Result<()> {
     let stream = TcpStream::connect(&cfg.server_addr)
         .await
@@ -53,11 +56,16 @@ async fn connect_and_run(
         .new_codec();
     let mut framed = Framed::new(stream, codec);
 
-    // Hello — server uses last_seen_seq to replay our gap from the outbox.
+    // Hello — server uses last_seen_seq to replay our gap from the outbox,
+    // records version + arch for the admin Pi panel / update targeting, and
+    // reads our cached logo hashes so it can send references instead of SVG
+    // bytes for logos we already have.
     let hello = ClientMessage::Hello {
         shop_slug: cfg.shop_slug.clone(),
         version: cfg.version.clone(),
         last_seen_seq: idempotency.last_acked_seq(),
+        arch: cfg.arch.clone(),
+        cached_rasters: rasters.known_hashes(),
     };
     // Wrap with the kitchen-protocol version envelope so the server
     // can major-mismatch-skip cleanly. Crate version on both sides
@@ -88,17 +96,29 @@ async fn connect_and_run(
         }
     });
 
-    let result = main_loop(&mut framed, &out_tx, &mut out_rx, printer, idempotency).await;
+    let result = main_loop(
+        cfg,
+        &mut framed,
+        &out_tx,
+        &mut out_rx,
+        printer,
+        idempotency,
+        rasters,
+    )
+    .await;
     hb_task.abort();
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn main_loop(
+    cfg: &Config,
     framed: &mut Framed<TcpStream, LengthDelimitedCodec>,
     out_tx: &mpsc::Sender<ClientMessage>,
     out_rx: &mut mpsc::Receiver<ClientMessage>,
     printer: &Printer,
     idempotency: &mut IdempotencyCache,
+    rasters: &mut crate::raster_cache::RasterCache,
 ) -> Result<()> {
     loop {
         tokio::select! {
@@ -157,23 +177,62 @@ async fn main_loop(
                     continue;
                 }
 
-                let (order, is_reprint) = match &msg.event {
-                    KitchenEvent::NewOrder(o) => (o, false),
-                    KitchenEvent::Reprint(o) => (o, true),
-                };
+                match &msg.event {
+                    // The server is the Bon-Designer: the event is a fully
+                    // composed ReceiptProgram. We just execute it — no theme,
+                    // no assets, no layout logic on the Pi.
+                    KitchenEvent::Print(program) => {
+                        let display_number = program.display_number;
+                        if let Err(e) = printer.print_program(program, rasters) {
+                            // Don't ack. The server's outbox keeps this
+                            // pending; on reconnect we'll be replayed. Bail
+                            // this session so we reconnect with backoff and
+                            // don't tight-loop a broken printer.
+                            error!(seq_id = %msg.seq_id, error = %e, "print failed");
+                            anyhow::bail!("print failed for seq {}: {e}", msg.seq_id);
+                        }
+                        idempotency.record(msg.seq_id).context("persist idempotency")?;
+                        out_tx.send(ClientMessage::Ack(msg.seq_id)).await.ok();
+                        info!(seq_id = %msg.seq_id, order = display_number, "printed + acked");
+                    }
 
-                if let Err(e) = printer.print_order(order, is_reprint) {
-                    // Don't ack. The server's outbox keeps this pending; on
-                    // reconnect we'll be replayed. Bail this session so we
-                    // reconnect with backoff and don't tight-loop a broken
-                    // printer.
-                    error!(seq_id = %msg.seq_id, error = %e, "print failed");
-                    anyhow::bail!("print failed for seq {}: {e}", msg.seq_id);
+                    // The server offers a newer binary over this trusted
+                    // channel. Ack first (so the outbox row drains and we're
+                    // not re-offered on every reconnect), then take over the
+                    // stream to pull + apply it. On success this process
+                    // exits and systemd relaunches the new binary; on any
+                    // failure we keep running the current one.
+                    KitchenEvent::UpdateOffer {
+                        component,
+                        target_version,
+                        sha256,
+                        size,
+                    } => {
+                        idempotency.record(msg.seq_id).context("persist idempotency")?;
+                        out_tx.send(ClientMessage::Ack(msg.seq_id)).await.ok();
+                        crate::update::apply_update(
+                            cfg,
+                            framed,
+                            *component,
+                            target_version,
+                            *sha256,
+                            *size,
+                        )
+                        .await?;
+                        // If apply_update returned Ok without exiting, it
+                        // declined the offer (already current / not newer).
+                        // Nothing else to do; keep serving.
+                    }
+
+                    // A stray chunk outside an active transfer — ignore. The
+                    // transfer is driven synchronously inside apply_update,
+                    // which reads its own chunks; we only get here if the
+                    // server sent one unsolicited.
+                    KitchenEvent::ArtifactChunk { .. } => {
+                        out_tx.send(ClientMessage::Ack(msg.seq_id)).await.ok();
+                        debug!(seq_id = %msg.seq_id, "unexpected ArtifactChunk outside transfer — acked + ignored");
+                    }
                 }
-
-                idempotency.record(msg.seq_id).context("persist idempotency")?;
-                out_tx.send(ClientMessage::Ack(msg.seq_id)).await.ok();
-                info!(seq_id = %msg.seq_id, order = order.display_number, "printed + acked");
             }
 
             // Outbound: us → server

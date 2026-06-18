@@ -18,6 +18,10 @@ pub struct ExtraAdminRow {
     pub price_cents: i64,
     pub is_available: bool,
     pub sort_order: i64,
+    /// Comma-separated "aka" aliases (Pilzen, Champignons) for
+    /// removable-ingredient matching. Empty when none.
+    #[serde(default)]
+    pub aliases: String,
 }
 
 #[server(
@@ -39,14 +43,31 @@ pub async fn list_extras_admin() -> Result<Vec<ExtraAdminRow>, ServerFnError> {
     .await
     .map_err(|e| ServerFnError::new(format!("load extras: {e}")))?;
 
+    // Aliases grouped by extra, comma-joined for the edit field.
+    let alias_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT extra_id, alias FROM extra_aliases ORDER BY extra_id, sort_order, id",
+    )
+    .fetch_all(&db)
+    .await
+    .unwrap_or_default();
+    let mut alias_map: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (extra_id, alias) in alias_rows {
+        alias_map.entry(extra_id).or_default().push(alias);
+    }
+
     Ok(rows
         .into_iter()
-        .map(|(id, label, price, avail, sort_order)| ExtraAdminRow {
-            id,
-            label,
-            price_cents: price,
-            is_available: avail != 0,
-            sort_order,
+        .map(|(id, label, price, avail, sort_order)| {
+            let aliases = alias_map.remove(&id).unwrap_or_default().join(", ");
+            ExtraAdminRow {
+                id,
+                label,
+                price_cents: price,
+                is_available: avail != 0,
+                sort_order,
+                aliases,
+            }
         })
         .collect())
 }
@@ -84,6 +105,9 @@ pub async fn list_pizza_extras() -> Result<Vec<PizzaExtra>, ServerFnError> {
             label,
             price_cents,
             sort_order,
+            // The public add-extras picker doesn't need aliases (they're
+            // only for removable-ingredient matching).
+            aliases: Vec::new(),
         })
         .collect())
 }
@@ -99,6 +123,10 @@ pub async fn update_extra(
     price_cents: i64,
     is_available: bool,
     sort_order: i64,
+    /// Comma-separated "aka" aliases for removable-ingredient matching.
+    /// Replaces the extra's existing aliases.
+    #[server(default)]
+    aliases: String,
 ) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
     crate::pages::admin::require_admin().await?;
@@ -125,6 +153,27 @@ pub async fn update_extra(
     .execute(&db)
     .await
     .map_err(|e| ServerFnError::new(format!("update extra: {e}")))?;
+
+    // Rewrite the alias list: clear + re-insert the parsed comma list.
+    sqlx::query("DELETE FROM extra_aliases WHERE extra_id = ?1")
+        .bind(&id)
+        .execute(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("clear aliases: {e}")))?;
+    for (i, a) in aliases
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .enumerate()
+    {
+        sqlx::query("INSERT INTO extra_aliases (extra_id, alias, sort_order) VALUES (?1, ?2, ?3)")
+            .bind(&id)
+            .bind(a)
+            .bind((i as i64 + 1) * 10)
+            .execute(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("add alias: {e}")))?;
+    }
     Ok(())
 }
 
@@ -208,6 +257,52 @@ fn slugify(s: &str) -> String {
         out.push_str("extra");
     }
     out
+}
+
+#[cfg(feature = "ssr")]
+pub mod ssr {
+    use rusterando_shared::models::PizzaExtra;
+    use sqlx::SqlitePool;
+
+    /// Load the available extras catalog with each extra's "aka" aliases
+    /// attached (from `extra_aliases`). `label_col` is the SQL expression
+    /// for the desired locale label (e.g. `"label"` or
+    /// `COALESCE(label_fr, label)`). Used by the removable-ingredient
+    /// matcher so alternate names are data, not code.
+    pub async fn load_catalog_with_aliases(db: &SqlitePool, label_col: &str) -> Vec<PizzaExtra> {
+        let base: Vec<(String, String, i64, i64)> = sqlx::query_as(&format!(
+            "SELECT id, {label_col} AS label, price_cents, sort_order
+             FROM pizza_extras WHERE is_available = 1 ORDER BY sort_order, id"
+        ))
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+
+        let alias_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT extra_id, alias FROM extra_aliases ORDER BY extra_id, sort_order, id",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        let mut aliases: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (extra_id, alias) in alias_rows {
+            aliases.entry(extra_id).or_default().push(alias);
+        }
+
+        base.into_iter()
+            .map(|(id, label, price_cents, sort_order)| {
+                let aliases = aliases.remove(&id).unwrap_or_default();
+                PizzaExtra {
+                    id,
+                    label,
+                    price_cents,
+                    sort_order,
+                    aliases,
+                }
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +396,7 @@ fn ExtrasTable(rows: Vec<ExtraAdminRow>, updater: ServerAction<UpdateExtra>) -> 
                     <th>"Preis"</th>
                     <th>"Aktiv"</th>
                     <th>"Sortierung"</th>
+                    <th>"Aliase (aka) — für „ohne X“"</th>
                     <th></th>
                 </tr>
             </thead>
@@ -321,6 +417,7 @@ fn ExtraRow(r: ExtraAdminRow, updater: ServerAction<UpdateExtra>) -> impl IntoVi
     let price = RwSignal::new(r.price_cents.to_string());
     let avail = RwSignal::new(r.is_available);
     let sort = RwSignal::new(r.sort_order.to_string());
+    let aliases = RwSignal::new(r.aliases.clone());
 
     let id_for_save = id.clone();
     let on_save = move |_| {
@@ -332,6 +429,7 @@ fn ExtraRow(r: ExtraAdminRow, updater: ServerAction<UpdateExtra>) -> impl IntoVi
             price_cents: p,
             is_available: avail.get(),
             sort_order: s,
+            aliases: aliases.get(),
         });
     };
 
@@ -365,6 +463,12 @@ fn ExtraRow(r: ExtraAdminRow, updater: ServerAction<UpdateExtra>) -> impl IntoVi
                 <input type="number" class="cell-input narrow"
                     prop:value=move || sort.get()
                     on:input=move |ev| sort.set(event_target_value(&ev))/>
+            </td>
+            <td>
+                <input type="text" class="cell-input"
+                    placeholder="z. B. Pilzen, Champignons"
+                    prop:value=move || aliases.get()
+                    on:input=move |ev| aliases.set(event_target_value(&ev))/>
             </td>
             <td>
                 <button class="btn ghost small" on:click=on_save>"Speichern"</button>

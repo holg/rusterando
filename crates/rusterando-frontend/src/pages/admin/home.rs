@@ -125,6 +125,23 @@ pub fn AdminHomePage() -> impl IntoView {
                         title="Speisekarte als PDF"
                         sub="Druckbare Speisekarte herunterladen"
                         badge=Memo::new(|_| 0_i64)/>
+                    <Tile
+                        href="/admin/printer"
+                        icon="🧾"
+                        title="Bon-Vorschau"
+                        sub="So sieht der Küchen-Bon gedruckt aus"
+                        badge=Memo::new(|_| 0_i64)/>
+                </div>
+
+                // Live receipt preview on the overview: the exact ticket
+                // layout the kitchen prints, rendered from the shared
+                // `build_receipt` model. Links through to the full pane.
+                <div class="admin-receipt-card">
+                    <header class="card-head">
+                        <h2>"Bon-Vorschau"</h2>
+                        <a class="go" href="/admin/printer">"Ganze Vorschau →"</a>
+                    </header>
+                    <crate::pages::admin::printer_admin::ReceiptPreviewPane/>
                 </div>
             </section>
         </AdminShell>

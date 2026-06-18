@@ -293,10 +293,30 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
         });
     }
 
+    // Load the extras catalog (with "aka" aliases) ONCE, then compute each
+    // item's removable ingredients server-side. No parsing on the client,
+    // no grammar in code — alternate names live in `extra_aliases` (data).
+    let label_col = if admin {
+        "label".to_string()
+    } else {
+        crate::i18n::coalesce_col("label", "")
+    };
+    let extras_catalog =
+        crate::pages::admin::extras_admin::ssr::load_catalog_with_aliases(db, &label_col).await;
+
     Ok(item_rows
         .into_iter()
         .map(|r| {
             let option_groups = groups_by_item.remove(&r.id).unwrap_or_default();
+            // Removable only for items that allow extras (pizzas etc.).
+            let removable = if r.allow_extras != 0 {
+                rusterando_shared::models::match_removable_ingredients(
+                    r.description.as_deref().unwrap_or(""),
+                    &extras_catalog,
+                )
+            } else {
+                Vec::new()
+            };
             MenuItem {
                 id: r.id,
                 category_id: r.category_id,
@@ -318,6 +338,7 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
                 flat_extra_price_cents: r.flat_extra_price_cents,
                 allow_extras: r.allow_extras != 0,
                 option_groups,
+                removable,
             }
         })
         .collect())
@@ -876,6 +897,12 @@ fn Card(it: MenuItem) -> impl IntoView {
     let extras_catalog: StoredValue<Vec<PizzaExtra>> =
         use_context().unwrap_or_else(|| StoredValue::new(Vec::new()));
 
+    // Removable ingredients ("ohne X") are computed SERVER-SIDE (description
+    // × catalog × DB match rules) and shipped on the item — no parsing or
+    // grammar in the browser. Shown only when the item has ≥1 match.
+    let removable: Vec<rusterando_shared::models::RemovableIngredient> = it.removable.clone();
+    let selected_removals: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+
     // Pre-fill extras when the URL hash names this item, e.g.
     // /menu#mi-007?extras=ex-pilze,ex-zwiebeln. Used by the cart
     // drawer's "Bearbeiten" button: remove the line, navigate here
@@ -1010,8 +1037,10 @@ fn Card(it: MenuItem) -> impl IntoView {
                 quantity: 1,
                 extras_ids: selected_extras.get_untracked(),
                 selected_option_ids: collect_option_ids(),
+                removal_ids: selected_removals.get_untracked(),
             });
             selected_extras.set(Vec::new());
+            selected_removals.set(Vec::new());
             selected_options.set(std::collections::HashMap::new());
             ctx.open.set(true);
         }
@@ -1025,8 +1054,10 @@ fn Card(it: MenuItem) -> impl IntoView {
                 quantity: 1,
                 extras_ids: selected_extras.get_untracked(),
                 selected_option_ids: collect_option_ids(),
+                removal_ids: selected_removals.get_untracked(),
             });
             selected_extras.set(Vec::new());
+            selected_removals.set(Vec::new());
             selected_options.set(std::collections::HashMap::new());
             ctx.open.set(true);
         }
@@ -1073,6 +1104,7 @@ fn Card(it: MenuItem) -> impl IntoView {
                     flat_override=flat_override
                 />
             })}
+            <RemovalsPicker selected=selected_removals removable=removable/>
             <div class="add-row">
                 {if has_large {
                     view! {
@@ -1116,6 +1148,55 @@ fn split_codes(s: &str) -> Vec<String> {
         .map(|c| c.trim().to_string())
         .filter(|c| !c.is_empty())
         .collect()
+}
+
+/// "Weglassen" picker: toggle ingredients to leave OFF the item. Mirrors
+/// `ExtrasPicker` but priceless (removals are free). Renders nothing when
+/// `removable` is empty (so non-pizza / fully-uncatalogued items show no
+/// section). `selected` collects the catalog ids of removed ingredients.
+#[component]
+fn RemovalsPicker(
+    selected: RwSignal<Vec<String>>,
+    removable: Vec<rusterando_shared::models::RemovableIngredient>,
+) -> impl IntoView {
+    if removable.is_empty() {
+        return ().into_any();
+    }
+    view! {
+        <details class="removals-picker">
+            <summary>{crate::t!("menu.expand_removals")}</summary>
+            <ul class="removals-list">
+                {removable.into_iter().map(|r| {
+                    let id = r.id.clone();
+                    let id_for_track = id.clone();
+                    let is_checked = Memo::new(move |_| {
+                        selected.with(|v| v.contains(&id_for_track))
+                    });
+                    let id_for_toggle = id.clone();
+                    let label = r.bare_label.clone();
+                    view! {
+                        <li>
+                            <label class="removal-row">
+                                <input type="checkbox"
+                                    prop:checked=move || is_checked.get()
+                                    on:change=move |_| {
+                                        selected.update(|v| {
+                                            if let Some(pos) = v.iter().position(|x| x == &id_for_toggle) {
+                                                v.remove(pos);
+                                            } else {
+                                                v.push(id_for_toggle.clone());
+                                            }
+                                        });
+                                    }/>
+                                <span class="removal-label">{crate::t!("menu.removal_prefix")}{label}</span>
+                            </label>
+                        </li>
+                    }
+                }).collect_view()}
+            </ul>
+        </details>
+    }
+    .into_any()
 }
 
 #[component]

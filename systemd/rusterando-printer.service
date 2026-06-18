@@ -8,10 +8,20 @@ Type=simple
 User=holger
 Group=lp
 
-# The Pi binary built by `cargo build -p rusterando-printer
-# --target aarch64-unknown-linux-gnu --release`. Installed with
-# `sudo install -m 755 rusterando-printer /usr/local/bin/`.
-ExecStart=/usr/local/bin/rusterando-printer
+# The LIVE binary runs from the StateDirectory — the ONE writable path
+# under ProtectSystem=strict — so it can self-update over the kitchen
+# channel: the in-band updater atomically renames a verified new binary
+# over this path and exits(0); systemd Restart=always relaunches the new
+# one. /usr/local/bin/rusterando-printer is the bootstrap copy (initial
+# deploy + manual --version); ExecStartPre seeds the writable copy from it
+# whenever the bootstrap is newer (i.e. a fresh manual deploy), so a plain
+# `deploy_printer.sh` still works and a manual deploy always wins.
+ExecStartPre=/usr/bin/env sh -c 'L=/var/lib/rusterando-printer/bin/rusterando-printer; \
+  B=/usr/local/bin/rusterando-printer; \
+  if [ ! -x "$L" ] || [ "$B" -nt "$L" ]; then \
+    install -D -m 755 -T "$B" "$L"; \
+  fi; true'
+ExecStart=/var/lib/rusterando-printer/bin/rusterando-printer
 EnvironmentFile=/etc/rusterando-printer/printer.env
 
 Restart=always

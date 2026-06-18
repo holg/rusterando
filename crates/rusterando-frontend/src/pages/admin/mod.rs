@@ -12,6 +12,8 @@ pub mod options_admin;
 pub mod orders;
 pub mod pdf;
 pub mod pricing;
+pub mod printer_admin;
+pub mod printer_status;
 pub mod settings_admin;
 pub mod shell;
 pub mod vouchers;

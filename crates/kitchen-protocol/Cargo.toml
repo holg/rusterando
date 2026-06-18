@@ -1,15 +1,19 @@
 [package]
 name = "kitchen-protocol"
-version = "0.2.0"
+# 2.0.0: receipt logos travel as SVG (ReceiptLine::RasterSvg) hashed for
+# Pi-side raster caching; Hello carries cached_rasters. Breaking wire
+# change — server + Pi must deploy together (OTA-able from 1.0).
+version = "2.0.0"
 edition = "2021"
 description = "Shared DTOs for the rusterando kitchen channel"
 
-# Pure-data crate: serde-only. Consumers (the server + the Pi binary) bring
-# their own postcard / tokio_util / framing machinery. Keeping this crate
-# dep-light means the Pi build (cross-compiled, separate workspace) doesn't
-# inherit anything heavy from here.
+# Near-pure-data crate. Consumers (the server + the Pi binary) bring their
+# own postcard / tokio_util / framing machinery. `sha2` is the one
+# exception: the raster content-hash must be computed identically on both
+# sides, so it lives here. It's pure-Rust + tiny, cross-compiles cleanly.
 [dependencies]
 serde = { workspace = true }
+sha2 = "0.10"
 
 [dev-dependencies]
 serde_json = { workspace = true }

@@ -119,6 +119,8 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
     let is_orders_paused = key == "orders_paused";
     let is_giveaway_enabled = key == "giveaway_enabled";
     let is_giveaway_order_types = key == "giveaway_order_types";
+    let is_receipt_qr_mode = key == "receipt_qr_mode";
+    let is_receipt_toggle = matches!(key.as_str(), "receipt_show_allergens" | "receipt_show_logo");
     let preview_eur = Memo::new(move |_| {
         value
             .get()
@@ -147,13 +149,23 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
         }
         .into_any()
     } else if is_printer_theme {
+        // The dropdown changes the saved theme; the FULL faithful preview
+        // (rendered from the same `build_receipt` model the Pi prints from)
+        // lives on /admin/printer so we don't maintain two mocks that drift.
         view! {
-            <select class="cell-input"
-                prop:value=move || value.get()
-                on:change=move |ev| value.set(event_target_value(&ev))>
-                <option value="rusterando-default">"rusterando-default — klassisch (nur Text)"</option>
-                <option value="rusterando-rando">"rusterando-rando — mit Symbol oben (Tüte/Roller)"</option>
-            </select>
+            <div class="printer-theme-editor">
+                <select class="cell-input"
+                    prop:value=move || value.get()
+                    on:change=move |ev| value.set(event_target_value(&ev))>
+                    <option value="rusterando-default">"rusterando-default — klassisch (nur Text)"</option>
+                    <option value="rusterando-rando">"rusterando-rando — mit Logo + Symbol oben"</option>
+                </select>
+                <p class="muted small printer-theme-preview">
+                    "Vollständige Bon-Vorschau unter "
+                    <a href="/admin/printer">"Bon-Vorschau"</a>
+                    " — exakt das gedruckte Layout."
+                </p>
+            </div>
         }
         .into_any()
     } else if is_stripe_mode {
@@ -214,6 +226,26 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
                 <option value="both">"Abholung + Lieferung"</option>
                 <option value="pickup">"Nur Abholung"</option>
                 <option value="delivery">"Nur Lieferung"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_receipt_qr_mode {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="order-url">"Bestelldetail-URL — Kund:in empfängt Live-Nachrichten"</option>
+                <option value="static-url">"Feste URL (z. B. Startseite)"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_receipt_toggle {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="1">"An"</option>
+                <option value="0">"Aus"</option>
             </select>
         }
         .into_any()

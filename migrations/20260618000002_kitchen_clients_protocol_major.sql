@@ -1,0 +1,14 @@
+-- Record the wire-protocol major the Pi last successfully spoke, so the
+-- deploy guard can refuse a server whose kitchen-protocol major would
+-- strand the connected Pi (the "decode Hello envelope" outage).
+--
+-- On a SUCCESSFUL Hello the Pi's protocol major equals the server's own
+-- SCHEMA_VERSION_MAJOR, so the server writes that here. A row therefore
+-- holds the last-known-good protocol major for that shop; a deploy that
+-- bumps the major sees stored=old vs tree=new and blocks until the Pi is
+-- updated. Distinct from `version`, which is the Pi's CRATE version
+-- (e.g. 0.3.0) and does not track the protocol major.
+--
+-- Separate ALTER migration (never edit the already-applied create) — see
+-- DB-safety: additive, NULL-safe default.
+ALTER TABLE kitchen_clients ADD COLUMN protocol_major INTEGER NOT NULL DEFAULT 0;

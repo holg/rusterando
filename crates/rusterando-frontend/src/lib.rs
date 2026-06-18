@@ -113,7 +113,11 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::push::SendBroadcast>();
     leptos::server_fn::axum::register_explicit::<pages::push::ListBroadcasts>();
     leptos::server_fn::axum::register_explicit::<pages::settings::ListSettings>();
+    leptos::server_fn::axum::register_explicit::<pages::settings::ListSettingsAll>();
     leptos::server_fn::axum::register_explicit::<pages::settings::UpdateSetting>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::printer_status::ListPiStatus>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::printer_status::SetPiUpdateArmed>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::printer_admin::PrintSampleReceipt>();
     leptos::server_fn::axum::register_explicit::<pages::home::HomeDeliveryInfoFn>();
     leptos::server_fn::axum::register_explicit::<pages::kitchen::login::KitchenLogin>();
     leptos::server_fn::axum::register_explicit::<pages::kitchen::board::ListKitchenOrders>();

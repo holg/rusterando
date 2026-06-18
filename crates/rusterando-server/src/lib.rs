@@ -2,6 +2,8 @@
 pub use rusterando_frontend::pages::order::notify;
 
 pub mod apns;
+pub mod bon_designer;
 pub mod health;
 pub mod kitchen;
 pub mod pdf;
+pub mod printer_artifacts;

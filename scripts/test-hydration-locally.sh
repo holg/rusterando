@@ -56,6 +56,21 @@ if ! lsof -i ":${SITE_PORT}" >/dev/null 2>&1; then
     cargo leptos serve > "$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
 
+    # Unhashed (dev) builds: wasm-bindgen's JS glue hardcodes
+    # `new URL('davidspizzeria_bg.wasm', import.meta.url)` and our
+    # CachedHydrationScripts preload emits the same `_bg` name, but
+    # cargo-leptos writes the binary as `davidspizzeria.wasm` (no _bg).
+    # Bridge with a relative symlink, leptos-style. (Prod uses
+    # hash-files=true, which rewrites the glue URL — no symlink needed.)
+    # Poll briefly: the build writes pkg/ before the HTTP listener is up.
+    ( for _ in $(seq 1 90); do
+        if [[ -f target/site/pkg/davidspizzeria.wasm ]]; then
+          ln -sfn davidspizzeria.wasm target/site/pkg/davidspizzeria_bg.wasm
+          break
+        fi
+        sleep 1
+      done ) &
+
     # Wait up to 90s for the server to start serving HTTP.
     for i in $(seq 1 90); do
         if curl -sf -o /dev/null "$SITE_URL/"; then

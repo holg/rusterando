@@ -141,12 +141,43 @@ pub async fn list_settings() -> Result<Vec<SettingRow>, ServerFnError> {
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
+    // The receipt/printer keys (receipt_*, printer_theme) are edited in the
+    // dedicated Bon-Editor (/admin/printer), not here, so they're filtered
+    // out — one home for every Bon setting.
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT key, value, label_de, hint_de FROM app_settings
+         WHERE key NOT LIKE 'receipt_%' AND key <> 'printer_theme'
+         ORDER BY key",
+    )
+    .fetch_all(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load settings: {e}")))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(key, value, label_de, hint_de)| SettingRow {
+            key,
+            value,
+            label_de,
+            hint_de,
+        })
+        .collect())
+}
+
+/// Read ALL settings (no filtering) — for the Bon-Editor, which owns the
+/// receipt_* + printer_theme keys that `list_settings` hides from the
+/// generic settings page.
+#[server(name = ListSettingsAll, prefix = "/api", endpoint = "list_settings_all")]
+pub async fn list_settings_all() -> Result<Vec<SettingRow>, ServerFnError> {
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
     let rows: Vec<(String, String, String, Option<String>)> =
         sqlx::query_as("SELECT key, value, label_de, hint_de FROM app_settings ORDER BY key")
             .fetch_all(&db)
             .await
             .map_err(|e| ServerFnError::new(format!("load settings: {e}")))?;
-
     Ok(rows
         .into_iter()
         .map(|(key, value, label_de, hint_de)| SettingRow {
@@ -212,6 +243,43 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     {
         return Err(ServerFnError::new(
             "printer_theme muss 'rusterando-default' oder 'rusterando-rando' sein.",
+        ));
+    }
+    if key == "receipt_qr_mode" && !matches!(value.trim(), "order-url" | "static-url") {
+        return Err(ServerFnError::new(
+            "receipt_qr_mode muss 'order-url' oder 'static-url' sein.",
+        ));
+    }
+    if key == "receipt_qr_static_url" {
+        let v = value.trim();
+        if !v.is_empty() && !(v.starts_with("http://") || v.starts_with("https://")) {
+            return Err(ServerFnError::new(
+                "receipt_qr_static_url muss mit http:// oder https:// beginnen (oder leer sein).",
+            ));
+        }
+    }
+    if matches!(key.as_str(), "receipt_show_allergens" | "receipt_show_logo")
+        && !matches!(value.trim(), "0" | "1" | "true" | "false")
+    {
+        return Err(ServerFnError::new(
+            "Wert muss '0' / '1' (oder 'true' / 'false') sein.",
+        ));
+    }
+    if key == "receipt_header_text" && value.trim().chars().count() > 60 {
+        return Err(ServerFnError::new(
+            "Kopfzeile darf höchstens 60 Zeichen lang sein.",
+        ));
+    }
+    if key == "receipt_footer_text" && value.trim().chars().count() > 120 {
+        return Err(ServerFnError::new(
+            "Fußzeile darf höchstens 120 Zeichen lang sein.",
+        ));
+    }
+    // Badge/banner overrides: a generous cap (the allergen block holds a few
+    // wrapped lines; the rest are short). Empty is always fine (= default).
+    if key.starts_with("receipt_label_") && value.chars().count() > 200 {
+        return Err(ServerFnError::new(
+            "Text darf höchstens 200 Zeichen lang sein.",
         ));
     }
     if key == "orders_paused" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
@@ -534,6 +602,103 @@ pub mod ssr {
                 (true, Some(local.format("%H:%M").to_string()))
             }
             (false, None) => (false, None),
+        }
+    }
+
+    /// Resolve the admin-editable receipt config (Bon-Editor) into the
+    /// shared `ReceiptConfig` the layout consumes. Defaults match the
+    /// historical hardcoded behaviour so an un-migrated DB is unchanged.
+    pub async fn receipt_config(db: &SqlitePool) -> kitchen_protocol::receipt::ReceiptConfig {
+        use kitchen_protocol::receipt::ReceiptLabels;
+        let header_text = get_string(db, "receipt_header_text").await;
+        let footer_text = get_string(db, "receipt_footer_text").await;
+        let show_allergens = get_bool(db, "receipt_show_allergens", true).await;
+        let show_logo = get_bool(db, "receipt_show_logo", true).await;
+
+        // Batch-load all label overrides in one query, into a map.
+        let label_rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM app_settings WHERE key LIKE 'receipt_label_%'")
+                .fetch_all(db)
+                .await
+                .unwrap_or_default();
+        let map: std::collections::HashMap<String, String> = label_rows.into_iter().collect();
+        let g = |k: &str| map.get(k).cloned().unwrap_or_default();
+        let labels = ReceiptLabels {
+            channel_delivery: g("receipt_label_channel_delivery"),
+            channel_pickup: g("receipt_label_channel_pickup"),
+            channel_dinein: g("receipt_label_channel_dinein"),
+            paid_badge: g("receipt_label_paid_badge"),
+            unpaid_badge: g("receipt_label_unpaid_badge"),
+            paid_confirm: g("receipt_label_paid_confirm"),
+            paid_by: g("receipt_label_paid_by"),
+            cash: g("receipt_label_cash"),
+            collect_delivery: g("receipt_label_collect_delivery"),
+            collect_pickup: g("receipt_label_collect_pickup"),
+            collect_dinein: g("receipt_label_collect_dinein"),
+            disclaimer: g("receipt_label_disclaimer"),
+            qr_caption: g("receipt_label_qr_caption"),
+            allergen_notice: g("receipt_label_allergen_notice"),
+            reprint_banner: g("receipt_label_reprint_banner"),
+            test_banner: g("receipt_label_test_banner"),
+        };
+
+        kitchen_protocol::receipt::ReceiptConfig {
+            header_text,
+            footer_text,
+            show_allergens,
+            show_logo,
+            labels,
+        }
+    }
+
+    /// Resolve the QR target URL for an order per `receipt_qr_mode`:
+    ///
+    ///   * "static-url" → the fixed `receipt_qr_static_url` (e.g. the
+    ///     shop's homepage), or `None` if that's blank.
+    ///   * anything else ("order-url", default) → `<public_url>/orders/<id>`
+    ///     — the live order channel the customer can receive messages on.
+    ///
+    /// `None` disables the QR block.
+    pub async fn resolve_qr_url(
+        db: &SqlitePool,
+        public_url_base: &str,
+        order_id: &str,
+    ) -> Option<String> {
+        let mode = get_string(db, "receipt_qr_mode").await;
+        if mode == "static-url" {
+            let url = get_string(db, "receipt_qr_static_url").await;
+            return (!url.is_empty()).then_some(url);
+        }
+        // order-url (default)
+        let base = public_url_base.trim_end_matches('/');
+        (!base.is_empty()).then(|| format!("{base}/orders/{order_id}"))
+    }
+
+    /// A trimmed string setting, empty when unset.
+    async fn get_string(db: &SqlitePool, key: &str) -> String {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = ?1")
+                .bind(key)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        row.map(|(v,)| v.trim().to_string()).unwrap_or_default()
+    }
+
+    /// A boolean setting, `default` when unset/invalid.
+    async fn get_bool(db: &SqlitePool, key: &str, default: bool) -> bool {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = ?1")
+                .bind(key)
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        match row.map(|(v,)| v.trim().to_string()) {
+            Some(v) if matches!(v.as_str(), "1" | "true") => true,
+            Some(v) if matches!(v.as_str(), "0" | "false") => false,
+            _ => default,
         }
     }
 }

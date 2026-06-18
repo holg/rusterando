@@ -19,6 +19,12 @@ pub struct Config {
     #[serde(default = "default_version")]
     pub version: String,
 
+    /// Target triple this binary was built for (e.g.
+    /// "aarch64-unknown-linux-gnu"), captured at compile time by build.rs.
+    /// Sent in Hello so the server picks the matching update artifact.
+    #[serde(default = "default_arch")]
+    pub arch: String,
+
     /// Device or file path to write ESC/POS bytes to. `/dev/usb/lp0` on real
     /// hardware; a regular file path for dev (writes act as a mock printer).
     #[serde(default = "default_printer_path")]
@@ -42,6 +48,11 @@ fn default_shop_slug() -> String {
 }
 fn default_version() -> String {
     env!("CARGO_PKG_VERSION").into()
+}
+fn default_arch() -> String {
+    // Set by build.rs from cargo's TARGET. Falls back to "unknown" if the
+    // build script didn't run for some reason.
+    option_env!("BUILD_TARGET").unwrap_or("unknown").into()
 }
 fn default_printer_path() -> PathBuf {
     "/dev/usb/lp0".into()
@@ -72,6 +83,7 @@ impl Config {
             server_addr: env_or("PRINTER_SERVER_ADDR", default_server_addr()),
             shop_slug: env_or("PRINTER_SHOP_SLUG", default_shop_slug()),
             version: default_version(),
+            arch: default_arch(),
             printer_path: env_or(
                 "PRINTER_PATH",
                 default_printer_path().to_string_lossy().into_owned(),

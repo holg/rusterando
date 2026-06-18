@@ -19,6 +19,8 @@ use crate::pages::admin::menu_admin::AdminMenuPage;
 use crate::pages::admin::orders::{AdminOrderDetailPage, AdminOrdersPage};
 use crate::pages::admin::pdf::PdfAdminPage;
 use crate::pages::admin::pricing::PricingAdminPage;
+use crate::pages::admin::printer_admin::PrinterAdminPage;
+use crate::pages::admin::printer_status::PrinterStatusPage;
 use crate::pages::admin::settings_admin::SettingsAdminPage;
 use crate::pages::admin::vouchers::VouchersAdminPage;
 use crate::pages::admin::zones::ZonesAdminPage;
@@ -312,6 +314,8 @@ pub fn App() -> impl IntoView {
                     <Route path=(StaticSegment("admin"), StaticSegment("extras")) view=ExtrasAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("home")) view=HomeAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("settings")) view=SettingsAdminPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("printer")) view=PrinterAdminPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("drucker")) view=PrinterStatusPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("broadcast")) view=BroadcastAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("orders")) view=AdminOrdersPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("orders"), ParamSegment("id")) view=AdminOrderDetailPage/>

@@ -50,6 +50,13 @@ pub struct MenuItem {
     /// Empty for items with no group attachments.
     #[serde(default)]
     pub option_groups: Vec<OptionGroup>,
+    /// Ingredients the customer may leave OFF ("ohne X"), computed
+    /// SERVER-SIDE from the description × extras catalog (matching each
+    /// extra's label + its "aka" aliases). No parsing on the client, no
+    /// hardcoded grammar. Empty when the item has no matched ingredients.
+    /// The modal renders this directly.
+    #[serde(default)]
+    pub removable: Vec<RemovableIngredient>,
 }
 
 fn default_allow_extras() -> bool {
@@ -138,6 +145,10 @@ pub struct CartLine {
     /// are snapshot at add-to-cart time.
     #[serde(default)]
     pub selected_options: Vec<CartSelectedOption>,
+    /// Snapshotted ingredients the customer left OFF ("ohne X"). Bare
+    /// labels, always free. Empty when none. Mirrors `extras`.
+    #[serde(default)]
+    pub removals: Vec<CartRemoval>,
     pub line_total_cents: i64,
     /// `true` when this line is the free giveaway (Gratis-Pizzabrötchen):
     /// priced at 0 and added only because the order qualified. Lets the UI
@@ -163,6 +174,127 @@ pub struct PizzaExtra {
     pub label: String,
     pub price_cents: i64,
     pub sort_order: i64,
+    /// Alternate names ("aka") this ingredient may appear under in a menu
+    /// description — across languages and inflections: e.g. Pilze →
+    /// ["Pilzen", "Champignons"], Käse → ["Goudakäse", "Gouda"]. The "ohne
+    /// X" matcher tries these in addition to the label. Explicit DATA per
+    /// ingredient — no grammar rules, no per-language code.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+/// An ingredient the customer can LEAVE OFF an item ("ohne X"). Derived by
+/// matching the item's free-text description against the extras catalog
+/// (see [`match_removable_ingredients`]). `bare_label` is the catalog label
+/// with a leading "Extra " stripped, so "Extra Käse" → "Käse": removals
+/// read "ohne Käse", never "ohne Extra Käse".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemovableIngredient {
+    /// The catalog (`pizza_extras`) id this was matched from.
+    pub id: String,
+    /// Bare ingredient name shown to the customer + printed on the ticket.
+    pub bare_label: String,
+}
+
+/// One snapshot of a removed ingredient on a cart/order line. Always free;
+/// `label` is the bare ingredient name. Mirror of [`CartExtra`] minus price.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CartRemoval {
+    pub id: String,
+    pub label: String,
+}
+
+/// Strip a leading "Extra " (case-insensitive) from a catalog label to get
+/// the bare ingredient name. "Extra Käse" → "Käse"; "Thunfisch" → "Thunfisch".
+pub fn bare_ingredient_label(label: &str) -> &str {
+    let t = label.trim();
+    for prefix in ["Extra ", "extra "] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            return rest.trim();
+        }
+    }
+    t
+}
+
+/// Given an item's free-text `description` (e.g. "mit Salami, Thunfisch,
+/// Paprika und Zwiebeln") and the extras `catalog`, return the ingredients
+/// the customer may leave off — every catalog extra whose BARE name
+/// ([`bare_ingredient_label`]) appears as a whole word in the description.
+///
+/// Conservative by design: only catalog matches are offered, so we never
+/// propose removing something we can't cleanly name. Preserves catalog
+/// order; de-dups by bare label (so "Käse" and "Extra Käse" don't both
+/// appear).
+pub fn match_removable_ingredients(
+    description: &str,
+    catalog: &[PizzaExtra],
+) -> Vec<RemovableIngredient> {
+    let desc = description.to_lowercase();
+    let mut out: Vec<RemovableIngredient> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for extra in catalog {
+        let bare = bare_ingredient_label(&extra.label).to_string();
+        if bare.is_empty() {
+            continue;
+        }
+        let key = bare.to_lowercase();
+        if seen.contains(&key) {
+            continue;
+        }
+        // An ingredient is removable if the description contains its bare
+        // name OR any of its configured "aka" aliases (Pilze → "Pilzen",
+        // "Champignons"; Käse → "Goudakäse") as a whole word. Explicit
+        // data per extra — no grammar, no per-language code.
+        let matched = contains_word(&desc, &key)
+            || extra
+                .aliases
+                .iter()
+                .map(|a| a.trim().to_lowercase())
+                .filter(|a| !a.is_empty())
+                .any(|a| contains_word(&desc, &a));
+        if matched {
+            seen.insert(key);
+            out.push(RemovableIngredient {
+                id: extra.id.clone(),
+                bare_label: bare,
+            });
+        }
+    }
+    out
+}
+
+/// Whole-word (boundary-guarded) containment: `needle` must appear in
+/// `haystack` not flanked by alphanumerics, so "mais" matches "… mais …"
+/// but NOT "maispoulet". Both args are expected lowercased. Word chars are
+/// Unicode-alphanumeric (so umlauts in "käse" count).
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let i = start + pos;
+        let before_ok = haystack[..i]
+            .chars()
+            .next_back()
+            .map(|c| !c.is_alphanumeric())
+            .unwrap_or(true);
+        let after = &haystack[i + needle.len()..];
+        let after_ok = after
+            .chars()
+            .next()
+            .map(|c| !c.is_alphanumeric())
+            .unwrap_or(true);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = i + needle.len();
+        if start >= haystack.len() {
+            break;
+        }
+    }
+    false
 }
 
 /// One snapshot of a chosen option from a required-choice group
@@ -294,10 +426,30 @@ pub enum ShopLevel {
 }
 
 impl ShopLevel {
-    /// True when ordering is blocked (anything other than `Open`). Lets the
-    /// order gate keep its simple boolean view.
+    /// True when the shop isn't open at THIS moment (anything other than
+    /// `Open`). This is the banner/chip's "is it green" question — it is
+    /// NOT the same as "is ordering blocked" (see `blocks_ordering`):
+    /// `OpensLater` is not-open-now but still allows pre-orders for a
+    /// later slot today.
     pub fn is_closed(self) -> bool {
         !matches!(self, ShopLevel::Open)
+    }
+    /// Whether this level, on its own, definitively tells us ordering is
+    /// blocked — for live UI (cart checkout button) that only has the
+    /// SSE-pushed level, not the authoritative server gate.
+    ///
+    /// `Open` → `Some(false)` (ordering allowed). `Closed` → `Some(true)`
+    /// (hard closed: Ruhetag / nothing more today). `OpensLater` → `None`,
+    /// because it's AMBIGUOUS: it covers both "opens later today"
+    /// (pre-orders allowed) AND "snooze/manual pause" (blocked), and the
+    /// level alone can't tell them apart. Callers must then defer to the
+    /// authoritative `shop_closed_state` value instead of guessing.
+    pub fn blocks_ordering(self) -> Option<bool> {
+        match self {
+            ShopLevel::Open => Some(false),
+            ShopLevel::Closed => Some(true),
+            ShopLevel::OpensLater => None,
+        }
     }
     /// CSS modifier class for the banner / chip.
     pub fn css_class(self) -> &'static str {
@@ -395,5 +547,108 @@ mod tests {
         assert_eq!(seo_slug(""), "");
         assert_eq!(seo_slug("---"), "");
         assert_eq!(seo_slug("&&&"), "");
+    }
+
+    use super::{
+        bare_ingredient_label, match_removable_ingredients, PizzaExtra, RemovableIngredient,
+    };
+
+    fn extra(i: usize, label: &str, aliases: &[&str]) -> PizzaExtra {
+        PizzaExtra {
+            id: format!("ex-{i}"),
+            label: label.to_string(),
+            price_cents: 100,
+            sort_order: i as i64,
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn catalog() -> Vec<PizzaExtra> {
+        // Mirror of the real seed, with "aka" aliases on Käse + Pilze.
+        vec![
+            extra(0, "Extra Käse", &["Goudakäse", "Gouda"]),
+            extra(1, "Extra Salami", &[]),
+            extra(2, "Thunfisch", &[]),
+            extra(3, "Mais", &[]),
+            extra(4, "Knoblauch", &[]),
+            extra(5, "Pilze", &["Pilzen", "Champignons"]),
+        ]
+    }
+
+    fn bare(v: &[RemovableIngredient]) -> Vec<&str> {
+        v.iter().map(|r| r.bare_label.as_str()).collect()
+    }
+
+    #[test]
+    fn strips_extra_prefix() {
+        assert_eq!(bare_ingredient_label("Extra Käse"), "Käse");
+        assert_eq!(bare_ingredient_label("extra Salami"), "Salami");
+        assert_eq!(bare_ingredient_label("Thunfisch"), "Thunfisch");
+    }
+
+    #[test]
+    fn extra_prefixed_ingredient_is_removable_by_bare_name() {
+        let got = match_removable_ingredients("mit Tomaten, Käse und Salami", &catalog());
+        assert_eq!(bare(&got), vec!["Käse", "Salami"]);
+        assert!(got.iter().all(|r| !r.bare_label.starts_with("Extra")));
+    }
+
+    #[test]
+    fn matches_bare_catalog_names_and_skips_uncatalogued() {
+        let got =
+            match_removable_ingredients("mit Salami, Thunfisch, Paprika und Zwiebeln", &catalog());
+        assert_eq!(bare(&got), vec!["Salami", "Thunfisch"]);
+    }
+
+    #[test]
+    fn word_boundary_guard() {
+        let got = match_removable_ingredients("mit Maispoulet", &catalog());
+        assert!(bare(&got).is_empty());
+        let got = match_removable_ingredients("mit Schinken und Mais", &catalog());
+        assert_eq!(bare(&got), vec!["Mais"]);
+    }
+
+    #[test]
+    fn dedups_and_preserves_catalog_order() {
+        let got = match_removable_ingredients("Käse, Käse, Thunfisch", &catalog());
+        assert_eq!(bare(&got), vec!["Käse", "Thunfisch"]);
+    }
+
+    #[test]
+    fn alias_matches_german_inflection() {
+        // The real bug: catalog "Pilze", description "Pilzen" — matched via
+        // the alias "Pilzen", and the offered label stays the clean "Pilze".
+        let got = match_removable_ingredients("mit Schinken, Salami und Pilzen", &catalog());
+        assert!(bare(&got).contains(&"Pilze"), "got {:?}", bare(&got));
+        // Boundary guard still holds.
+        let got = match_removable_ingredients("mit Pilzragout", &catalog());
+        assert!(!bare(&got).contains(&"Pilze"));
+    }
+
+    #[test]
+    fn alias_matches_loanword_across_locales() {
+        // A French menu line "avec Champignons" matches the German "Pilze"
+        // via the alias — locale-agnostic, no per-language code.
+        let got = match_removable_ingredients("avec jambon et champignons", &catalog());
+        assert!(bare(&got).contains(&"Pilze"), "got {:?}", bare(&got));
+    }
+
+    #[test]
+    fn alias_matches_specific_cheese() {
+        // "Goudakäse" in the description → removable "Käse" via alias.
+        let got = match_removable_ingredients("mit Tomaten und Goudakäse", &catalog());
+        assert!(bare(&got).contains(&"Käse"), "got {:?}", bare(&got));
+    }
+
+    #[test]
+    fn no_aliases_means_exact_only() {
+        // Without an alias, "Pilzen" must NOT match "Pilze" — proving the
+        // declension is DATA (the alias), not baked into the matcher.
+        let plain = vec![extra(0, "Pilze", &[])];
+        let got = match_removable_ingredients("mit Pilzen", &plain);
+        assert!(bare(&got).is_empty(), "got {:?}", bare(&got));
+        // Exact form still matches.
+        let got = match_removable_ingredients("mit Pilze", &plain);
+        assert!(bare(&got).contains(&"Pilze"));
     }
 }

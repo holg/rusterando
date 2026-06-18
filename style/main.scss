@@ -179,6 +179,16 @@ body:has(.test-mode-banner) {
       text-decoration: none;
       color: white;
     }
+    // "Letzte Bestellung" gets a green accent so it reads as "your live
+    // order" rather than just another nav link. Only appears (post-
+    // hydration) when a cached order exists.
+    &.last-order {
+      background: linear-gradient(45deg, #2e7d32, #66bb6a);
+      box-shadow: 0 4px 14px rgba(46, 125, 50, 0.3);
+      &:hover {
+        box-shadow: 0 6px 18px rgba(46, 125, 50, 0.5);
+      }
+    }
   }
   // Locale switcher. Runtime-toggled via `i18n_enabled` admin setting;
   // when off, `.hidden` removes it from view but keeps the DOM in
@@ -2724,6 +2734,28 @@ button.add-item {
 }
 
 // ---------- Pizza extras picker (menu page) ----------
+// "Weglassen" picker reuses the extras-picker look. The removal rows are
+// priceless; the cart/confirmation "ohne X" lists are muted + italic.
+.match-rules-admin {
+  .match-rules-table {
+    border-collapse: collapse;
+    margin-top: 1rem;
+    th, td { padding: 0.4rem 0.7rem; text-align: left; border-bottom: 1px solid var(--border, #eee); }
+    th { font-size: 0.78rem; text-transform: uppercase; color: var(--muted, #888); }
+    code { background: #f4efe8; padding: 0.1rem 0.35rem; border-radius: 0.3rem; }
+    .add-row input { padding: 0.3rem 0.4rem; border: 1px solid var(--border, #d9d2c5); border-radius: 0.35rem; }
+  }
+}
+
+.removals-picker { @extend .extras-picker; }
+.removals-list {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  .removal-row { display: flex; align-items: center; gap: 0.45rem; padding: 0.15rem 0; }
+}
+ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
+
 .extras-picker {
   margin: 0.4rem 0 0.6rem;
   font-size: 0.85rem;
@@ -2883,6 +2915,37 @@ button.add-item {
     .cell-input { width: 100%; padding: 0.3rem; }
     .cell-input.narrow { width: 5rem; }
     .muted { color: var(--muted); margin-left: 0.4rem; font-size: 0.8rem; }
+
+    // Printer-theme live preview — renders the actual 1-bit assets the
+    // Pi prints, so the admin sees exactly what the kitchen ticket shows.
+    .printer-theme-preview { margin-top: 0.6rem; }
+    .printer-theme-preview .small { font-size: 0.8rem; }
+    .receipt-mock {
+      display: inline-block;
+      background: #fff;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.6rem 0.8rem;
+      text-align: center;
+      max-width: 360px;
+
+      img.logo {
+        // 1-bit art: keep pixels crisp, don't smooth.
+        image-rendering: pixelated;
+        display: block;
+        margin: 0 auto;
+      }
+      img.brand { width: 200px; max-width: 100%; }
+      .chan {
+        display: flex;
+        gap: 1.2rem;
+        justify-content: center;
+        margin-top: 0.6rem;
+        figure { margin: 0; }
+        img.icon { width: 90px; }
+        figcaption { font-weight: 700; font-size: 0.85rem; margin-top: 0.2rem; }
+      }
+    }
   }
 
   .extras-create {
@@ -4135,5 +4198,240 @@ button.add-item {
     th, td { padding: 0.5rem 0.7rem; text-align: left; border-bottom: 1px solid var(--border, #eee); font-size: 0.9rem; }
     th { background: #fdfaf6; color: #666; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; }
     td.muted { color: #888; }
+  }
+}
+
+// ===========================================================================
+// Receipt preview (admin) — a faithful render of the kitchen ticket.
+// The line list comes from `kitchen_protocol::receipt::build_receipt`,
+// the SAME model the Pi emits as ESC/POS, so this paper matches the
+// printout. Used on /admin/printer and as a card on the /admin overview.
+// ===========================================================================
+// Bon-Editor: the editable config fields above the live preview.
+.bon-edit-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  max-width: 520px;
+  margin: 0.4rem 0 1.1rem 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border, #e7e1d5);
+  border-radius: 0.6rem;
+  background: var(--card, #fff);
+
+  .bon-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    span { font-size: 0.82rem; color: var(--muted, #777); }
+    input {
+      padding: 0.45rem 0.55rem;
+      border: 1px solid var(--border, #d9d2c5);
+      border-radius: 0.4rem;
+      font: inherit;
+    }
+  }
+  .bon-check {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    font-size: 0.9rem;
+  }
+  .muted.small { color: var(--muted, #888); font-size: 0.82rem; }
+  .bon-badges {
+    border-top: 1px solid var(--border, #eee);
+    padding-top: 0.6rem;
+    summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; }
+    .bon-field { margin-top: 0.5rem; }
+  }
+  .bon-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.3rem;
+    .ok { color: #1c7a3c; font-size: 0.85rem; }
+    .error { color: #a32020; font-size: 0.85rem; }
+  }
+}
+
+.receipt-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin: 0.8rem 0 1rem 0;
+
+  .seg {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    .seg-label {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted, #888);
+      margin-right: 0.2rem;
+    }
+    .seg-btn {
+      border: 1px solid var(--border, #d9d2c5);
+      background: #fff;
+      color: var(--text, #333);
+      padding: 0.32rem 0.7rem;
+      font-size: 0.85rem;
+      cursor: pointer;
+      border-radius: 0.45rem;
+      &:hover { background: rgba(0,0,0,0.03); }
+      &.active {
+        background: var(--brand, #b5391f);
+        border-color: var(--brand, #b5391f);
+        color: #fff;
+        font-weight: 600;
+      }
+    }
+  }
+}
+
+// The "paper": a fixed monospace column the exact width of the receipt
+// (42 single-width chars). White, with a faint thermal-paper texture and
+// a torn-edge feel. Every `.r-line` is one printed line.
+.receipt-paper {
+  --col-ch: 0.62rem; // approx single-char advance at our font-size
+  font-family: "SFMono-Regular", "Consolas", "Liberation Mono", Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.32;
+  background: #fff;
+  color: #111;
+  width: calc(var(--cols, 42) * var(--col-ch) + 2.4rem);
+  max-width: 100%;
+  margin: 0 auto;
+  padding: 1.1rem 1.2rem 1.6rem;
+  border-radius: 3px;
+  box-shadow: 0 2px 14px rgba(0,0,0,0.12);
+  // Subtle perforated top/bottom edge like a torn receipt.
+  background-image:
+    radial-gradient(circle at 6px -3px, transparent 5px, #fff 5px);
+  overflow-x: auto;
+  white-space: pre;
+
+  .r-line {
+    white-space: pre;
+    min-height: 1em;
+  }
+  .r-feed { color: transparent; }
+  .r-rule { color: #555; }
+
+  // Combined header row: channel icon (left) + Rusterando brand mark
+  // (right) on ONE line, exactly as the Pi composes the single band.
+  .r-raster {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.7rem;
+    margin: 0.3rem 0;
+    .r-logo {
+      // 1-bit art: keep the dithered pixels crisp, never smooth.
+      image-rendering: pixelated;
+      display: block;
+      width: auto;
+      // Scale both to a common height so they read as one logo line,
+      // matching the printer's HEADER_LOGO_HEIGHT composition.
+      height: 56px;
+    }
+  }
+
+  .r-qr {
+    text-align: center;
+    margin: 0.4rem 0;
+    .r-qr-box {
+      display: inline-block;
+      border: 2px solid #111;
+      padding: 1.6rem 1.8rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      // Checkerboard hint so it reads as a QR placeholder, not a button.
+      background:
+        repeating-conic-gradient(#111 0% 25%, #fff 0% 50%) 0 / 10px 10px;
+      color: transparent;
+    }
+  }
+}
+
+// Overview card wrapper around the same pane, slightly condensed.
+.admin-receipt-card {
+  margin-top: 1.4rem;
+  background: var(--card, #fff);
+  border: 1px solid var(--border, #e7e1d5);
+  border-radius: 0.7rem;
+  padding: 1rem 1.2rem 1.3rem;
+
+  .card-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    h2 { margin: 0; font-size: 1.1rem; }
+    .go { font-size: 0.85rem; font-weight: 600; color: var(--brand, #b5391f); text-decoration: none; }
+    .go:hover { text-decoration: underline; }
+  }
+
+  .receipt-paper { box-shadow: 0 1px 8px rgba(0,0,0,0.1); }
+}
+
+// ===========================================================================
+// Admin Pi (kitchen-printer) status panel — /admin/drucker. Makes a version
+// skew visible and exposes the OTA "Pi aktualisieren" arm button.
+// ===========================================================================
+.printer-status {
+  .pi-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+  .pi-card {
+    border: 1px solid var(--border, #e7e1d5);
+    border-radius: 0.7rem;
+    background: var(--card, #fff);
+    padding: 0.9rem 1rem 1rem;
+  }
+  .pi-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.6rem;
+    .pi-shop { font-size: 1.05rem; }
+  }
+  // Connection freshness pill.
+  .pi-conn {
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    &.online  { background: #e6f6ea; color: #1c7a3c; }
+    &.stale   { background: #fdf2dc; color: #8a5a00; }
+    &.offline { background: #fbe5e5; color: #a32020; }
+  }
+  .pi-meta {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.25rem 0.8rem;
+    margin: 0;
+    dt { color: var(--muted, #888); font-size: 0.82rem; }
+    dd { margin: 0; font-size: 0.9rem; }
+    dd.muted { color: var(--muted, #888); }
+    dd.ok { color: #1c7a3c; }
+    dd.error { color: #a32020; }
+    // Version line: red when running != target.
+    .pi-ver.mismatch { color: #a32020; font-weight: 700; }
+    .pi-ver.ok { color: #1c7a3c; }
+  }
+  .pi-actions {
+    margin-top: 0.9rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem;
+    .armed { font-size: 0.85rem; color: #8a5a00; }
+    .muted.small { color: var(--muted, #888); font-size: 0.85rem; }
   }
 }

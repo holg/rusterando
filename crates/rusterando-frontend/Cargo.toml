@@ -8,6 +8,10 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rusterando-shared = { workspace = true }
+# Receipt layout model shared with the Pi printer. The admin printer
+# preview renders the SAME `kitchen_protocol::receipt::build_receipt`
+# list the kitchen ticket is emitted from, so the preview can't drift.
+kitchen-protocol = { workspace = true }
 
 leptos = { workspace = true }
 leptos_meta = { workspace = true }

@@ -1,8 +1,10 @@
 mod client;
 mod config;
-mod icons;
 mod idempotency;
 mod printer;
+mod raster_cache;
+mod svg_raster;
+mod update;
 
 use anyhow::Context;
 use tracing::info;

@@ -95,6 +95,19 @@ pub trait KitchenSink: Send + Sync {
     /// payload as NewOrder; the Pi marks the receipt with a "REPRINT"
     /// banner. Triggered from the admin orders page.
     async fn broadcast_reprint(&self, db: &sqlx::SqlitePool, order_id: &str) -> anyhow::Result<()>;
+
+    /// Compose + broadcast a SAMPLE receipt for the Bon-Editor's "print
+    /// this" button — a representative fake order rendered with the current
+    /// saved `ReceiptConfig` + theme, so the admin sees the real layout on
+    /// real paper. `delivery`/`prepaid`/`theme` come from the editor's
+    /// preview toggles. No DB order is touched.
+    async fn broadcast_test_print(
+        &self,
+        db: &sqlx::SqlitePool,
+        delivery: bool,
+        prepaid: bool,
+        theme: String,
+    ) -> anyhow::Result<()>;
 }
 
 #[cfg(feature = "ssr")]

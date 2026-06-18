@@ -8,6 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod bitmap;
+pub mod receipt;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct OrderId(pub u64);
 
@@ -30,28 +33,93 @@ pub struct ServerMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum KitchenEvent {
-    /// A new paid order to print.
-    NewOrder(OrderForKitchen),
-    /// Operator-triggered reprint (e.g., paper jam, dropped receipt).
-    /// Same payload as NewOrder; the printer can mark it visually as a reprint.
-    Reprint(OrderForKitchen),
+    /// A fully-composed receipt to print. The server is the Bon-Designer:
+    /// it ran `receipt::compose`, resolved the theme, and inlined the
+    /// logo rasters — the Pi just executes the lines. Covers both new
+    /// orders and reprints (the program carries `is_reprint`).
+    Print(crate::receipt::ReceiptProgram),
+
+    // ===== In-band self-update (1.0+) =====
+    // The server can ship the Pi a new binary over THIS channel — the
+    // same trusted 9001 stream — so a protocol/binary bump no longer
+    // strands the Pi (the failure that motivated this: a 0.1.0 Pi silently
+    // not printing against a 1.0 server). Admin-gated on the server side.
+    //
+    // IMPORTANT for forward-compat: postcard is POSITIONAL, so only ever
+    // ADD variants at the END of this enum. Never reorder/insert — an old
+    // decoder maps a variant by its index. Appending is safe (old Pis just
+    // never receive a higher index); inserting shifts everything and
+    // corrupts decoding.
+    /// Offer a newer artifact. The Pi compares `target_version` to its own,
+    /// and if it wants it, pulls the bytes via `ClientMessage::FetchArtifact`,
+    /// verifying against `sha256` + `size`.
+    UpdateOffer {
+        component: Component,
+        target_version: String,
+        sha256: [u8; 32],
+        size: u64,
+    },
+    /// One chunk of the artifact, in response to a `FetchArtifact`. `offset`
+    /// echoes the request; `last` marks the final chunk.
+    ArtifactChunk {
+        component: Component,
+        offset: u64,
+        bytes: Vec<u8>,
+        last: bool,
+    },
+}
+
+/// A server-managed component the Pi can self-update. Only the printer
+/// binary today; the enum leaves room (tunnel unit, init script, …)
+/// without a schema break, since it's referenced by appended variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Component {
+    /// The `rusterando-printer` executable itself.
+    PrinterBinary,
 }
 
 /// Client → server envelope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// Sent immediately after TCP connect. The server uses `last_seen_seq`
-    /// to replay any unacked outbox entries newer than that.
+    /// to replay any unacked outbox entries newer than that, and records
+    /// `version` + `arch` for the admin Pi panel / update targeting.
     Hello {
         shop_slug: String,
         version: String,
         last_seen_seq: Option<SeqId>,
+        /// Target triple the Pi binary was built for, e.g.
+        /// "aarch64-unknown-linux-gnu". Lets the server pick the right
+        /// artifact. Added in 1.0.
+        arch: String,
+        /// Content hashes ([`crate::receipt::raster_hash`]) of the logo
+        /// rasters the Pi already has cached on disk. The server sends a
+        /// `RasterSvg` with EMPTY `svg` (a reference) for any hash listed
+        /// here, and full SVG bytes otherwise. Added in 2.0; keeps the
+        /// steady-state wire tiny (the header logo rarely changes).
+        cached_rasters: Vec<[u8; 32]>,
     },
     /// Acknowledge a printed (or already-deduped) event. Server marks outbox
     /// row as acked.
     Ack(SeqId),
     /// Keepalive. Server uses these to mark per-shop last_seen_at.
     Heartbeat,
+
+    // ===== In-band self-update (1.0+) — APPEND ONLY (see KitchenEvent) =====
+    /// Request the next chunk of an offered artifact, starting at `offset`
+    /// (0 for the first). The server replies with an `ArtifactChunk`.
+    FetchArtifact { component: Component, offset: u64 },
+    /// Report the outcome of an update attempt, so the server can clear the
+    /// armed flag / surface success or failure in the admin panel. The Pi
+    /// sends this BEFORE exiting to self-restart on success.
+    UpdateResult {
+        component: Component,
+        from: String,
+        to: String,
+        ok: bool,
+        /// Empty on success; a short reason on failure.
+        error: String,
+    },
 }
 
 // ===== Domain types =====
@@ -132,12 +200,13 @@ pub struct OrderForKitchen {
     pub pickup_time_label: Option<String>,
     /// Receipt layout theme, chosen by the admin
     /// (`app_settings.printer_theme`). Known values:
+    ///
     ///   * "" / "rusterando-default" → classic text-only layout.
-    ///   * "rusterando-rando"        → adds a big channel logo (bag for
-    ///     pickup, scooter for delivery) at the top of the receipt.
-    /// The Pi decides what to render; unknown values fall back to
-    /// default. `#[serde(default)]` → older Pi binaries ignore it (they
-    /// always render the default layout, which is correct).
+    ///   * "rusterando-rando" → adds the combined channel+brand logo band.
+    ///
+    /// The **server** (`receipt::compose`) resolves this into the wire
+    /// program; unknown values fall back to the default text-only layout.
+    /// `#[serde(default)]` keeps older payloads decodable.
     #[serde(default)]
     pub printer_theme: String,
 }
@@ -394,14 +463,80 @@ mod tests {
     #[test]
     fn server_message_round_trip() {
         // postcard isn't a dep of this crate, so we just round-trip through
-        // serde_json to prove the schema is serde-clean.
+        // serde_json to prove the schema is serde-clean. The wire event is
+        // now a composed ReceiptProgram, not a raw order.
+        use crate::receipt::{ReceiptLine, ReceiptProgram};
+        let _ = sample(); // keep the fixture exercised
+        let prog = ReceiptProgram {
+            display_number: 7,
+            is_reprint: false,
+            lines: vec![
+                ReceiptLine::Text {
+                    text: "DP-1105-0001".into(),
+                    style: crate::receipt::LineStyle::NORMAL,
+                },
+                ReceiptLine::Cut { feed: 4 },
+            ],
+        };
         let msg = ServerMessage {
             seq_id: SeqId(7),
-            event: KitchenEvent::NewOrder(sample()),
+            event: KitchenEvent::Print(prog),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: ServerMessage = serde_json::from_str(&json).unwrap();
         assert_eq!(back.seq_id, SeqId(7));
+    }
+
+    #[test]
+    fn update_messages_round_trip() {
+        // The self-update wire types must serde cleanly (server↔Pi).
+        let offer = ServerMessage {
+            seq_id: SeqId(1),
+            event: KitchenEvent::UpdateOffer {
+                component: Component::PrinterBinary,
+                target_version: "0.3.0".into(),
+                sha256: [7u8; 32],
+                size: 2_125_904,
+            },
+        };
+        let chunk = ServerMessage {
+            seq_id: SeqId(2),
+            event: KitchenEvent::ArtifactChunk {
+                component: Component::PrinterBinary,
+                offset: 65536,
+                bytes: vec![1, 2, 3, 4],
+                last: false,
+            },
+        };
+        for m in [offer, chunk] {
+            let j = serde_json::to_string(&m).unwrap();
+            let back: ServerMessage = serde_json::from_str(&j).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{m:?}"));
+        }
+
+        let hello = ClientMessage::Hello {
+            shop_slug: "davidspizzeria".into(),
+            version: "0.2.0".into(),
+            last_seen_seq: Some(SeqId(9)),
+            arch: "aarch64-unknown-linux-gnu".into(),
+            cached_rasters: vec![[3u8; 32], [9u8; 32]],
+        };
+        let fetch = ClientMessage::FetchArtifact {
+            component: Component::PrinterBinary,
+            offset: 0,
+        };
+        let result = ClientMessage::UpdateResult {
+            component: Component::PrinterBinary,
+            from: "0.2.0".into(),
+            to: "0.3.0".into(),
+            ok: true,
+            error: String::new(),
+        };
+        for m in [hello, fetch, result] {
+            let j = serde_json::to_string(&m).unwrap();
+            let back: ClientMessage = serde_json::from_str(&j).unwrap();
+            assert_eq!(format!("{back:?}"), format!("{m:?}"));
+        }
     }
 
     #[test]
