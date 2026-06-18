@@ -88,9 +88,36 @@ impl axum::extract::FromRef<AppState> for LeptosOptions {
     }
 }
 
+/// Load the dotenv file, honouring an `ENV_FILE` override so a single
+/// checkout can run any tenant/profile without symlinking or sourcing:
+///
+///   ENV_FILE=.env.rusterando.flizza cargo leptos watch
+///
+/// Falls back to the default `.env` (search up from CWD) when `ENV_FILE`
+/// is unset. Either way, dotenvy does NOT override vars already present in
+/// the environment, so an explicit `KEY=… cargo …` on the command line
+/// still wins.
+fn load_env() {
+    match std::env::var("ENV_FILE") {
+        Ok(path) if !path.is_empty() => {
+            // Explicit operator request — fail loud. dotenvy aborts the
+            // file on the first malformed line, so a silent miss would
+            // boot the server on half-loaded config (wrong DB/defaults).
+            dotenvy::from_filename(&path).unwrap_or_else(|e| {
+                panic!("ENV_FILE={path} could not be loaded: {e}");
+            });
+        }
+        _ => {
+            // Default: best-effort `.env` (absent is fine for prod where
+            // the systemd unit injects the environment directly).
+            let _ = dotenvy::dotenv();
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    let _ = dotenvy::dotenv();
+    load_env();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -351,6 +378,9 @@ async fn main() {
     // AppState so SSE handlers can close their streams the instant we begin
     // draining (otherwise they pin the process open until SIGKILL).
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    // Extra receiver for the post-signal drain cap (the AppState one is moved
+    // in below for the SSE handlers).
+    let shutdown_rx_for_cap = shutdown_rx.clone();
 
     let state = AppState {
         leptos_options: leptos_options.clone(),
@@ -663,6 +693,12 @@ async fn main() {
     // after TimeoutStopSec=90 s) is the right answer. Also, customer-
     // facing restart-window perception scales linearly with the
     // drain timeout.
+    // The shutdown future resolves ONLY when a signal arrives. It flips the
+    // SSE-close watch, then resolves — `with_graceful_shutdown` then stops
+    // accept() and drains in-flight requests. CRITICAL: this future must NOT
+    // resolve on its own; if it did (or if we wrapped the whole serve in a
+    // timeout), the server would shut itself down mid-operation. The 5 s drain
+    // cap below is armed only AFTER the signal, never during normal serving.
     let db_for_shutdown = db.clone();
     let shutdown_signal = async move {
         let ctrl_c = async {
@@ -688,28 +724,49 @@ async fn main() {
             _ = terminate => tracing::info!("SIGTERM received — draining"),
         }
 
-        // Tell the SSE handlers to close NOW. Without this, a single open
+        // Tell the SSE handlers to close NOW (and the separate drain-cap
+        // future, which watches the same channel). Without this, a single open
         // `/api/live/*` stream keeps the graceful drain blocked until SIGKILL
         // (~90 s), which held the listen port and forced the freshly-started
         // process into a bind-retry loop — the >60 s 502 window.
         let _ = shutdown_tx.send(true);
     };
 
-    // Bound the entire graceful drain at 5 s. `with_graceful_shutdown` waits
-    // for in-flight requests to finish; the SSE close above lets the common
-    // case finish in milliseconds, and this timeout is the hard backstop so a
-    // wedged request can never block past 5 s (after which we exit, the port
-    // frees, and the new process binds immediately).
+    // Run serve and the post-signal 5 s cap concurrently. `serve` completes on
+    // its own once the graceful drain finishes (the common case, in ms). The
+    // cap future waits for the shutdown watch to flip, then sleeps 5 s and
+    // wins the race only if the drain is wedged — at which point we log and
+    // fall through to exit. Normal serving never trips it because the watch
+    // stays `false` until a real signal.
     let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal);
 
-    match tokio::time::timeout(std::time::Duration::from_secs(5), serve).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::error!(error = %e, "axum::serve exited with error"),
-        Err(_) => tracing::warn!("graceful drain hit 5 s cap — forcing shutdown"),
+    let drain_cap = {
+        let mut rx = shutdown_rx_for_cap;
+        async move {
+            // Wait until shutdown is actually signalled.
+            while !*rx.borrow() {
+                if rx.changed().await.is_err() {
+                    // Sender dropped — process is going away anyway.
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    };
+
+    tokio::select! {
+        res = serve => {
+            if let Err(e) = res {
+                tracing::error!(error = %e, "axum::serve exited with error");
+            }
+        }
+        _ = drain_cap => {
+            tracing::warn!("graceful drain hit 5 s cap — forcing shutdown");
+        }
     }
 
     // Post-drain: explicit sqlite pool close so WAL is checkpointed

@@ -177,12 +177,31 @@ server {
     # the offline fallback when the app is briefly down during a restart.
     root /var/www/yourshop.example.com/html;
 
+    # Hashed bundles (pkg/<name>.<hash>.{js,wasm,css}). The hash IS the
+    # cache key, so these are safe to cache forever — a rebuild changes the
+    # filename, never the contents at a URL. immutable = never revalidate.
+    location /pkg/ {
+        alias /var/www/yourshop.example.com/html/pkg/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
     location / {
         proxy_pass http://127.0.0.1:3001;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+
+        # CRITICAL: never let the browser cache the HTML document. The page
+        # embeds the CURRENT bundle hash in its <script> import; a stale
+        # cached page points at a deleted hash after a deploy and the WASM
+        # module 404s ("Importing a module script failed"), leaving every
+        # button dead. `no-cache` forces revalidation every load so returning
+        # customers always get HTML matching the bundles on disk. (The /pkg/
+        # block above is content-hashed + immutable, so only the document
+        # needs this — and the cost is just the small HTML re-fetch.)
+        add_header Cache-Control "no-cache" always;
 
         # When the upstream is unreachable (the ~5 s restart window) or 5xx,
         # serve the static offline page instead of a raw 502. The app writes
