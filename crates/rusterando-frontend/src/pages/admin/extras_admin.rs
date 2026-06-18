@@ -174,6 +174,8 @@ pub async fn update_extra(
             .await
             .map_err(|e| ServerFnError::new(format!("add alias: {e}")))?;
     }
+    // Extras appear on the printed menu → refresh the static menu.pdf cache.
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(())
 }
 
@@ -216,8 +218,8 @@ pub async fn create_extra(label: String, price_cents: i64) -> Result<String, Ser
     .execute(&db)
     .await;
 
-    match res {
-        Ok(_) => Ok(id),
+    let new_id = match res {
+        Ok(_) => id,
         Err(_) => {
             // Conflict on slug — disambiguate.
             let id2 = format!("{id}-{}", uuid::Uuid::new_v4().simple());
@@ -232,9 +234,12 @@ pub async fn create_extra(label: String, price_cents: i64) -> Result<String, Ser
             .execute(&db)
             .await
             .map_err(|e| ServerFnError::new(format!("insert extra: {e}")))?;
-            Ok(id2)
+            id2
         }
-    }
+    };
+    // New extra shows on the printed menu → refresh the static cache.
+    crate::pages::push::rebuild_menu_pdf_cache().await;
+    Ok(new_id)
 }
 
 #[cfg(feature = "ssr")]

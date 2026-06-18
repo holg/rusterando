@@ -143,6 +143,7 @@ pub async fn update_menu_item(
 
     // Menu changed → refresh the cached Restaurant JSON-LD (prices/names).
     crate::pages::seo::rebuild_jsonld_cache().await;
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(())
 }
 
@@ -239,6 +240,7 @@ pub async fn create_menu_item(
 
     // New item → refresh the cached Restaurant JSON-LD.
     crate::pages::seo::rebuild_jsonld_cache().await;
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(id)
 }
 
@@ -335,6 +337,7 @@ pub async fn update_category(
     // Category name/slug feeds the public menu, the sitemap, and the
     // JSON-LD — refresh the cache so the change is visible immediately.
     crate::pages::seo::rebuild_jsonld_cache().await;
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(())
 }
 
@@ -375,6 +378,7 @@ pub async fn create_category(name: String) -> Result<String, ServerFnError> {
     .map_err(|e| ServerFnError::new(format!("create category: {e}")))?;
 
     crate::pages::seo::rebuild_jsonld_cache().await;
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(id)
 }
 
@@ -407,6 +411,7 @@ pub async fn delete_category(id: String) -> Result<(), ServerFnError> {
         .map_err(|e| ServerFnError::new(format!("delete category: {e}")))?;
 
     crate::pages::seo::rebuild_jsonld_cache().await;
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(())
 }
 

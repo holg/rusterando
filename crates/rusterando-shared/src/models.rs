@@ -461,8 +461,10 @@ impl ShopLevel {
     }
 }
 
-/// One restaurant→customer message with its server-side timestamp.
-/// `created_at` is a display-ready local string ("HH:MM" / "DD.MM. HH:MM").
+/// One message in an order's shared chat thread, with its server-side
+/// timestamp. `created_at` is a display-ready local string ("HH:MM" /
+/// "DD.MM. HH:MM"). Either side can post: staff (admin/kitchen/driver) or a
+/// VIP customer replying from their order page — `sender` says which.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrderMessage {
     /// `order_messages.id` — used by the customer page to ack delivery.
@@ -470,10 +472,38 @@ pub struct OrderMessage {
     pub id: i64,
     pub body: String,
     pub created_at: String,
+    /// Who wrote it: "admin" | "kitchen" | "driver" | "customer". Drives
+    /// attribution + bubble alignment in every view. Defaults to "admin"
+    /// so pre-`sender` rows (and any old serialized payloads) read correctly.
+    #[serde(default = "default_sender")]
+    pub sender: String,
     /// Delivered (rendered in a browser) yet? Drives the admin "✓
     /// Zugestellt" vs "gesendet" indicator.
     #[serde(default)]
     pub delivered: bool,
+}
+
+fn default_sender() -> String {
+    "admin".to_string()
+}
+
+impl OrderMessage {
+    /// True when the message came from the VIP customer (vs. any staff role).
+    pub fn is_customer(&self) -> bool {
+        self.sender == "customer"
+    }
+
+    /// German label + emoji for the sender, shown before the body. Unknown
+    /// senders fall back to a neutral "Restaurant" so the log never breaks.
+    pub fn sender_label_de(&self) -> &'static str {
+        match self.sender.as_str() {
+            "customer" => "🙋 Kunde",
+            "kitchen" => "👨‍🍳 Küche",
+            "driver" => "🛵 Fahrer",
+            "admin" => "🏪 Restaurant",
+            _ => "🏪 Restaurant",
+        }
+    }
 }
 
 /// Format a cent amount as a German euro string: 1234 -> "12,34 €".

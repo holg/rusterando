@@ -624,8 +624,16 @@ cmd_upload() {
     # in the local build output. Without this exclude, --delete would wipe
     # every uploaded file on each release. (pkg/ etc. ARE in the build
     # output, so --delete correctly clean-replaces them.)
+    # --exclude menu*.pdf: the static menu cache (nginx's offline fallback) is
+    # app-generated into the site root at boot + after each menu edit, not in
+    # the build output. Excluding it keeps the previous PDF in place across the
+    # deploy so there's no fallback gap before the new process reboots it.
     echo "Uploading site assets..."
-    rsync -avz --delete --exclude 'img/uploads/' "$LOCAL_SITE_DIR/" "$SSH_HOST:$REMOTE_HTML_DIR/"
+    rsync -avz --delete \
+        --exclude 'img/uploads/' \
+        --exclude 'menu.pdf' \
+        --exclude 'menu-kompakt.pdf' \
+        "$LOCAL_SITE_DIR/" "$SSH_HOST:$REMOTE_HTML_DIR/"
 
     # Upload .env: ship the locally-loaded $ENV_FILE as .env on the
     # server (systemd's EnvironmentFile= reads from a fixed path per
@@ -700,7 +708,14 @@ Group=www-data
 WorkingDirectory=$REMOTE_BIN_DIR
 ExecStart=$REMOTE_BIN_DIR/$APP_NAME
 Restart=always
-RestartSec=5
+# The server's own graceful drain is hard-capped at 5 s (SSE streams close
+# on SIGTERM, then a 5 s timeout backstops any wedged request), so the port
+# is released within ~5 s of `systemctl restart`. RestartSec=1 lets the fresh
+# process bind almost immediately after; TimeoutStopSec=10 means systemd never
+# waits the default 90 s before SIGKILL if the drain somehow overruns. Together
+# these collapse the old >60 s 502 window to ~5 s.
+RestartSec=1
+TimeoutStopSec=10
 # Long-lived SSE streams + sqlite WAL each hold one fd; the systemd
 # default of 1024 runs out within hours under any real load and the
 # axum listener starts returning "Too many open files (os error 24)".

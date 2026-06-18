@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Einen Moment bitte …</title>
+  <!--
+    Static offline fallback. nginx serves this (and the cached menu PDFs)
+    straight from the site root when the app is briefly unreachable during a
+    restart — see `error_page 502 503 504 = @offline` in the vhost. It must be
+    fully self-contained: no app CSS/JS/fonts, because the app is what's down.
+    It auto-reloads every few seconds so the customer lands back on the live
+    site the instant the new process is up (~5 s).
+  -->
+  <meta http-equiv="refresh" content="5">
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: #b91c1c;
+      color: #fff;
+      padding: 1.5rem;
+    }
+    .card {
+      max-width: 30rem;
+      text-align: center;
+    }
+    h1 { font-size: 1.6rem; margin: 0 0 .75rem; }
+    p { font-size: 1.05rem; line-height: 1.5; margin: .5rem 0; opacity: .95; }
+    .spinner {
+      width: 2.5rem; height: 2.5rem;
+      margin: 1.25rem auto;
+      border: 4px solid rgba(255,255,255,.35);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .btn {
+      display: inline-block;
+      margin-top: 1rem;
+      padding: .7rem 1.4rem;
+      background: #fff;
+      color: #b91c1c;
+      font-weight: 600;
+      text-decoration: none;
+      border-radius: .6rem;
+    }
+    .muted { font-size: .9rem; opacity: .8; margin-top: 1.5rem; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>Wir sind gleich wieder da</h1>
+    <div class="spinner" aria-hidden="true"></div>
+    <p>Die Seite wird gerade aktualisiert. Diese Seite lädt sich automatisch neu.</p>
+    <p>In der Zwischenzeit kannst du unsere Speisekarte ansehen:</p>
+    <a class="btn" href="/menu.pdf">📄 Speisekarte (PDF)</a>
+    <p class="muted">Falls es länger dauert, ruf uns gerne an.</p>
+  </main>
+</body>
+</html>

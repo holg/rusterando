@@ -179,7 +179,10 @@
         "title": "订单已收到",
         "order_number": "订单号",
         "estimated_pickup": "预计取餐时间",
-        "estimated_delivery": "预计送达时间"
+        "estimated_delivery": "预计送达时间",
+        "voucher": "优惠券",
+        "reply_placeholder": "回复餐厅…",
+        "reply_send": "发送回复"
     },
     "errors": {
         "page_not_found": "页面未找到。",

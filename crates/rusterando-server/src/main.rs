@@ -74,6 +74,12 @@ struct AppState {
     /// synchronously during SSR so `/` and `/menu` carry structured data in
     /// the first byte with no per-request query; never emitted on the client.
     jsonld: rusterando_frontend::pages::seo::JsonLdHandle,
+    /// Shutdown broadcast. Flipped to `true` the moment SIGTERM/SIGINT lands,
+    /// BEFORE axum stops accepting. The long-lived SSE handlers select on this
+    /// and close their streams immediately so graceful shutdown never blocks
+    /// on an open `/api/live/*` connection (the old cause of the >60 s 502
+    /// restart window — see the shutdown block in `main`).
+    shutdown: tokio::sync::watch::Receiver<bool>,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
@@ -340,6 +346,12 @@ async fn main() {
         }
     };
 
+    // Shutdown broadcast: `false` until a signal lands, then `true`. The
+    // sender lives in the shutdown future below; the receiver is cloned into
+    // AppState so SSE handlers can close their streams the instant we begin
+    // draining (otherwise they pin the process open until SIGKILL).
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     let state = AppState {
         leptos_options: leptos_options.clone(),
         db: db.clone(),
@@ -355,6 +367,7 @@ async fn main() {
         live,
         uploads_dir: uploads_dir.clone(),
         jsonld,
+        shutdown: shutdown_rx,
     };
 
     let routes = generate_route_list(App);
@@ -395,6 +408,35 @@ async fn main() {
                 as std::sync::Arc<dyn rusterando_frontend::pages::push::KitchenSink>
         });
 
+    // Static menu.pdf cache rebuilder. The frontend admin server fns call this
+    // (via MenuPdfCacheHandle in context) after menu/extras/branding edits so
+    // nginx's offline fallback PDF stays current.
+    let menu_pdf_site_url =
+        std::env::var("PUBLIC_URL").unwrap_or_else(|_| format!("http://{addr}"));
+    let menu_pdf_cache: rusterando_frontend::pages::push::MenuPdfCacheHandle = Some(
+        std::sync::Arc::new(rusterando_server::pdf::MenuPdfCacheImpl {
+            site_root: leptos_options.site_root.to_string(),
+            uploads_dir: state.uploads_dir.to_string(),
+            site_url: menu_pdf_site_url,
+            branding: state.branding.clone(),
+        }) as std::sync::Arc<dyn rusterando_frontend::pages::push::MenuPdfCache>,
+    );
+
+    // Prime the cache at boot so the fallback exists from the first request,
+    // even before any admin edit. Best-effort + non-blocking — a slow Typst
+    // render must not delay the listener coming up.
+    {
+        let cache = menu_pdf_cache.clone();
+        let db = db.clone();
+        tokio::spawn(async move {
+            if let Some(c) = cache {
+                if let Err(e) = c.rebuild(&db).await {
+                    tracing::warn!("initial menu.pdf cache build failed: {e}");
+                }
+            }
+        });
+    }
+
     let app = Router::new()
         .leptos_routes_with_context(
             &state,
@@ -408,6 +450,7 @@ async fn main() {
                 let theme = state.theme.clone();
                 let branding = state.branding.clone();
                 let kitchen_sink = kitchen_sink.clone();
+                let menu_pdf_cache = menu_pdf_cache.clone();
                 let stripe_mode = state.stripe_mode.clone();
                 let i18n = state.i18n.clone();
                 let orders_paused = state.orders_paused.clone();
@@ -425,6 +468,8 @@ async fn main() {
                     provide_context(branding.clone());
                     // KitchenSinkHandle — None on printerless deploys.
                     provide_context(kitchen_sink.clone());
+                    // MenuPdfCacheHandle — drives the nginx offline-fallback refresh.
+                    provide_context(menu_pdf_cache.clone());
                     provide_context(stripe_mode.clone());
                     provide_context(i18n.clone());
                     provide_context(orders_paused.clone());
@@ -577,8 +622,29 @@ async fn main() {
     // — no disk writes, no nginx round-trip, no external probe.
     rusterando_server::health::spawn_self_monitor(std::time::Duration::from_secs(30));
 
+    // Bind with a short retry window. During `systemctl restart` the old
+    // process drains for up to 5 s while still holding the port; rather than
+    // panicking and bouncing through systemd's RestartSec (which adds visible
+    // 502s), we wait here and slot in the instant the port frees. ~8 s of
+    // retries covers the 5 s drain cap plus margin; beyond that something is
+    // genuinely wrong and we exit so systemd surfaces it.
+    let listener = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            match tokio::net::TcpListener::bind(&addr).await {
+                Ok(l) => break l,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    tracing::warn!(error = %e, "bind {addr} failed — old process still draining, retrying in 250ms");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "bind {addr} failed after 8s — giving up");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
     tracing::info!("davidspizzeria listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     // Graceful shutdown on SIGTERM (sent by `systemctl restart` /
     // `systemctl stop`). The signal handler stops `accept()` on the
@@ -621,16 +687,29 @@ async fn main() {
             _ = ctrl_c => tracing::info!("SIGINT received — draining"),
             _ = terminate => tracing::info!("SIGTERM received — draining"),
         }
+
+        // Tell the SSE handlers to close NOW. Without this, a single open
+        // `/api/live/*` stream keeps the graceful drain blocked until SIGKILL
+        // (~90 s), which held the listen port and forced the freshly-started
+        // process into a bind-retry loop — the >60 s 502 window.
+        let _ = shutdown_tx.send(true);
     };
 
-    if let Err(e) = axum::serve(
+    // Bound the entire graceful drain at 5 s. `with_graceful_shutdown` waits
+    // for in-flight requests to finish; the SSE close above lets the common
+    // case finish in milliseconds, and this timeout is the hard backstop so a
+    // wedged request can never block past 5 s (after which we exit, the port
+    // frees, and the new process binds immediately).
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal)
-    .await
-    {
-        tracing::error!(error = %e, "axum::serve exited with error");
+    .with_graceful_shutdown(shutdown_signal);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), serve).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(error = %e, "axum::serve exited with error"),
+        Err(_) => tracing::warn!("graceful drain hit 5 s cap — forcing shutdown"),
     }
 
     // Post-drain: explicit sqlite pool close so WAL is checkpointed
@@ -929,6 +1008,11 @@ async fn live_order_sse_handler(
             Some(Ok(Event::default().data(json)))
         }
     });
+    // End the stream the moment shutdown is signalled, so it never pins the
+    // process open during a graceful drain. The browser's EventSource just
+    // reconnects to the new process. `take_until` completes the stream when
+    // the shutdown future resolves.
+    let stream = stream.take_until(wait_for_shutdown(state.shutdown.clone()));
 
     // Keep-alive every 5s instead of axum's 15s default. The keep-alive
     // write is what detects a TCP RST/FIN from the client and tears down
@@ -939,6 +1023,23 @@ async fn live_order_sse_handler(
     // ~1 fd per 8 closed clients with the 15s default; 5s reduces the
     // window 3× and brings steady-state fds in line with active clients.
     Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))
+}
+
+/// Resolves when the shutdown watch flips to `true` (SIGTERM/SIGINT received).
+/// Used by the SSE handlers via `take_until` so long-lived streams close at
+/// the start of a graceful drain instead of blocking it. Returns immediately
+/// if the channel is already set or the sender has dropped.
+async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
+    if *rx.borrow() {
+        return;
+    }
+    // `changed()` errors only if the sender dropped — treat that as "shut
+    // down" too (the process is going away).
+    while rx.changed().await.is_ok() {
+        if *rx.borrow() {
+            return;
+        }
+    }
 }
 
 /// `/api/live/shop` — SSE stream of global shop open/closed changes. Home +
@@ -963,6 +1064,8 @@ async fn live_shop_sse_handler(
         let json = serde_json::to_string(&ev).ok()?;
         Some(Ok(Event::default().data(json)))
     });
+    // Close on shutdown so this stream never blocks the graceful drain.
+    let stream = stream.take_until(wait_for_shutdown(state.shutdown.clone()));
 
     // 5s keep-alive (see live_order_sse_handler for the why).
     Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))

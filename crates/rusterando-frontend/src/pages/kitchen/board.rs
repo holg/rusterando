@@ -8,9 +8,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::pages::order::status_label_de;
 
-/// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json)
+/// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
+///  removals_json)
 #[cfg(feature = "ssr")]
-type ItemSummaryRow = (Option<String>, String, i64, String, Option<String>);
+type ItemSummaryRow = (
+    Option<String>,
+    String,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KitchenOrderRow {
@@ -82,7 +90,8 @@ pub async fn list_kitchen_orders() -> Result<KitchenOrders, ServerFnError> {
 
     for (id, num, status, order_type, name, phone, scheduled, created, total, addr_json) in rows {
         let items: Vec<ItemSummaryRow> = sqlx::query_as(
-            "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json
+            "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
+                    removals_json
              FROM order_items
              WHERE order_id = ?1 ORDER BY id",
         )
@@ -94,10 +103,12 @@ pub async fn list_kitchen_orders() -> Result<KitchenOrders, ServerFnError> {
         // Kitchen reads the menu number first ("22a Pizza Sucuk" / "51 Pizza
         // Inferno") because that's how the paper menu is keyed and how staff
         // call orders out to each other. Extras append after the item ("…
-        // + Extra Käse, Tabasco") so the kitchen knows which toppings to add.
+        // + Extra Käse, Tabasco") so the kitchen knows which toppings to add,
+        // and removals after that ("… ohne Pilze") so they know what to leave
+        // off — both are must-have for getting the pizza right.
         let items_summary = items
             .into_iter()
-            .map(|(num, n, q, opts, extras_json)| {
+            .map(|(num, n, q, opts, extras_json, removals_json)| {
                 let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
                 let variant = v.get("size_label").and_then(|x| x.as_str()).unwrap_or("");
                 let prefix = num
@@ -121,10 +132,25 @@ pub async fn list_kitchen_orders() -> Result<KitchenOrders, ServerFnError> {
                         format!(" + {labels}")
                     })
                     .unwrap_or_default();
+                let removals_label = removals_json
+                    .as_deref()
+                    .and_then(|j| {
+                        serde_json::from_str::<Vec<rusterando_shared::models::CartRemoval>>(j).ok()
+                    })
+                    .filter(|v| !v.is_empty())
+                    .map(|v| {
+                        let labels = v
+                            .into_iter()
+                            .map(|r| r.label)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(" ohne {labels}")
+                    })
+                    .unwrap_or_default();
                 if variant.is_empty() {
-                    format!("{q}× {prefix}{n}{extras_label}")
+                    format!("{q}× {prefix}{n}{extras_label}{removals_label}")
                 } else {
-                    format!("{q}× {prefix}{n} ({variant}){extras_label}")
+                    format!("{q}× {prefix}{n} ({variant}){extras_label}{removals_label}")
                 }
             })
             .collect::<Vec<_>>()
@@ -346,6 +372,10 @@ fn Card(
             id: id_for_reprint.clone(),
         });
     };
+    // Chat is collapsed by default and only mounts its message-loading
+    // Resource when opened, so a board of 20 cards doesn't fire 20 queries.
+    let chat_open = RwSignal::new(false);
+    let chat_id = r.id.clone();
     let is_delivery = r.order_type == "delivery";
     let order_type_chip = if is_delivery {
         "🛵 LIEFERUNG"
@@ -385,7 +415,16 @@ fn Card(
                     disabled=move || reprinter.pending().get()>
                     "🖨 Erneut drucken"
                 </button>
+                <button class="btn ghost" on:click=move |_| chat_open.update(|o| *o = !*o)>
+                    "💬 Chat"
+                </button>
             </div>
+            {move || chat_open.get().then({
+                let chat_id = chat_id.clone();
+                move || view! {
+                    <crate::pages::order::StaffOrderChat order_id=chat_id.clone() compact=true/>
+                }
+            })}
         </li>
     }
 }

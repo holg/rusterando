@@ -173,13 +173,34 @@ server {
     ssl_certificate     /etc/letsencrypt/live/yourshop.example.com/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/yourshop.example.com/privkey.pem;
 
+    # Static site root (the rsync target — LEPTOS_SITE_ROOT). Used to serve
+    # the offline fallback when the app is briefly down during a restart.
+    root /var/www/yourshop.example.com/html;
+
     location / {
         proxy_pass http://127.0.0.1:3001;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+
+        # When the upstream is unreachable (the ~5 s restart window) or 5xx,
+        # serve the static offline page instead of a raw 502. The app writes
+        # `menu.pdf` + `menu-kompakt.pdf` into the site root at boot and after
+        # every menu/extras/branding edit, so the fallback page can link to a
+        # current menu even while the app is down.
+        proxy_intercept_errors on;
+        error_page 502 503 504 = @offline;
     }
+
+    # The offline page + the cached menu PDFs are plain static files served
+    # straight from disk, so they work precisely when the app does not.
+    location @offline {
+        rewrite ^ /offline.html break;
+    }
+    location = /offline.html { }
+    location = /menu.pdf { }
+    location = /menu-kompakt.pdf { }
 }
 
 server {
@@ -189,6 +210,11 @@ server {
     return 301 https://$host$request_uri;
 }
 ```
+
+> The `menu.pdf` / `menu-kompakt.pdf` cache files are (re)written by the app
+> into `LEPTOS_SITE_ROOT` at boot and after each menu/extras/branding edit, so
+> they survive an `rsync --delete` deploy only if the app has run once since;
+> the offline page degrades gracefully (still loads) if a PDF isn't there yet.
 
 ### 1.8 First admin login
 

@@ -179,7 +179,10 @@
         "title": "Заказ принят",
         "order_number": "Номер заказа",
         "estimated_pickup": "Готово примерно к",
-        "estimated_delivery": "Ожидаемая доставка"
+        "estimated_delivery": "Ожидаемая доставка",
+        "voucher": "Купон",
+        "reply_placeholder": "Ответить ресторану…",
+        "reply_send": "Отправить ответ"
     },
     "errors": {
         "page_not_found": "Страница не найдена.",

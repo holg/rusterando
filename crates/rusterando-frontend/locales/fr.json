@@ -179,7 +179,10 @@
         "title": "Commande reçue",
         "order_number": "Numéro de commande",
         "estimated_pickup": "Prêt aux environs de",
-        "estimated_delivery": "Livraison prévue"
+        "estimated_delivery": "Livraison prévue",
+        "voucher": "Bon",
+        "reply_placeholder": "Répondre au restaurant…",
+        "reply_send": "Envoyer la réponse"
     },
     "errors": {
         "page_not_found": "Page introuvable.",

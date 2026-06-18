@@ -7,9 +7,17 @@ use serde::{Deserialize, Serialize};
 use crate::pages::admin::shell::AdminShell;
 use crate::pages::order::status_label_de;
 
-/// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json)
+/// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
+///  removals_json)
 #[cfg(feature = "ssr")]
-type ItemSummaryRow = (Option<String>, String, i64, String, Option<String>);
+type ItemSummaryRow = (
+    Option<String>,
+    String,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdminOrderRow {
@@ -98,7 +106,8 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
     {
         // Items summary in one query per order — fine for a kitchen with <100 active orders.
         let items: Vec<ItemSummaryRow> = sqlx::query_as(
-            "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json
+            "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
+                    removals_json
              FROM order_items WHERE order_id = ?1 ORDER BY id",
         )
         .bind(&id)
@@ -106,9 +115,11 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
         .await
         .unwrap_or_default();
 
+        // Show extras (on the pizza) AND removals (off it) on each line so
+        // the admin board mirrors what kitchen + driver see.
         let items_summary = items
             .into_iter()
-            .map(|(num, n, q, opts, extras_json)| {
+            .map(|(num, n, q, opts, extras_json, removals_json)| {
                 let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
                 let variant = v.get("size_label").and_then(|x| x.as_str()).unwrap_or("");
                 let prefix = num
@@ -132,10 +143,25 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
                         format!(" + {labels}")
                     })
                     .unwrap_or_default();
+                let removals_label = removals_json
+                    .as_deref()
+                    .and_then(|j| {
+                        serde_json::from_str::<Vec<rusterando_shared::models::CartRemoval>>(j).ok()
+                    })
+                    .filter(|v| !v.is_empty())
+                    .map(|v| {
+                        let labels = v
+                            .into_iter()
+                            .map(|r| r.label)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(" ohne {labels}")
+                    })
+                    .unwrap_or_default();
                 if variant.is_empty() {
-                    format!("{q}× {prefix}{n}{extras_label}")
+                    format!("{q}× {prefix}{n}{extras_label}{removals_label}")
                 } else {
-                    format!("{q}× {prefix}{n} ({variant}){extras_label}")
+                    format!("{q}× {prefix}{n} ({variant}){extras_label}{removals_label}")
                 }
             })
             .collect::<Vec<_>>()
@@ -515,8 +541,13 @@ fn DetailCard(
         payment_method_detail,
         order_type,
         delivery_fee_cents,
+        voucher_code,
+        voucher_discount_cents,
         delivery_address,
         messages,
+        // Staff (admin/kitchen/driver) can always reply, so the VIP flag
+        // isn't needed to gate the box here — bind it out explicitly.
+        customer_is_vip: _,
     } = o;
 
     let status_label = status_label_de(&status).to_string();
@@ -661,6 +692,7 @@ fn DetailCard(
                 <tbody>
                     {items.into_iter().map(|it| {
                         let extras = it.extras.clone();
+                        let removals = it.removals.clone();
                         view! {
                             <tr>
                                 <td class="qty">{it.quantity} "×"</td>
@@ -682,6 +714,13 @@ fn DetailCard(
                                             }).collect_view()}
                                         </ul>
                                     })}
+                                    {(!removals.is_empty()).then(|| view! {
+                                        <ul class="extras removals">
+                                            {removals.into_iter().map(|r| {
+                                                view! { <li>"ohne " {r.label}</li> }
+                                            }).collect_view()}
+                                        </ul>
+                                    })}
                                 </td>
                                 <td class="amt">{format_eur(it.line_total_cents)}</td>
                             </tr>
@@ -689,17 +728,33 @@ fn DetailCard(
                     }).collect_view()}
                 </tbody>
                 <tfoot>
-                    {(delivery_fee_cents > 0).then(|| view! {
+                    {(delivery_fee_cents > 0 || voucher_discount_cents > 0).then(|| view! {
                         <tr>
                             <td></td>
                             <td class="muted">"Zwischensumme"</td>
                             <td class="amt">{format_eur(subtotal_cents)}</td>
                         </tr>
+                    })}
+                    {(delivery_fee_cents > 0).then(|| view! {
                         <tr>
                             <td></td>
                             <td class="muted">"Lieferzuschlag"</td>
                             <td class="amt">{format_eur(delivery_fee_cents)}</td>
                         </tr>
+                    })}
+                    {(voucher_discount_cents > 0).then(|| {
+                        let label = if voucher_code.is_empty() {
+                            "Gutschein".to_string()
+                        } else {
+                            format!("Gutschein {voucher_code}")
+                        };
+                        view! {
+                            <tr>
+                                <td></td>
+                                <td class="muted">{label}</td>
+                                <td class="amt">"−" {format_eur(voucher_discount_cents)}</td>
+                            </tr>
+                        }
                     })}
                     <tr>
                         <td></td>
@@ -741,20 +796,28 @@ fn DetailCard(
                 (!msgs.is_empty()).then(|| view! {
                     <ul class="message-log">
                         {msgs.into_iter().map(|m| {
-                            let ack = if m.delivered { "✓ Zugestellt" } else { "gesendet" };
-                            let ack_cls = if m.delivered { "ack delivered" } else { "ack pending" };
+                            let from_customer = m.is_customer();
+                            let li_cls = if from_customer { "from-customer" } else { "from-staff" };
+                            let who = m.sender_label_de();
+                            // Delivery ack only applies to staff→customer
+                            // messages; an inbound customer reply has no ack.
+                            let ack_line = (!from_customer).then(|| {
+                                let ack = if m.delivered { "✓ Zugestellt" } else { "gesendet" };
+                                let ack_cls = if m.delivered { "ack delivered" } else { "ack pending" };
+                                view! { <span class=ack_cls>" · " {ack}</span> }
+                            });
                             view! {
-                                <li>
-                                    <span class="ts">"🕒 " {m.created_at} " — "</span>
+                                <li class=li_cls>
+                                    <span class="ts">{who} " · 🕒 " {m.created_at} " — "</span>
                                     {m.body}
-                                    <span class=ack_cls>" · " {ack}</span>
+                                    {ack_line}
                                 </li>
                             }
                         }).collect_view()}
                     </ul>
                 })
             }}
-            <p class="hint">"Erscheint sofort live auf der Bestellseite der Kund:in (und bleibt nach dem Neuladen). \"✓ Zugestellt\" = im Browser der Kund:in angezeigt."</p>
+            <p class="hint">"Erscheint sofort live auf der Bestellseite der Kund:in (und bleibt nach dem Neuladen). \"✓ Zugestellt\" = im Browser der Kund:in angezeigt. VIP-Kund:innen können hier zurückschreiben (🙋 Kunde)."</p>
             <textarea rows="2" maxlength="500" placeholder="z. B. Deine Bestellung braucht 10 Min länger — danke für die Geduld!"
                 prop:value=move || msg_text.get()
                 on:input=move |ev| msg_text.set(event_target_value(&ev))></textarea>

@@ -179,7 +179,10 @@
         "title": "Encomenda recebida",
         "order_number": "Número da encomenda",
         "estimated_pickup": "Pronto por volta das",
-        "estimated_delivery": "Entrega prevista"
+        "estimated_delivery": "Entrega prevista",
+        "voucher": "Cupom",
+        "reply_placeholder": "Responder ao restaurante…",
+        "reply_send": "Enviar resposta"
     },
     "errors": {
         "page_not_found": "Página não encontrada.",

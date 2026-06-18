@@ -22,9 +22,17 @@ use crate::pages::order::{
     TourStopView, TourSummary,
 };
 
-/// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json)
+/// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
+///  removals_json)
 #[cfg(feature = "ssr")]
-type ItemSummaryRow = (Option<String>, String, i64, String, Option<String>);
+type ItemSummaryRow = (
+    Option<String>,
+    String,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+);
 
 /// Build map deep-links for one stop. Returns (apple_maps_url, google_maps_url).
 ///
@@ -133,7 +141,8 @@ pub async fn list_driver_orders() -> Result<DriverOrders, ServerFnError> {
     for (id, num, status, name, phone, scheduled, total, payment_status, addr_json, tour_id) in rows
     {
         let items: Vec<ItemSummaryRow> = sqlx::query_as(
-            "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json
+            "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
+                    removals_json
              FROM order_items
              WHERE order_id = ?1 ORDER BY id",
         )
@@ -142,9 +151,12 @@ pub async fn list_driver_orders() -> Result<DriverOrders, ServerFnError> {
         .await
         .unwrap_or_default();
 
+        // The driver needs to read off exactly what's ON the pizza (extras)
+        // and what's OFF it (removals) at the door, so both append to the
+        // item line: "… + Extra Käse ohne Pilze".
         let items_summary = items
             .into_iter()
-            .map(|(num, n, q, opts, extras_json)| {
+            .map(|(num, n, q, opts, extras_json, removals_json)| {
                 let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
                 let variant = v.get("size_label").and_then(|x| x.as_str()).unwrap_or("");
                 let prefix = num
@@ -168,10 +180,25 @@ pub async fn list_driver_orders() -> Result<DriverOrders, ServerFnError> {
                         format!(" + {labels}")
                     })
                     .unwrap_or_default();
+                let removals_label = removals_json
+                    .as_deref()
+                    .and_then(|j| {
+                        serde_json::from_str::<Vec<rusterando_shared::models::CartRemoval>>(j).ok()
+                    })
+                    .filter(|v| !v.is_empty())
+                    .map(|v| {
+                        let labels = v
+                            .into_iter()
+                            .map(|r| r.label)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(" ohne {labels}")
+                    })
+                    .unwrap_or_default();
                 if variant.is_empty() {
-                    format!("{q}× {prefix}{n}{extras_label}")
+                    format!("{q}× {prefix}{n}{extras_label}{removals_label}")
                 } else {
-                    format!("{q}× {prefix}{n} ({variant}){extras_label}")
+                    format!("{q}× {prefix}{n} ({variant}){extras_label}{removals_label}")
                 }
             })
             .collect::<Vec<_>>()
@@ -474,6 +501,8 @@ fn ReadyCard(
     let id_for_check = r.id.clone();
     let id_for_track = r.id.clone();
     let is_checked = Memo::new(move |_| selected.get().contains(&id_for_track));
+    let chat_open = RwSignal::new(false);
+    let chat_id = r.id.clone();
     let (apple_url, google_url) = map_links(&r.address_line, None, None);
     let tel_url = format!("tel:{}", r.contact_phone);
     let needs_cash = r.payment_status == "cash_on_pickup";
@@ -519,7 +548,16 @@ fn ReadyCard(
             <div class="row">
                 <a class="btn ghost" href=apple_url>"🗺 Apple"</a>
                 <a class="btn ghost" href=google_url>"🗺 Google"</a>
+                <button class="btn ghost" on:click=move |_| chat_open.update(|o| *o = !*o)>
+                    "💬 Chat"
+                </button>
             </div>
+            {move || chat_open.get().then({
+                let chat_id = chat_id.clone();
+                move || view! {
+                    <crate::pages::order::StaffOrderChat order_id=chat_id.clone() compact=true/>
+                }
+            })}
         </li>
     }
 }
@@ -655,6 +693,8 @@ fn TourStopRow(
     let tel_url = format!("tel:{}", s.contact_phone);
     let needs_cash = s.payment_status == "cash_on_pickup";
     let delivered = s.delivered_at.is_some();
+    let chat_open = RwSignal::new(false);
+    let chat_id = s.order_id.clone();
     let seq = s.sequence;
     let tid_for_done = tour_id.clone();
     let tid_for_revert = tour_id.clone();
@@ -718,7 +758,16 @@ fn TourStopRow(
                 {(!delivered).then(|| view! {
                     <button class="btn ghost" on:click=on_revert>"↩ Zurück"</button>
                 })}
+                <button class="btn ghost" on:click=move |_| chat_open.update(|o| *o = !*o)>
+                    "💬 Chat"
+                </button>
             </div>
+            {move || chat_open.get().then({
+                let chat_id = chat_id.clone();
+                move || view! {
+                    <crate::pages::order::StaffOrderChat order_id=chat_id.clone() compact=true/>
+                }
+            })}
         </li>
     }
 }

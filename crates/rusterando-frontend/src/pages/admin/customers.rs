@@ -34,6 +34,9 @@ pub struct CustomerRow {
     pub email: Option<String>,
     pub notes: Option<String>,
     pub blacklisted: bool,
+    /// VIP: may chat back on their order page (`/orders/{id}` shows a reply
+    /// box). Set per-customer here by the admin.
+    pub vip: bool,
     pub order_count: i64,
     pub total_cents: i64,
     /// Unix seconds; 0 means "never ordered yet" (signed-up via
@@ -104,6 +107,7 @@ pub async fn list_admin_customers() -> Result<Vec<CustomerRow>, ServerFnError> {
             c.email,
             c.notes,
             CASE WHEN c.blacklisted_at IS NULL THEN 0 ELSE 1 END AS blacklisted,
+            c.vip                                   AS vip,
             COALESCE(o.order_count, 0)              AS order_count,
             COALESCE(o.total_cents, 0)              AS total_cents,
             COALESCE(o.last_order_at_unix, 0)       AS last_order_at_unix,
@@ -136,6 +140,7 @@ pub async fn list_admin_customers() -> Result<Vec<CustomerRow>, ServerFnError> {
             email: r.get("email"),
             notes: r.get("notes"),
             blacklisted: r.get::<i64, _>("blacklisted") != 0,
+            vip: r.get::<i64, _>("vip") != 0,
             order_count: r.get("order_count"),
             total_cents: r.get("total_cents"),
             last_order_at_unix: r.get("last_order_at_unix"),
@@ -162,6 +167,7 @@ pub async fn get_admin_customer(id: String) -> Result<CustomerDetail, ServerFnEr
         "SELECT
             c.id, c.phone, c.name, c.email, c.notes,
             CASE WHEN c.blacklisted_at IS NULL THEN 0 ELSE 1 END AS blacklisted,
+            c.vip                                   AS vip,
             COALESCE(o.order_count, 0)              AS order_count,
             COALESCE(o.total_cents, 0)              AS total_cents,
             COALESCE(o.last_order_at_unix, 0)       AS last_order_at_unix,
@@ -190,6 +196,7 @@ pub async fn get_admin_customer(id: String) -> Result<CustomerDetail, ServerFnEr
         email: c.get("email"),
         notes: c.get("notes"),
         blacklisted: c.get::<i64, _>("blacklisted") != 0,
+        vip: c.get::<i64, _>("vip") != 0,
         order_count: c.get("order_count"),
         total_cents: c.get("total_cents"),
         last_order_at_unix: c.get("last_order_at_unix"),
@@ -353,6 +360,32 @@ pub async fn set_customer_blacklist(id: String, blacklisted: bool) -> Result<(),
     Ok(())
 }
 
+/// Toggle a customer's VIP flag by passing the desired state. Idempotent.
+/// A VIP customer's `/orders/{id}` page shows a reply box so they can chat
+/// back to the restaurant (`send_customer_message` re-checks this flag
+/// server-side). Non-VIP customers see the message log read-only.
+#[server(name = SetCustomerVip, prefix = "/api", endpoint = "set_customer_vip")]
+pub async fn set_customer_vip(id: String, vip: bool) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    sqlx::query(
+        "UPDATE customers
+         SET vip        = ?2,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?1",
+    )
+    .bind(&id)
+    .bind(i64::from(vip))
+    .execute(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("set vip: {e}")))?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Components
 // ---------------------------------------------------------------------------
@@ -370,8 +403,15 @@ enum SortCol {
 pub fn AdminCustomersPage() -> impl IntoView {
     let updater = ServerAction::<UpdateAdminCustomer>::new();
     let blacklister = ServerAction::<SetCustomerBlacklist>::new();
+    let vipper = ServerAction::<SetCustomerVip>::new();
     let customers = Resource::new(
-        move || (updater.version().get(), blacklister.version().get()),
+        move || {
+            (
+                updater.version().get(),
+                blacklister.version().get(),
+                vipper.version().get(),
+            )
+        },
         |_| async move { list_admin_customers().await },
     );
 
@@ -421,6 +461,7 @@ pub fn AdminCustomersPage() -> impl IntoView {
                                 sort_desc
                                 click_header=Callback::new(click_header)
                                 blacklister
+                                vipper
                             />
                         }.into_any(),
                     })}
@@ -438,6 +479,7 @@ fn CustomerTable(
     sort_desc: RwSignal<bool>,
     click_header: Callback<SortCol>,
     blacklister: ServerAction<SetCustomerBlacklist>,
+    vipper: ServerAction<SetCustomerVip>,
 ) -> impl IntoView {
     let rows_sv = StoredValue::new(rows);
 
@@ -533,7 +575,7 @@ fn CustomerTable(
                         }.into_any();
                     }
                     rows.iter().map(|r| view! {
-                        <CustomerRowView r=r.clone() blacklister/>
+                        <CustomerRowView r=r.clone() blacklister vipper/>
                     }).collect_view().into_any()
                 })}
             </tbody>
@@ -545,6 +587,7 @@ fn CustomerTable(
 fn CustomerRowView(
     r: CustomerRow,
     blacklister: ServerAction<SetCustomerBlacklist>,
+    vipper: ServerAction<SetCustomerVip>,
 ) -> impl IntoView {
     let detail_href = format!("/admin/customers/{}", r.id);
     let tel_href = format!("tel:{}", r.phone);
@@ -557,13 +600,24 @@ fn CustomerRowView(
             blacklisted: !blacklisted_now,
         });
     };
+    let id_for_vip = r.id.clone();
+    let vip_now = r.vip;
+    let toggle_vip = move |_| {
+        vipper.dispatch(SetCustomerVip {
+            id: id_for_vip.clone(),
+            vip: !vip_now,
+        });
+    };
 
     view! {
-        <tr class:blacklisted=blacklisted_now>
+        <tr class:blacklisted=blacklisted_now class:vip=vip_now>
             <td>
                 <a href=tel_href.clone()>{r.phone.clone()}</a>
                 {blacklisted_now.then(|| view! {
                     <span class="pill blacklist-pill">"BAR-SPERRE"</span>
+                })}
+                {vip_now.then(|| view! {
+                    <span class="pill vip-pill">"⭐ VIP"</span>
                 })}
             </td>
             <td>{r.name.clone().unwrap_or_default()}</td>
@@ -580,6 +634,9 @@ fn CustomerRowView(
             <td>{format_unix_short(r.last_seen_at_unix)}</td>
             <td class="row-actions">
                 <a class="btn ghost small" href=detail_href>"Details"</a>
+                <button class="btn ghost small" on:click=toggle_vip>
+                    {if vip_now { "VIP entfernen" } else { "Als VIP" }}
+                </button>
                 <button class="btn ghost small" on:click=toggle>
                     {if blacklisted_now { "Sperre aufheben" } else { "Bar sperren" }}
                 </button>
@@ -599,10 +656,18 @@ pub fn AdminCustomerDetailPage() -> impl IntoView {
 
     let updater = ServerAction::<UpdateAdminCustomer>::new();
     let blacklister = ServerAction::<SetCustomerBlacklist>::new();
+    let vipper = ServerAction::<SetCustomerVip>::new();
 
     let detail = Resource::new(
-        move || (id(), updater.version().get(), blacklister.version().get()),
-        |(id, _, _)| async move { get_admin_customer(id).await },
+        move || {
+            (
+                id(),
+                updater.version().get(),
+                blacklister.version().get(),
+                vipper.version().get(),
+            )
+        },
+        |(id, _, _, _)| async move { get_admin_customer(id).await },
     );
 
     view! {
@@ -617,7 +682,7 @@ pub fn AdminCustomerDetailPage() -> impl IntoView {
                             <p class="error">{format!("Fehler: {e}")}</p>
                         }.into_any(),
                         Ok(d) => view! {
-                            <CustomerDetailView d updater blacklister/>
+                            <CustomerDetailView d updater blacklister vipper/>
                         }.into_any(),
                     })}
                 </Suspense>
@@ -631,10 +696,13 @@ fn CustomerDetailView(
     d: CustomerDetail,
     updater: ServerAction<UpdateAdminCustomer>,
     blacklister: ServerAction<SetCustomerBlacklist>,
+    vipper: ServerAction<SetCustomerVip>,
 ) -> impl IntoView {
     let id_for_save = d.row.id.clone();
     let id_for_toggle = d.row.id.clone();
+    let id_for_vip = d.row.id.clone();
     let blacklisted_now = d.row.blacklisted;
+    let vip_now = d.row.vip;
 
     let name = RwSignal::new(d.row.name.clone().unwrap_or_default());
     let email = RwSignal::new(d.row.email.clone().unwrap_or_default());
@@ -652,6 +720,12 @@ fn CustomerDetailView(
         blacklister.dispatch(SetCustomerBlacklist {
             id: id_for_toggle.clone(),
             blacklisted: !blacklisted_now,
+        });
+    };
+    let on_toggle_vip = move |_| {
+        vipper.dispatch(SetCustomerVip {
+            id: id_for_vip.clone(),
+            vip: !vip_now,
         });
     };
 
@@ -706,6 +780,9 @@ fn CustomerDetailView(
             </label>
             <div class="row">
                 <button class="btn primary" on:click=on_save>"Speichern"</button>
+                <button class="btn ghost" on:click=on_toggle_vip>
+                    {if vip_now { "⭐ VIP entfernen" } else { "⭐ Als VIP markieren" }}
+                </button>
                 <button class="btn ghost danger" on:click=on_toggle_blacklist>
                     {if blacklisted_now { "Sperre aufheben" } else { "Für Bar/Abholung sperren" }}
                 </button>

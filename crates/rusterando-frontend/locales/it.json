@@ -179,7 +179,10 @@
         "title": "Ordine ricevuto",
         "order_number": "Numero d'ordine",
         "estimated_pickup": "Pronto verso le",
-        "estimated_delivery": "Consegna prevista"
+        "estimated_delivery": "Consegna prevista",
+        "voucher": "Buono",
+        "reply_placeholder": "Rispondi al ristorante…",
+        "reply_send": "Invia risposta"
     },
     "errors": {
         "page_not_found": "Pagina non trovata.",

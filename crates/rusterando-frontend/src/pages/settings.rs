@@ -365,6 +365,8 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
         // Branding feeds the Restaurant JSON-LD (name/phone/email/address/geo)
         // — rebuild the cache so structured data reflects the edit.
         crate::pages::seo::rebuild_jsonld_cache().await;
+        // Shop name/address/phone also print on the menu.pdf header/footer.
+        crate::pages::push::rebuild_menu_pdf_cache().await;
     }
     // Stripe mode flip is write-through too: the next checkout (and
     // the next webhook validation via the Active legacy route) sees

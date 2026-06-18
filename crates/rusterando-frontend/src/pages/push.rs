@@ -113,6 +113,49 @@ pub trait KitchenSink: Send + Sync {
 #[cfg(feature = "ssr")]
 pub type KitchenSinkHandle = Option<Arc<dyn KitchenSink>>;
 
+/// Trait the server crate implements so the frontend admin server fns can
+/// re-render the static `menu.pdf` (and its kompakt variant) into the nginx
+/// site root after a menu/extras/branding edit — without depending on
+/// rusterando-server (the PDF renderer + Typst live there).
+///
+/// nginx serves that file as the `error_page 502/503/504` fallback, so it
+/// must stay current: every edit that changes the printed menu triggers a
+/// rebuild. `None` for the handle on deploys without a static site root
+/// (local dev); callers guard with
+/// `if let Some(p) = use_context::<MenuPdfCacheHandle>().flatten()`.
+#[cfg(feature = "ssr")]
+#[async_trait::async_trait]
+pub trait MenuPdfCache: Send + Sync {
+    /// Render the current menu to disk (overwriting the cached static copy).
+    /// Best-effort: errors are logged by the impl, never surfaced to the
+    /// admin — a failed cache refresh must not fail the underlying edit.
+    async fn rebuild(&self, db: &sqlx::SqlitePool) -> anyhow::Result<()>;
+}
+
+#[cfg(feature = "ssr")]
+pub type MenuPdfCacheHandle = Option<Arc<dyn MenuPdfCache>>;
+
+/// Re-render the static `menu.pdf` cache. Call from any admin server fn after
+/// a write that changes the printed menu (menu items, categories, extras,
+/// branding, opening hours). Best-effort + no-op when the handle/db aren't in
+/// context (local dev, unit tests) — never fails the caller.
+#[cfg(feature = "ssr")]
+pub async fn rebuild_menu_pdf_cache() {
+    let (Some(db), Some(handle)) = (
+        use_context::<sqlx::SqlitePool>(),
+        use_context::<MenuPdfCacheHandle>().flatten(),
+    ) else {
+        return;
+    };
+    if let Err(e) = handle.rebuild(&db).await {
+        leptos::logging::error!("menu.pdf cache rebuild failed: {e}");
+    }
+}
+
+/// No-op so non-ssr server-fn stubs compile.
+#[cfg(not(feature = "ssr"))]
+pub async fn rebuild_menu_pdf_cache() {}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegisteredDevice {
     pub token: String,

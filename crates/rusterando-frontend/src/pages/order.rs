@@ -116,14 +116,29 @@ pub struct OrderDetail {
     pub order_type: String,
     #[serde(default)]
     pub delivery_fee_cents: i64,
+    /// Voucher code applied at order time, e.g. "WILLKOMMEN10". Empty when
+    /// no voucher. Shown on the discount line of every invoice surface so a
+    /// total that's far below the line-item sum reads as intentional.
+    #[serde(default)]
+    pub voucher_code: String,
+    /// Cents shaved off by the voucher; 0 when none. Total = subtotal +
+    /// delivery_fee − voucher_discount.
+    #[serde(default)]
+    pub voucher_discount_cents: i64,
     /// Parsed back from delivery_address_json. None for pickup.
     #[serde(default)]
     pub delivery_address: Option<DeliveryAddress>,
-    /// Timestamped log of restaurant→customer messages (admin-sent on
-    /// /admin/orders/{id}), oldest first. Shown chat-style on the
-    /// confirmation page; new ones also arrive live via SSE.
+    /// Timestamped log of the order's chat thread, oldest first. Staff
+    /// (admin/kitchen/driver) and — for VIP customers — the customer all
+    /// post here. Shown chat-style on the confirmation + staff views; new
+    /// ones also arrive live via SSE.
     #[serde(default)]
     pub messages: Vec<rusterando_shared::models::OrderMessage>,
+    /// True when this order's customer has the VIP flag — the public order
+    /// page then shows a reply box so they can chat back. Non-VIP customers
+    /// see the thread read-only.
+    #[serde(default)]
+    pub customer_is_vip: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -550,6 +565,8 @@ pub mod notify {
 /// (id, order_number, status, contact_name, contact_phone, contact_email,
 ///  scheduled_for, subtotal_cents, total_cents, created_at, payment_status,
 ///  order_type, delivery_fee_cents, delivery_address_json, payment_method_detail)
+/// (voucher_code / voucher_discount_cents are loaded by a separate small
+///  query — the 16-tuple `FromRow` ceiling is already reached here.)
 #[cfg(feature = "ssr")]
 type OrderRow = (
     String,
@@ -971,6 +988,10 @@ pub mod ssr {
                     rusterando_shared::models::OrderMessage {
                         id: msg_id,
                         body,
+                        // System status lines count as restaurant-side; the
+                        // INSERT omits `sender` so the column defaults to
+                        // 'admin' too — keep the broadcast consistent.
+                        sender: "admin".to_string(),
                         created_at: fmt_msg_time(&created_at),
                         delivered: false,
                     },
@@ -2858,11 +2879,35 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
         None => "ASAP".to_string(),
     };
 
+    // Voucher snapshot — separate query so the main row stays inside the
+    // 16-element `FromRow` tuple ceiling. COALESCE so a NULL (no voucher)
+    // reads as ("", 0).
+    let (voucher_code, voucher_discount_cents): (String, i64) = sqlx::query_as(
+        "SELECT COALESCE(voucher_code, ''), COALESCE(voucher_discount_cents, 0)
+         FROM orders WHERE id = ?1",
+    )
+    .bind(&id)
+    .fetch_one(&db)
+    .await
+    .unwrap_or_default();
+
     let delivery_address = row.13.as_deref().and_then(parse_delivery_address);
 
+    // Is the ordering customer a VIP? Resolve via the order's contact phone
+    // (the orders table snapshots the raw phone; customers are keyed by the
+    // lightly-normalised phone). COALESCE so "no matching customer" → false.
+    let customer_is_vip: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(vip), 0) FROM customers WHERE phone = ?1",
+    )
+    .bind(ssr::normalize_phone(&row.4))
+    .fetch_one(&db)
+    .await
+    .unwrap_or(0)
+        != 0;
+
     // Message log, oldest first, with local-formatted timestamps + ack.
-    let msg_rows = sqlx::query_as::<_, (i64, String, String, Option<String>)>(
-        "SELECT id, body, created_at, delivered_at FROM order_messages
+    let msg_rows = sqlx::query_as::<_, (i64, String, String, String, Option<String>)>(
+        "SELECT id, body, sender, created_at, delivered_at FROM order_messages
          WHERE order_id = ?1 ORDER BY created_at, id",
     )
     .bind(&id)
@@ -2871,14 +2916,15 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
     .unwrap_or_default();
     let messages = msg_rows
         .into_iter()
-        .map(
-            |(id, body, created_at, delivered_at)| rusterando_shared::models::OrderMessage {
+        .map(|(id, body, sender, created_at, delivered_at)| {
+            rusterando_shared::models::OrderMessage {
                 id,
                 body,
+                sender,
                 created_at: ssr::fmt_msg_time(&created_at),
                 delivered: delivered_at.is_some(),
-            },
-        )
+            }
+        })
         .collect();
 
     Ok(OrderDetail {
@@ -2897,20 +2943,26 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
         payment_method_detail: row.14,
         order_type: row.11,
         delivery_fee_cents: row.12,
+        voucher_code,
+        voucher_discount_cents,
         delivery_address,
         messages,
+        customer_is_vip,
     })
 }
 
-/// Admin sends a personal message to the customer for one order. Persists
-/// it on the order (so it survives a reload) and broadcasts it live over
-/// the SSE channel so the customer's open `/orders/{id}` page shows it
-/// immediately. Empty message clears it.
-#[server(name = SetOrderMessage, prefix = "/api", endpoint = "set_order_message")]
-pub async fn set_order_message(order_id: String, message: String) -> Result<(), ServerFnError> {
-    use sqlx::SqlitePool;
-
-    crate::pages::admin::require_admin().await?;
+/// Shared insert + live-broadcast for one chat message on an order. `sender`
+/// is "admin" | "kitchen" | "driver" | "customer" and is trusted (callers
+/// derive it from an authenticated role, or pin it to "customer" after the
+/// VIP check). Validates the body, guards order existence, persists, then
+/// pushes the entry live (delivered=false until the receiving browser acks).
+#[cfg(feature = "ssr")]
+async fn append_order_message(
+    db: &sqlx::SqlitePool,
+    order_id: &str,
+    sender: &str,
+    message: &str,
+) -> Result<(), ServerFnError> {
     let msg = message.trim();
     if msg.is_empty() {
         return Err(ServerFnError::new("Nachricht darf nicht leer sein."));
@@ -2920,13 +2972,11 @@ pub async fn set_order_message(order_id: String, message: String) -> Result<(), 
             "Nachricht darf höchstens 500 Zeichen lang sein.",
         ));
     }
-    let db = use_context::<SqlitePool>()
-        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
     // Order must exist (FK isn't enforced on this table; guard explicitly).
     let exists: Option<(i64,)> = sqlx::query_as("SELECT 1 FROM orders WHERE id = ?1")
-        .bind(&order_id)
-        .fetch_optional(&db)
+        .bind(order_id)
+        .fetch_optional(db)
         .await
         .map_err(|e| ServerFnError::new(format!("check order: {e}")))?;
     if exists.is_none() {
@@ -2935,24 +2985,25 @@ pub async fn set_order_message(order_id: String, message: String) -> Result<(), 
 
     // Append to the log and read back the id + server timestamp.
     let (msg_id, created_at): (i64, String) = sqlx::query_as(
-        "INSERT INTO order_messages (order_id, body) VALUES (?1, ?2)
+        "INSERT INTO order_messages (order_id, body, sender) VALUES (?1, ?2, ?3)
          RETURNING id, created_at",
     )
-    .bind(&order_id)
+    .bind(order_id)
     .bind(msg)
-    .fetch_one(&db)
+    .bind(sender)
+    .fetch_one(db)
     .await
     .map_err(|e| ServerFnError::new(format!("insert order message: {e}")))?;
 
-    // Push the new entry to the customer's open page (delivered=false until
-    // their browser acks it).
+    // Push the new entry to every open page on this order (staff + customer).
     if let Some(hub) = use_context::<crate::live::LiveHub>() {
         hub.send(rusterando_shared::models::LiveEvent {
-            order_id: order_id.clone(),
+            order_id: order_id.to_string(),
             kind: rusterando_shared::models::LiveKind::Message(
                 rusterando_shared::models::OrderMessage {
                     id: msg_id,
                     body: msg.to_string(),
+                    sender: sender.to_string(),
                     created_at: ssr::fmt_msg_time(&created_at),
                     delivered: false,
                 },
@@ -2960,10 +3011,74 @@ pub async fn set_order_message(order_id: String, message: String) -> Result<(), 
         });
     }
     log::info!(
-        "[orders] admin message appended to order {order_id} ({} chars)",
+        "[orders] {sender} message appended to order {order_id} ({} chars)",
         msg.chars().count()
     );
     Ok(())
+}
+
+/// Staff sends a chat message on an order. Admin, Kitchen and Driver may all
+/// post; the caller's role is recorded as the `sender` so the thread shows
+/// who wrote it. Persists + broadcasts live to the customer's open page.
+#[server(name = SetOrderMessage, prefix = "/api", endpoint = "set_order_message")]
+pub async fn set_order_message(order_id: String, message: String) -> Result<(), ServerFnError> {
+    use crate::pages::session::Role;
+    use sqlx::SqlitePool;
+
+    // Admin/Kitchen/Driver are all allowed; require_any returns the concrete
+    // role so we can attribute the message to it.
+    let role = crate::pages::session::ssr::require_any(&[Role::Admin, Role::Kitchen, Role::Driver])
+        .await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    append_order_message(&db, &order_id, role.as_str(), &message).await
+}
+
+/// VIP customer replies on their own order page. No staff auth — the order id
+/// is the capability (same trust model as the public `/orders/{id}` page) —
+/// but the order's customer MUST carry the VIP flag, else the reply is
+/// rejected. Recorded with sender="customer".
+#[server(
+    name = SendCustomerMessage,
+    prefix = "/api",
+    endpoint = "send_customer_message"
+)]
+pub async fn send_customer_message(order_id: String, message: String) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    // Gate on VIP: resolve the order's contact phone → customers.vip. A
+    // non-VIP (or unknown) customer can't post. This is the server-side
+    // enforcement; the UI also hides the box, but never trust the client.
+    //
+    // `orders.contact_phone` is the RAW phone; `customers.phone` is the
+    // normalised key. Look up the order's phone, normalise it, then match —
+    // mirrors how `get_order` resolves the VIP flag.
+    let order_phone: Option<String> =
+        sqlx::query_scalar("SELECT contact_phone FROM orders WHERE id = ?1")
+            .bind(&order_id)
+            .fetch_optional(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("load order phone: {e}")))?;
+    let Some(order_phone) = order_phone else {
+        return Err(ServerFnError::new("Bestellung nicht gefunden."));
+    };
+    let is_vip: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(vip), 0) FROM customers WHERE phone = ?1")
+            .bind(ssr::normalize_phone(&order_phone))
+            .fetch_one(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("vip check: {e}")))?;
+    if is_vip == 0 {
+        return Err(ServerFnError::new(
+            "Antworten ist für diese Bestellung nicht freigeschaltet.",
+        ));
+    }
+
+    append_order_message(&db, &order_id, "customer", &message).await
 }
 
 /// Delivery ack from the customer's browser: it calls this once it has
@@ -3000,6 +3115,144 @@ pub async fn ack_order_message(order_id: String, message_id: i64) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// Load an order's chat thread (oldest first) by order id. Staff-only —
+/// Admin/Kitchen/Driver. Used by the reusable `StaffOrderChat` component so
+/// the kitchen + driver boards can show and join the conversation without
+/// loading the whole `OrderDetail`.
+#[server(name = ListOrderMessages, prefix = "/api", endpoint = "list_order_messages")]
+pub async fn list_order_messages(
+    order_id: String,
+) -> Result<Vec<rusterando_shared::models::OrderMessage>, ServerFnError> {
+    use crate::pages::session::Role;
+    use sqlx::SqlitePool;
+
+    crate::pages::session::ssr::require_any(&[Role::Admin, Role::Kitchen, Role::Driver]).await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let rows = sqlx::query_as::<_, (i64, String, String, String, Option<String>)>(
+        "SELECT id, body, sender, created_at, delivered_at FROM order_messages
+         WHERE order_id = ?1 ORDER BY created_at, id",
+    )
+    .bind(&order_id)
+    .fetch_all(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load messages: {e}")))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, body, sender, created_at, delivered_at)| {
+            rusterando_shared::models::OrderMessage {
+                id,
+                body,
+                sender,
+                created_at: ssr::fmt_msg_time(&created_at),
+                delivered: delivered_at.is_some(),
+            }
+        })
+        .collect())
+}
+
+/// Reusable staff-side chat for one order: the message log + a reply box.
+/// Mounted on the admin detail, kitchen board card, and driver board card so
+/// all three roles share one thread (each reply attributed to its role via
+/// the server). Fetches its own messages by `order_id`, subscribes to the
+/// live stream for in-place updates, and posts via `SetOrderMessage` (which
+/// records the caller's role). `compact` trims the chrome for board cards.
+#[component]
+pub fn StaffOrderChat(order_id: String, #[prop(optional)] compact: bool) -> impl IntoView {
+    let history: RwSignal<Vec<rusterando_shared::models::OrderMessage>> = RwSignal::new(Vec::new());
+
+    // Seed from the server, then keep live. The Resource runs on mount (and
+    // is the SSR-rendered initial state); subscribe_order_live then mutates
+    // the signal in place as new messages/acks arrive.
+    let loader = Resource::new(
+        {
+            let oid = order_id.clone();
+            move || oid.clone()
+        },
+        |oid| async move { list_order_messages(oid).await.unwrap_or_default() },
+    );
+    Effect::new(move |_| {
+        if let Some(msgs) = loader.get() {
+            // Only overwrite if we haven't already accumulated live messages
+            // beyond what the loader returned (avoid clobbering a just-sent
+            // reply that arrived via SSE first).
+            if history.get_untracked().len() <= msgs.len() {
+                history.set(msgs);
+            }
+        }
+    });
+
+    let (_st, set_st) = signal(None::<String>);
+    // Staff side: don't send delivery acks (that's the customer's job) and no
+    // OS notifications.
+    crate::utils::subscribe_order_live(order_id.clone(), history, set_st, false, false);
+
+    let sender = ServerAction::<SetOrderMessage>::new();
+    let text = RwSignal::new(String::new());
+    let oid_send = StoredValue::new(order_id.clone());
+    let on_send = move |_| {
+        let body = text.get();
+        if body.trim().is_empty() {
+            return;
+        }
+        sender.dispatch(SetOrderMessage {
+            order_id: oid_send.get_value(),
+            message: body,
+        });
+        text.set(String::new());
+    };
+    // Re-pull after a successful send so the freshly-stored row (with its
+    // server id + timestamp) is reflected even if the SSE event is missed.
+    Effect::new(move |_| {
+        if let Some(Ok(())) = sender.value().get() {
+            loader.refetch();
+        }
+    });
+
+    let wrap_cls = if compact {
+        "order-chat compact"
+    } else {
+        "order-chat"
+    };
+    view! {
+        <div class=wrap_cls>
+            {move || {
+                let msgs = history.get();
+                (!msgs.is_empty()).then(|| view! {
+                    <ul class="message-log">
+                        {msgs.into_iter().map(|m| {
+                            let from_customer = m.is_customer();
+                            let li_cls = if from_customer { "from-customer" } else { "from-staff" };
+                            let who = m.sender_label_de();
+                            view! {
+                                <li class=li_cls>
+                                    <span class="ts">{who} " · " {m.created_at} " — "</span>
+                                    {m.body}
+                                </li>
+                            }
+                        }).collect_view()}
+                    </ul>
+                })
+            }}
+            <div class="reply-box">
+                <textarea rows="2" maxlength="500"
+                    placeholder="Nachricht an Kund:in…"
+                    prop:value=move || text.get()
+                    on:input=move |ev| text.set(event_target_value(&ev))></textarea>
+                <div class="row">
+                    <button class="btn primary small" on:click=on_send>"Senden"</button>
+                    {move || sender.value().get().map(|res| match res {
+                        Ok(_) => view! { <span class="ok">"✓"</span> }.into_any(),
+                        Err(e) => view! { <span class="error">{format!("{e}")}</span> }.into_any(),
+                    })}
+                </div>
+            </div>
+        </div>
+    }
 }
 
 /// Phase 1 — phone recall. Looks up a customer by exact phone match and
@@ -4286,6 +4539,27 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
     } else {
         crate::t!("order_confirm.pickup_chip")
     };
+
+    // VIP reply box. Only shown when the customer carries the VIP flag; the
+    // server re-checks on submit, so hiding it is convenience, not security.
+    // The order id lives in a StoredValue so the click handler stays `Copy`
+    // (it's nested in a reactive block, which requires FnMut/Copy).
+    let is_vip = o.customer_is_vip;
+    let reply_oid = StoredValue::new(o.id.clone());
+    let reply_text = RwSignal::new(String::new());
+    let replier = ServerAction::<SendCustomerMessage>::new();
+    let on_send_reply = move |_| {
+        let body = reply_text.get();
+        if body.trim().is_empty() {
+            return;
+        }
+        replier.dispatch(SendCustomerMessage {
+            order_id: reply_oid.get_value(),
+            message: body,
+        });
+        reply_text.set(String::new());
+    };
+
     view! {
         <div class="confirm-card">
             <h1>{crate::t!("order_confirm.thanks")}</h1>
@@ -4303,19 +4577,47 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
             // post-hydration only if permission is still undecided.
             <NotifyOptIn/>
 
-            // Live message log from the restaurant (admin-sent), chat-style
-            // oldest→newest. New messages append via SSE; the list persists
-            // across reloads (seeded from the DB). Hidden when empty.
+            // Live chat thread, oldest→newest. Restaurant (admin/kitchen/
+            // driver) + the customer's own replies all appear here; the sender
+            // label distinguishes them. New messages append via SSE; the list
+            // persists across reloads (seeded from the DB). The whole block is
+            // shown when there are messages OR the customer may reply (VIP).
             {move || {
                 let msgs = messages.get();
-                (!msgs.is_empty()).then(|| view! {
+                (!msgs.is_empty() || is_vip).then(|| view! {
                     <div class="restaurant-message" role="status">
                         <strong>{crate::t!("order_confirm.messages_heading")}</strong>
                         <ul class="message-log">
-                            {msgs.into_iter().map(|m| view! {
-                                <li><span class="ts">"🕒 " {m.created_at} " — "</span>{m.body}</li>
+                            {msgs.into_iter().map(|m| {
+                                let mine = m.is_customer();
+                                let li_cls = if mine { "from-customer" } else { "from-staff" };
+                                let who = m.sender_label_de();
+                                view! {
+                                    <li class=li_cls>
+                                        <span class="ts">{who} " · 🕒 " {m.created_at} " — "</span>
+                                        {m.body}
+                                    </li>
+                                }
                             }).collect_view()}
                         </ul>
+                        // VIP customers can reply right here. Non-VIP: no box.
+                        {is_vip.then(|| view! {
+                            <div class="reply-box">
+                                <textarea rows="2" maxlength="500"
+                                    placeholder=crate::t!("order_confirm.reply_placeholder")
+                                    prop:value=move || reply_text.get()
+                                    on:input=move |ev| reply_text.set(event_target_value(&ev))></textarea>
+                                <div class="row">
+                                    <button class="btn primary" on:click=on_send_reply>
+                                        {crate::t!("order_confirm.reply_send")}
+                                    </button>
+                                    {move || replier.value().get().map(|res| match res {
+                                        Ok(_) => view! { <span class="ok">"✓"</span> }.into_any(),
+                                        Err(e) => view! { <span class="error">{format!("{e}")}</span> }.into_any(),
+                                    })}
+                                </div>
+                            </div>
+                        })}
                     </div>
                 })
             }}
@@ -4381,9 +4683,21 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                 }).collect_view()}
             </ul>
 
-            {(o.delivery_fee_cents > 0).then(|| view! {
+            {(o.delivery_fee_cents > 0 || o.voucher_discount_cents > 0).then(|| view! {
                 <p class="meta-row">{crate::t!("order_confirm.subtotal")} ": " <strong>{format_eur(o.subtotal_cents)}</strong></p>
-                <p class="meta-row">{crate::t!("order_confirm.delivery_fee")} ": " <strong>{format_eur(o.delivery_fee_cents)}</strong></p>
+                {(o.delivery_fee_cents > 0).then(|| view! {
+                    <p class="meta-row">{crate::t!("order_confirm.delivery_fee")} ": " <strong>{format_eur(o.delivery_fee_cents)}</strong></p>
+                })}
+            })}
+            {(o.voucher_discount_cents > 0).then(|| {
+                let code = o.voucher_code.clone();
+                view! {
+                    <p class="meta-row voucher-line">
+                        {crate::t!("order_confirm.voucher")}
+                        {(!code.is_empty()).then(|| view! { " " {code} })}
+                        ": " <strong>"−" {format_eur(o.voucher_discount_cents)}</strong>
+                    </p>
+                }
             })}
             <p class="grand-total">{crate::t!("order_confirm.grand_total")} ": " <strong>{format_eur(o.total_cents)}</strong></p>
             <p class="hint">
@@ -5018,6 +5332,39 @@ fn Form(
                     }}
                 </fieldset>
 
+                // Contact FIRST — the phone number drives the recall autofill
+                // (name, email, saved delivery address). Placing it ahead of
+                // the address block lets a returning customer type their number
+                // and have the address pre-filled instead of re-typing it.
+                <fieldset>
+                    <legend>{crate::t!("checkout.contact")}</legend>
+                    {move || recognised.get().then(|| view! {
+                        <p class="hint welcome-back">
+                            {format!("👋 {}", crate::t!("checkout.welcome_back"))}
+                        </p>
+                    })}
+                    <label>
+                        <span>{crate::t!("checkout.phone")}</span>
+                        <input type="tel" name="phone" required autocomplete="tel"
+                               placeholder=crate::t!("checkout.phone_placeholder")
+                               prop:value=move || phone_sig.get()
+                               on:input=move |ev| phone_sig.set(event_target_value(&ev))/>
+                    </label>
+                    <label>
+                        <span>{crate::t!("checkout.name")}</span>
+                        <input type="text" name="name" required autocomplete="name"
+                               prop:value=move || name_sig.get()
+                               on:input=move |ev| name_sig.set(event_target_value(&ev))/>
+                    </label>
+                    <label>
+                        <span>{crate::t!("checkout.email")}</span>
+                        <input type="email" name="email" required autocomplete="email"
+                               placeholder=crate::t!("checkout.email_placeholder")
+                               prop:value=move || email_sig.get()
+                               on:input=move |ev| email_sig.set(event_target_value(&ev))/>
+                    </label>
+                </fieldset>
+
                 <Show when=move || is_delivery.get() fallback=|| ()>
                     <fieldset>
                         <legend>{crate::t!("checkout.delivery_address")}</legend>
@@ -5155,35 +5502,6 @@ fn Form(
                         }}
                     </fieldset>
                 </Show>
-
-                <fieldset>
-                    <legend>{crate::t!("checkout.contact")}</legend>
-                    {move || recognised.get().then(|| view! {
-                        <p class="hint welcome-back">
-                            {format!("👋 {}", crate::t!("checkout.welcome_back"))}
-                        </p>
-                    })}
-                    <label>
-                        <span>{crate::t!("checkout.phone")}</span>
-                        <input type="tel" name="phone" required autocomplete="tel"
-                               placeholder=crate::t!("checkout.phone_placeholder")
-                               prop:value=move || phone_sig.get()
-                               on:input=move |ev| phone_sig.set(event_target_value(&ev))/>
-                    </label>
-                    <label>
-                        <span>{crate::t!("checkout.name")}</span>
-                        <input type="text" name="name" required autocomplete="name"
-                               prop:value=move || name_sig.get()
-                               on:input=move |ev| name_sig.set(event_target_value(&ev))/>
-                    </label>
-                    <label>
-                        <span>{crate::t!("checkout.email")}</span>
-                        <input type="email" name="email" required autocomplete="email"
-                               placeholder=crate::t!("checkout.email_placeholder")
-                               prop:value=move || email_sig.get()
-                               on:input=move |ev| email_sig.set(event_target_value(&ev))/>
-                    </label>
-                </fieldset>
 
                 <fieldset>
                     <legend>{move || if is_delivery.get() { crate::t!("checkout.delivery_time") } else { crate::t!("checkout.pickup_time") }}</legend>

@@ -776,6 +776,73 @@ pub async fn build_menu_pdf(
 }
 
 // ---------------------------------------------------------------------------
+// Static menu.pdf cache — the nginx `error_page 502/503/504` fallback. Served
+// straight from the site root while the app is briefly down during a restart,
+// and linked from the offline page, so customers always see the current menu.
+// Re-rendered at boot + after every menu/extras/branding edit.
+// ---------------------------------------------------------------------------
+
+/// Render the default tri-fold (full, with ingredients) menu to
+/// `<site_root>/menu.pdf` and the condensed in-house variant to
+/// `<site_root>/menu-kompakt.pdf`, atomically (write a temp file then rename
+/// so nginx never serves a half-written PDF). Best-effort: returns the first
+/// error but always attempts both.
+pub async fn write_menu_pdf_cache(
+    db: &SqlitePool,
+    site_root: &str,
+    uploads_dir: &str,
+    site_url: String,
+    shop_branding: &rusterando_frontend::branding::Branding,
+) -> anyhow::Result<()> {
+    for (file, show_ingredients) in [("menu.pdf", true), ("menu-kompakt.pdf", false)] {
+        let bytes = build_menu_pdf(
+            db,
+            site_url.clone(),
+            shop_branding,
+            uploads_dir,
+            "trifold",
+            show_ingredients,
+        )
+        .await?;
+        let dst = std::path::Path::new(site_root).join(file);
+        let tmp = std::path::Path::new(site_root).join(format!(".{file}.tmp"));
+        tokio::fs::write(&tmp, &bytes).await?;
+        tokio::fs::rename(&tmp, &dst).await?;
+        tracing::info!(
+            "wrote static menu cache {} ({} bytes)",
+            dst.display(),
+            bytes.len()
+        );
+    }
+    Ok(())
+}
+
+/// Concrete `MenuPdfCache` so frontend admin server fns can refresh the static
+/// cache after an edit without depending on this crate. Holds everything the
+/// renderer needs except the `db` (passed per-call). Registered into Leptos
+/// context in `main.rs`.
+pub struct MenuPdfCacheImpl {
+    pub site_root: String,
+    pub uploads_dir: String,
+    pub site_url: String,
+    pub branding: rusterando_frontend::branding::BrandingHandle,
+}
+
+#[async_trait::async_trait]
+impl rusterando_frontend::pages::push::MenuPdfCache for MenuPdfCacheImpl {
+    async fn rebuild(&self, db: &SqlitePool) -> anyhow::Result<()> {
+        write_menu_pdf_cache(
+            db,
+            &self.site_root,
+            &self.uploads_dir,
+            self.site_url.clone(),
+            &self.branding.get(),
+        )
+        .await
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Boot-time seed: ensure the PDF cover + theme libraries have at least
 // one row on first run, so a fresh deployment doesn't show the admin
 // an empty switcher. Called from main.rs right after migrations.

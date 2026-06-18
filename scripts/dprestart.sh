@@ -8,12 +8,13 @@
 #   2. Snapshots the current pid + uptime so we can show the change.
 #   3. Confirms with a y/N prompt unless --yes is passed.
 #   4. `systemctl restart` — which sends SIGTERM. The binary's signal
-#      handler (main.rs, added 2026-05-31) catches it, drains
-#      in-flight HTTP requests for 5 s, closes the sqlite pool
-#      cleanly (WAL flush), then exits 0. systemd starts a fresh
-#      process immediately. Customer-visible window: ~5-10 s
-#      where new requests get 502 from nginx; existing requests
-#      complete.
+#      handler (main.rs) catches it, closes the long-lived SSE streams
+#      immediately, drains in-flight HTTP requests under a hard 5 s cap,
+#      closes the sqlite pool cleanly (WAL flush), then exits 0. The fresh
+#      process retries its bind for up to 8 s, so it slots in the instant
+#      the port frees (no systemd restart bounce). Customer-visible 502
+#      window: ~5 s (was >60 s before the SSE streams were taught to close
+#      on SIGTERM — they used to pin the old process open until SIGKILL).
 #   5. Polls `systemctl is-active` for up to 30 s, then a curl on
 #      /api/healthz to confirm the new process is actually serving
 #      requests (not just "active" per systemd's view).

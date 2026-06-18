@@ -208,7 +208,10 @@
         "payment_hint_paid": "Zahlung bestätigt. Bestellung ist in der Küche.",
         "payment_hint_pending": "Zahlung wird verarbeitet — diese Seite aktualisiert sich, sobald die Bestätigung da ist.",
         "payment_hint_failed": "Zahlung fehlgeschlagen. Bitte erneut versuchen.",
-        "payment_hint_failed_phone": "Zahlung fehlgeschlagen. Bitte erneut versuchen oder telefonisch bestellen: {phone}."
+        "payment_hint_failed_phone": "Zahlung fehlgeschlagen. Bitte erneut versuchen oder telefonisch bestellen: {phone}.",
+        "voucher": "Gutschein",
+        "reply_placeholder": "Antwort an das Restaurant…",
+        "reply_send": "Antwort senden"
     },
     "status": {
         "pending_payment": "Zahlung ausstehend",

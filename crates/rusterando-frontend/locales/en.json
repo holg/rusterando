@@ -208,7 +208,10 @@
         "payment_hint_paid": "Payment confirmed. Order is in the kitchen.",
         "payment_hint_pending": "Payment processing — this page will refresh as soon as confirmation arrives.",
         "payment_hint_failed": "Payment failed. Please try again.",
-        "payment_hint_failed_phone": "Payment failed. Please try again or call us: {phone}."
+        "payment_hint_failed_phone": "Payment failed. Please try again or call us: {phone}.",
+        "voucher": "Voucher",
+        "reply_placeholder": "Reply to the restaurant…",
+        "reply_send": "Send reply"
     },
     "status": {
         "pending_payment": "Payment pending",
