@@ -111,6 +111,22 @@ fn tenant_from_context() -> Option<rusterando_server::tenant::Tenant> {
     })
 }
 
+/// Build the frontend's `ResolvedTenant` context value from the per-request
+/// tenant (its real slug + env file + DB), for the admin diagnostics panel.
+/// Empty when no tenant resolved (apex / single-tenant — the panel falls back
+/// to the boot snapshot then).
+fn resolved_tenant_ctx(
+    tenant: Option<&rusterando_server::tenant::Tenant>,
+) -> rusterando_frontend::pages::settings::ResolvedTenant {
+    tenant
+        .map(|t| rusterando_frontend::pages::settings::ResolvedTenant {
+            slug: t.slug.clone(),
+            env_file: t.env_file.clone(),
+            database_url: t.database_url.clone(),
+        })
+        .unwrap_or_default()
+}
+
 /// Load the dotenv file, honouring an `ENV_FILE` override so a single
 /// checkout can run any tenant/profile without symlinking or sourcing:
 ///
@@ -123,16 +139,51 @@ fn tenant_from_context() -> Option<rusterando_server::tenant::Tenant> {
 fn load_env() {
     match std::env::var("ENV_FILE") {
         Ok(path) if !path.is_empty() => {
-            // Explicit operator request — fail loud. dotenvy aborts the
-            // file on the first malformed line, so a silent miss would
-            // boot the server on half-loaded config (wrong DB/defaults).
-            dotenvy::from_filename(&path).unwrap_or_else(|e| {
+            // Explicit operator request — this file is AUTHORITATIVE, so use
+            // the OVERRIDE loader: its values win over anything already in the
+            // process env. This matters under `cargo leptos watch`, which
+            // sources the project `.env` itself and injects those vars (e.g.
+            // `LEPTOS_OUTPUT_NAME=davidspizzeria`) into the spawned server —
+            // without override, `ENV_FILE=.env.rusterando` would silently keep
+            // davidspizzeria's bundle name and the page would 404 on the wrong
+            // /pkg/<name>.js.
+            //
+            // BUT a few `LEPTOS_*` vars are owned by the cargo-leptos harness,
+            // NOT the tenant: the bind address + reload port + site root are
+            // how `watch` and the server agree on where to listen and find
+            // assets. If the tenant `.env` overrode `LEPTOS_SITE_ADDR`, the
+            // server would bind a different port than cargo-leptos expects and
+            // the page would never load. So we SNAPSHOT those harness vars
+            // before the override and restore them after. Fail loud on a
+            // malformed file.
+            const HARNESS_VARS: &[&str] = &[
+                "LEPTOS_SITE_ADDR",
+                "LEPTOS_RELOAD_PORT",
+                "LEPTOS_SITE_ROOT",
+                "LEPTOS_SITE_PKG_DIR",
+            ];
+            let preserved: Vec<(&str, Option<String>)> = HARNESS_VARS
+                .iter()
+                .map(|k| (*k, std::env::var(k).ok()))
+                .collect();
+
+            dotenvy::from_filename_override(&path).unwrap_or_else(|e| {
                 panic!("ENV_FILE={path} could not be loaded: {e}");
             });
+
+            // Restore any harness var cargo-leptos had set (so its value wins
+            // over the tenant `.env`). If it wasn't set in the environment,
+            // leave whatever the `.env` provided.
+            for (k, v) in preserved {
+                if let Some(v) = v {
+                    std::env::set_var(k, v);
+                }
+            }
         }
         _ => {
             // Default: best-effort `.env` (absent is fine for prod where
-            // the systemd unit injects the environment directly).
+            // the systemd unit injects the environment directly). Non-override
+            // so an explicit `KEY=… cargo …` on the command line still wins.
             let _ = dotenvy::dotenv();
         }
     }
@@ -606,6 +657,9 @@ async fn main() {
                     // so logins check the RIGHT tenant's password. Default
                     // (empty) on the apex fallback → login fns fall back to env.
                     provide_context(tenant.as_ref().map(|t| t.auth.clone()).unwrap_or_default());
+                    // Per-request resolved tenant identity for the admin
+                    // diagnostics panel (which tenant/env/DB this request hit).
+                    provide_context(resolved_tenant_ctx(tenant.as_ref()));
                     provide_context(notifier.clone());
                     provide_context(apns.clone());
                     provide_context(sink.clone());
@@ -2374,6 +2428,8 @@ async fn server_fn_handler(
                 // Per-tenant auth (admin/kitchen/driver passwords) — the login
                 // server fns read this so each tenant checks its OWN password.
                 provide_context(tenant.as_ref().map(|t| t.auth.clone()).unwrap_or_default());
+                // Per-request resolved tenant identity (deployment_info panel).
+                provide_context(resolved_tenant_ctx(tenant.as_ref()));
                 provide_context(notifier.clone());
                 provide_context(apns.clone());
                 provide_context(sink.clone());

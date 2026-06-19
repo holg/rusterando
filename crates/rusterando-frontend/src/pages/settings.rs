@@ -140,6 +140,28 @@ pub struct DeploymentInfo {
     /// The nginx-supplied `X-Tenant` subdomain label for THIS request, if
     /// present (multi-tenant routing). Empty in single-tenant deploys.
     pub subdomain: String,
+    /// The tenant THIS request actually resolved to (multi-tenant): slug, the
+    /// REAL env filename it was loaded from, and its DATABASE_URL. Empty on the
+    /// apex / single-tenant (use `tenant_slug`/`database_url` then).
+    #[serde(default)]
+    pub resolved_slug: String,
+    #[serde(default)]
+    pub resolved_env_file: String,
+    #[serde(default)]
+    pub resolved_db: String,
+}
+
+/// The per-request resolved tenant identity (slug + real env file + DB),
+/// provided into context by the server's tenant router so the diagnostics
+/// server fn can report WHICH tenant this request hit — without the frontend
+/// crate depending on the server crate's `Tenant` type. Empty/None on the
+/// apex or single-tenant.
+#[cfg(feature = "ssr")]
+#[derive(Clone, Default)]
+pub struct ResolvedTenant {
+    pub slug: String,
+    pub env_file: String,
+    pub database_url: String,
 }
 
 /// Boot-time deployment snapshot, provided into server-fn context so the
@@ -267,6 +289,15 @@ pub async fn deployment_info() -> Result<DeploymentInfo, ServerFnError> {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
+    }
+
+    // The tenant THIS request resolved to (its real env file + DB), provided by
+    // the tenant router. This is what makes the panel show flizza's details on
+    // flizza's admin, not the boot/global snapshot.
+    if let Some(rt) = use_context::<ResolvedTenant>() {
+        info.resolved_slug = rt.slug;
+        info.resolved_env_file = rt.env_file;
+        info.resolved_db = rt.database_url;
     }
 
     Ok(info)

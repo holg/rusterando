@@ -143,6 +143,11 @@ pub fn AdminHomePage() -> impl IntoView {
                     </header>
                     <crate::pages::admin::printer_admin::ReceiptPreviewPane/>
                 </div>
+
+                // Deployment / tenant diagnostics at the bottom of the overview
+                // — which shop/env/DB this admin session is editing, plus the
+                // process mode. Same panel as /admin/settings.
+                <crate::pages::admin::settings_admin::DeploymentPanel/>
             </section>
         </AdminShell>
     }

@@ -81,13 +81,13 @@ pub fn SettingsAdminPage() -> impl IntoView {
     }
 }
 
-/// Read-only deployment / tenancy diagnostics, shown at the bottom of the
-/// settings page: which mode (Einzel-/Mehrmandanten) the binary booted in,
-/// the loaded `.env*` file(s), the active DB + service, and — from the live
-/// request — the Host and the nginx `X-Tenant` subdomain. German-only
-/// (admin convention).
+/// Read-only deployment / tenancy diagnostics. Two groups: the per-request
+/// resolved tenant (which shop/env/DB THIS admin session is actually editing),
+/// and the process-level boot info (mode, all loaded files, bind addr). Shown
+/// at the bottom of both /admin (overview) and /admin/settings. German-only
+/// (admin convention). Public so the overview page can mount it too.
 #[component]
-fn DeploymentPanel() -> impl IntoView {
+pub fn DeploymentPanel() -> impl IntoView {
     let info = Resource::new(|| (), |_| async move { deployment_info().await });
 
     view! {
@@ -108,24 +108,38 @@ fn DeploymentPanel() -> impl IntoView {
                             d.env_files.join(", ")
                         };
                         let opt = |s: String| if s.is_empty() { "—".to_string() } else { s };
+                        // Per-request resolved tenant: prefer the resolved_*
+                        // fields (the tenant THIS request hit); fall back to the
+                        // boot snapshot (apex / single-tenant).
+                        let cur_slug = if !d.resolved_slug.is_empty() { d.resolved_slug.clone() } else { d.tenant_slug.clone() };
+                        let cur_env  = if !d.resolved_env_file.is_empty() { d.resolved_env_file.clone() } else { env_list.clone() };
+                        let cur_db   = if !d.resolved_db.is_empty() { d.resolved_db.clone() } else { d.database_url.clone() };
                         view! {
+                            <h3>"Diese Sitzung (aufgelöster Mandant)"</h3>
+                            <dl class="kv">
+                                <dt>"Mandant (Slug)"</dt>
+                                <dd><code>{opt(cur_slug)}</code></dd>
+                                <dt>"Host (diese Anfrage)"</dt>
+                                <dd><code>{opt(d.host.clone())}</code></dd>
+                                <dt>"Subdomain (X-Tenant)"</dt>
+                                <dd><code>{opt(d.subdomain.clone())}</code></dd>
+                                <dt>".env-Datei"</dt>
+                                <dd><code>{opt(cur_env)}</code></dd>
+                                <dt>"Datenbank"</dt>
+                                <dd><code>{opt(cur_db)}</code></dd>
+                            </dl>
+                            <h3>"Prozess (Boot)"</h3>
                             <dl class="kv">
                                 <dt>"Modus"</dt>
                                 <dd><span class=mode_cls>{mode_label}</span></dd>
-                                <dt>".env-Datei(en)"</dt>
+                                <dt>"Geladene .env-Datei(en)"</dt>
                                 <dd><code>{env_list}</code></dd>
-                                <dt>"Mandant (Slug)"</dt>
-                                <dd><code>{d.tenant_slug}</code></dd>
-                                <dt>"Dienst"</dt>
-                                <dd><code>{d.service_name}</code></dd>
-                                <dt>"Datenbank"</dt>
-                                <dd><code>{d.database_url}</code></dd>
+                                <dt>"Dienst (LEPTOS_OUTPUT_NAME)"</dt>
+                                <dd><code>{opt(d.service_name)}</code></dd>
+                                <dt>"Boot-Datenbank"</dt>
+                                <dd><code>{opt(d.database_url)}</code></dd>
                                 <dt>"Bind-Adresse"</dt>
                                 <dd><code>{opt(d.site_addr)}</code></dd>
-                                <dt>"Host (diese Anfrage)"</dt>
-                                <dd><code>{opt(d.host)}</code></dd>
-                                <dt>"Subdomain (X-Tenant)"</dt>
-                                <dd><code>{opt(d.subdomain)}</code></dd>
                             </dl>
                         }.into_any()
                     }

@@ -75,10 +75,13 @@ pub fn detect() -> DeploymentInfo {
         service_name,
         database_url: db_url,
         site_addr,
-        // host + subdomain are per-request — filled in by the diagnostics
-        // server fn from the live headers, not known at boot.
+        // host + subdomain + resolved_* are per-request — filled in by the
+        // diagnostics server fn from the live request, not known at boot.
         host: String::new(),
         subdomain: String::new(),
+        resolved_slug: String::new(),
+        resolved_env_file: String::new(),
+        resolved_db: String::new(),
     }
 }
 
@@ -199,6 +202,10 @@ pub struct Tenant {
     pub pool: SqlitePool,
     /// Resolved `DATABASE_URL` — the isolation key (distinct per tenant).
     pub database_url: String,
+    /// The REAL env filename this tenant was loaded from (e.g.
+    /// `.env.rusterando.flizza`, NOT a reconstructed `.env.<slug>`). For
+    /// diagnostics (`/__whoami`, the admin panel).
+    pub env_file: String,
     /// Per-tenant cached config handles.
     pub handles: TenantHandles,
     /// Per-tenant auth secrets (admin/kitchen/driver passwords) from its
@@ -226,10 +233,17 @@ impl Tenant {
             kitchen_password: std::env::var("KITCHEN_PASSWORD").ok(),
             driver_password: std::env::var("DRIVER_PASSWORD").ok(),
         };
+        // The active env file: the operator-pinned ENV_FILE (e.g.
+        // `.env.rusterando`), else the default `.env`.
+        let env_file = std::env::var("ENV_FILE")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| ".env".to_string());
         Self {
             slug,
             pool,
             database_url,
+            env_file,
             handles,
             auth,
         }
@@ -375,6 +389,7 @@ pub async fn build_tenant(slug: &str, env_file: &str) -> anyhow::Result<Tenant> 
         slug: slug.to_owned(),
         pool,
         database_url,
+        env_file: env_file.to_owned(),
         handles,
         auth,
     })
@@ -644,21 +659,36 @@ pub async fn whoami(
 
     // /__whoami is on a sub-router WITHOUT the resolve_tenant layer, so resolve
     // the slug here the SAME way the middleware does (shared `slug_from_headers`
-    // — X-Tenant, else the Host's first label): single-tenant → the one
-    // passthrough tenant; multi-tenant → derived slug (apex → none).
+    // — X-Tenant, else the Host's first label). Report the tenant's REAL
+    // env_file + database_url (not a reconstructed `.env.<slug>`).
     let slug = slug_from_headers(req.headers());
-    let resolved = if !router.multi_tenant {
-        router.single.slug.clone()
+    let (resolved, env, db) = if !router.multi_tenant {
+        // Single-tenant: the one passthrough tenant.
+        let t = &router.single;
+        (t.slug.clone(), t.env_file.clone(), t.database_url.clone())
     } else if is_apex_label(&slug) {
-        "(none)".to_string()
+        // Apex / landing — served by the GLOBAL pool, which is the parent
+        // profile's own DB (e.g. `.env.rusterando` → rusterando.db). So report
+        // the single passthrough tenant's real env_file + DATABASE_URL, just
+        // labelled "(apex)" since it's the showroom landing, not a shop tenant.
+        let t = &router.single;
+        (
+            format!("(apex: {})", t.slug),
+            t.env_file.clone(),
+            t.database_url.clone(),
+        )
     } else {
         match router.tenants.get(&slug).await {
-            Some(_) => slug,
-            None => format!("(unknown: {slug})"),
+            Some(t) => (slug, t.env_file.clone(), t.database_url.clone()),
+            None => (
+                format!("(unknown: {slug})"),
+                "(no match)".to_string(),
+                "(no match)".to_string(),
+            ),
         }
     };
     format!(
-        "mode     = {mode}\ntenant   = {resolved}\nx-tenant = {xtenant}\nhost     = {host}\nenv      = .env.{resolved}\ndb       = data/{resolved}.sqlite\n"
+        "mode     = {mode}\ntenant   = {resolved}\nx-tenant = {xtenant}\nhost     = {host}\nenv      = {env}\ndb       = {db}\n"
     )
 }
 
