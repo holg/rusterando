@@ -318,7 +318,13 @@ pub mod ssr {
 pub fn ExtrasAdminPage() -> impl IntoView {
     let updater = ServerAction::<UpdateExtra>::new();
     let creator = ServerAction::<CreateExtra>::new();
-    let extras = Resource::new(
+    // `new_blocking`: resolve during SSR and SERIALISE the result to the client,
+    // so the table renders server-side (against the correct per-tenant pool)
+    // and is NOT re-fetched on hydration. Admin hydration is fragile (admin
+    // nav uses full reloads for this reason) — a client-refetch `Resource`
+    // showed an empty table when hydration stalled. The action-version source
+    // still triggers a refetch after an edit (the version changes then).
+    let extras = Resource::new_blocking(
         move || (updater.version().get(), creator.version().get()),
         |_| async move { list_extras_admin().await },
     );

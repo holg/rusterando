@@ -450,7 +450,11 @@ pub fn AdminMenuPage() -> impl IntoView {
     let cat_creator = ServerAction::<CreateCategory>::new();
     let cat_deleter = ServerAction::<DeleteCategory>::new();
 
-    let menu = Resource::new(
+    // `new_blocking`: render the menu table during SSR (against the correct
+    // per-tenant pool) and serialise it to the client, so it survives a
+    // fragile admin hydration instead of going empty on a client refetch.
+    // Edits still refetch (the action versions change). See extras_admin.rs.
+    let menu = Resource::new_blocking(
         move || {
             (
                 saver.version().get(),
@@ -466,7 +470,7 @@ pub fn AdminMenuPage() -> impl IntoView {
     // that we refetch only on save (so a new group created via the
     // Auswahl-Gruppen tab on /admin/extras shows up after the next
     // per-item save).
-    let groups = Resource::new(
+    let groups = Resource::new_blocking(
         move || saver.version().get(),
         |_| async move { crate::pages::admin::options_admin::list_option_groups_admin().await },
     );
