@@ -92,24 +92,23 @@ impl axum::extract::FromRef<AppState> for LeptosOptions {
     }
 }
 
-/// Read the per-request tenant's SqlitePool out of the Leptos context.
+/// Read the per-request `Tenant` (pool + cached handles) out of the Leptos
+/// context.
 ///
 /// `resolve_tenant` stashed the `Tenant` in the request extensions; leptos_axum
 /// auto-provides the request `Parts` (incl. extensions) into the reactive
-/// context before our context closures run, so we pull the tenant's pool from
-/// there. Returns `None` when no tenant resolved (apex/landing) — callers fall
-/// back to the global pool. Must run inside a Leptos owner (the context
+/// context before our context closures run, so we pull the tenant from there.
+/// Returns `None` when no tenant resolved (apex/landing) — callers fall back to
+/// the global pool + handles. Must run inside a Leptos owner (the context
 /// closure), which is exactly where it's called.
-fn tenant_pool_from_context() -> Option<sqlx::SqlitePool> {
+fn tenant_from_context() -> Option<rusterando_server::tenant::Tenant> {
     use leptos::prelude::use_context;
-    use_context::<http::request::Parts>()
-        .and_then(|parts| {
-            parts
-                .extensions
-                .get::<rusterando_server::tenant::Tenant>()
-                .cloned()
-        })
-        .map(|t| t.pool)
+    use_context::<http::request::Parts>().and_then(|parts| {
+        parts
+            .extensions
+            .get::<rusterando_server::tenant::Tenant>()
+            .cloned()
+    })
 }
 
 /// Load the dotenv file, honouring an `ENV_FILE` override so a single
@@ -200,45 +199,15 @@ async fn main() {
     // Resolve single- vs multi-tenant mode from env + the working dir, and log
     // it LOUDLY. Model A (single-tenant) is the fail-safe default — see
     // `tenant::detect` + docs/multi_tenant.md. This snapshot also feeds the
-    // admin /settings deployment-diagnostics panel.
+    // admin /settings deployment-diagnostics panel. The registry + router are
+    // built later (after the global handles exist, so the Model-A passthrough
+    // tenant can wrap them).
     let deployment = rusterando_server::tenant::detect();
     rusterando_server::tenant::log_mode(&deployment);
     let multi_tenant = deployment.multi_tenant;
-    let single_tenant = rusterando_server::tenant::Tenant {
-        slug: deployment.tenant_slug.clone(),
-        pool: db.clone(),
-        database_url: deployment.database_url.clone(),
-    };
+    let deployment_tenant_slug = deployment.tenant_slug.clone();
+    let deployment_database_url = deployment.database_url.clone();
     let deployment_handle = rusterando_frontend::pages::settings::DeploymentHandle::new(deployment);
-
-    // Tenant registry. Model A: a single passthrough tenant wrapping the
-    // global pool — server fns see today's exact pool. Model B: build one
-    // tenant per `.env.<slug>`, skipping any that fail or collide on DB; if
-    // fewer than 2 survive we'd still route, but the deployment label already
-    // warned. The `resolve_tenant` middleware reads these per request.
-    let tenants = rusterando_server::tenant::Tenants::new();
-    if multi_tenant {
-        for name in std::fs::read_dir(".")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| n.starts_with(".env.") && !n.ends_with(".example") && !n.ends_with(".bak"))
-        {
-            let slug = name.trim_start_matches(".env.").to_string();
-            match tenants.load(&slug).await {
-                Ok(()) => tracing::info!("tenant loaded: {slug}"),
-                Err(e) => tracing::warn!("tenant {slug} skipped: {e}"),
-            }
-        }
-    } else {
-        tenants.insert(single_tenant.clone()).await;
-    }
-    let tenant_router = rusterando_server::tenant::TenantRouter {
-        tenants: tenants.clone(),
-        multi_tenant,
-        single: single_tenant.clone(),
-    };
 
     // Two-layer migrations:
     //   * the embedded folder under repo `migrations/` is the
@@ -365,6 +334,50 @@ async fn main() {
         paused = orders_paused_initial,
         "orders-paused toggle at boot"
     );
+
+    // Tenant registry — built now that the global handles exist. Model A: a
+    // single passthrough tenant wrapping the global pool + handles (server fns
+    // see today's exact state, zero rebuild). Model B: one tenant per
+    // `.env.<slug>`, each with its OWN pool + handles built from its DB; skip
+    // any that fail or collide on DB. The `resolve_tenant` middleware reads
+    // these per request and swaps both pool and handles into context.
+    let global_handles = rusterando_server::tenant::TenantHandles {
+        theme: theme.clone(),
+        branding: branding.clone(),
+        i18n: i18n.clone(),
+        orders_paused: orders_paused.clone(),
+        stripe_mode: stripe_mode.clone(),
+        jsonld: jsonld.clone(),
+    };
+    let single_tenant = rusterando_server::tenant::Tenant::passthrough(
+        deployment_tenant_slug,
+        db.clone(),
+        deployment_database_url,
+        global_handles,
+    );
+    let tenants = rusterando_server::tenant::Tenants::new();
+    if multi_tenant {
+        for name in std::fs::read_dir(".")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.starts_with(".env.") && !n.ends_with(".example") && !n.ends_with(".bak"))
+        {
+            let slug = name.trim_start_matches(".env.").to_string();
+            match tenants.load(&slug).await {
+                Ok(()) => tracing::info!("tenant loaded: {slug}"),
+                Err(e) => tracing::warn!("tenant {slug} skipped: {e}"),
+            }
+        }
+    } else {
+        tenants.insert(single_tenant.clone()).await;
+    }
+    let tenant_router = rusterando_server::tenant::TenantRouter {
+        tenants: tenants.clone(),
+        multi_tenant,
+        single: single_tenant.clone(),
+    };
 
     // Live customer channel hub (SSE). In-memory broadcast; nothing to
     // seed from the DB.
@@ -558,35 +571,54 @@ async fn main() {
                 let jsonld = state.jsonld.clone();
                 let deployment = state.deployment.clone();
                 move || {
-                    // Per-request POOL: the `resolve_tenant` middleware stashed
-                    // the request's Tenant in extensions; leptos_axum has
+                    // Per-request tenant: the `resolve_tenant` middleware
+                    // stashed the request's Tenant in extensions; leptos_axum
                     // already provided the request `Parts` into context, so we
-                    // read the tenant's pool and provide THAT as the
-                    // SqlitePool. Model A's single tenant wraps the global pool,
-                    // so this is identical to `provide_context(db)` there; in
-                    // Model B every `use_context::<SqlitePool>()` transparently
-                    // gets the right tenant's DB. Falls back to the global pool
-                    // when no tenant resolved (apex/landing).
-                    let pool = tenant_pool_from_context().unwrap_or_else(|| db.clone());
+                    // read it and provide the tenant's POOL + the 6 cached
+                    // config handles (theme/branding/i18n/orders_paused/
+                    // stripe_mode/jsonld). Model A's single tenant wraps the
+                    // global pool+handles, so this is identical to today; in
+                    // Model B every `use_context::<…>()` (read + the
+                    // update_setting write-through) targets the right tenant.
+                    // Falls back to the globals when no tenant resolved
+                    // (apex/landing).
+                    let tenant = tenant_from_context();
+                    let (pool, h) = match &tenant {
+                        Some(t) => (t.pool.clone(), Some(t.handles.clone())),
+                        None => (db.clone(), None),
+                    };
                     provide_context(pool);
                     provide_context(pwd.clone());
                     provide_context(notifier.clone());
                     provide_context(apns.clone());
                     provide_context(sink.clone());
-                    provide_context(theme.clone());
-                    provide_context(branding.clone());
                     // KitchenSinkHandle — None on printerless deploys.
                     provide_context(kitchen_sink.clone());
                     // MenuPdfCacheHandle — drives the nginx offline-fallback refresh.
                     provide_context(menu_pdf_cache.clone());
-                    provide_context(stripe_mode.clone());
-                    provide_context(i18n.clone());
-                    provide_context(orders_paused.clone());
                     provide_context(live.clone());
                     provide_context(uploads.clone());
-                    provide_context(jsonld.clone());
                     // DeploymentHandle — admin /settings diagnostics panel.
                     provide_context(deployment.clone());
+                    // Per-tenant cached handles (or the globals on fallback).
+                    match h {
+                        Some(h) => {
+                            provide_context(h.theme);
+                            provide_context(h.branding);
+                            provide_context(h.stripe_mode);
+                            provide_context(h.i18n);
+                            provide_context(h.orders_paused);
+                            provide_context(h.jsonld);
+                        }
+                        None => {
+                            provide_context(theme.clone());
+                            provide_context(branding.clone());
+                            provide_context(stripe_mode.clone());
+                            provide_context(i18n.clone());
+                            provide_context(orders_paused.clone());
+                            provide_context(jsonld.clone());
+                        }
+                    }
                 }
             },
             {
@@ -2312,24 +2344,42 @@ async fn server_fn_handler(
             let jsonld = state.jsonld.clone();
             let deployment = state.deployment.clone();
             move || {
-                // Per-request pool swap — see the routes closure for the why.
-                let pool = tenant_pool_from_context().unwrap_or_else(|| db.clone());
+                // Per-request pool + handle swap — see the routes closure for
+                // the why. This is the server-fn path, so the update_setting
+                // write-through (.set()/.apply_kv()) lands on the right tenant.
+                let tenant = tenant_from_context();
+                let (pool, h) = match &tenant {
+                    Some(t) => (t.pool.clone(), Some(t.handles.clone())),
+                    None => (db.clone(), None),
+                };
                 provide_context(pool);
                 provide_context(pwd.clone());
                 provide_context(notifier.clone());
                 provide_context(apns.clone());
                 provide_context(sink.clone());
-                provide_context(theme.clone());
-                provide_context(branding.clone());
                 provide_context(kitchen_sink.clone());
-                provide_context(stripe_mode.clone());
-                provide_context(i18n.clone());
-                provide_context(orders_paused.clone());
                 provide_context(live.clone());
                 provide_context(uploads.clone());
-                provide_context(jsonld.clone());
                 // DeploymentHandle — read by the deployment_info server fn.
                 provide_context(deployment.clone());
+                match h {
+                    Some(h) => {
+                        provide_context(h.theme);
+                        provide_context(h.branding);
+                        provide_context(h.stripe_mode);
+                        provide_context(h.i18n);
+                        provide_context(h.orders_paused);
+                        provide_context(h.jsonld);
+                    }
+                    None => {
+                        provide_context(theme.clone());
+                        provide_context(branding.clone());
+                        provide_context(stripe_mode.clone());
+                        provide_context(i18n.clone());
+                        provide_context(orders_paused.clone());
+                        provide_context(jsonld.clone());
+                    }
+                }
             }
         },
         req,

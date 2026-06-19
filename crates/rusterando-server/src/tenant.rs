@@ -149,15 +149,51 @@ fn is_non_profile_env(name: &str) -> bool {
 // pass; per-tenant cached handles are a follow-up.
 // ---------------------------------------------------------------------------
 
-/// One tenant's resolved runtime: its slug + SQLite pool. In Model A this
-/// wraps the process's single global pool (passthrough — zero behaviour
-/// change); in Model B one per `.env.<slug>`.
+/// Per-tenant cached config handles — the same shallow-`Arc` write-through
+/// handles AppState holds, but one set per tenant so each shop serves its own
+/// branding/theme/i18n/etc. from its own DB. Built in `build_tenant`; provided
+/// into the request context so every `use_context::<…Handle>()` (read AND the
+/// `update_setting` write-through) targets the current tenant.
+#[derive(Clone)]
+pub struct TenantHandles {
+    pub theme: rusterando_frontend::pages::settings::ThemeHandle,
+    pub branding: rusterando_frontend::branding::BrandingHandle,
+    pub i18n: rusterando_frontend::pages::settings::I18nHandle,
+    pub orders_paused: rusterando_frontend::pages::settings::OrdersPausedHandle,
+    pub stripe_mode: rusterando_frontend::stripe::StripeModeHandle,
+    pub jsonld: rusterando_frontend::pages::seo::JsonLdHandle,
+}
+
+/// One tenant's resolved runtime: its slug + SQLite pool + cached handles. In
+/// Model A this wraps the process's single global pool + global handles
+/// (passthrough — zero behaviour change); in Model B one set per `.env.<slug>`.
 #[derive(Clone)]
 pub struct Tenant {
     pub slug: String,
     pub pool: SqlitePool,
     /// Resolved `DATABASE_URL` — the isolation key (distinct per tenant).
     pub database_url: String,
+    /// Per-tenant cached config handles.
+    pub handles: TenantHandles,
+}
+
+impl Tenant {
+    /// Model-A passthrough: wrap the process's already-built global pool +
+    /// handles, so server fns see exactly today's state (zero rebuild, zero
+    /// behaviour change). Used when the binary is single-tenant.
+    pub fn passthrough(
+        slug: String,
+        pool: SqlitePool,
+        database_url: String,
+        handles: TenantHandles,
+    ) -> Self {
+        Self {
+            slug,
+            pool,
+            database_url,
+            handles,
+        }
+    }
 }
 
 /// Slug → Tenant. `Clone` is cheap (Arc). Empty + unused in Model A (the
@@ -269,11 +305,44 @@ pub async fn build_tenant(slug: &str) -> anyhow::Result<Tenant> {
     // TODO(model-b follow-up): seed_demo_if_empty(&pool, slug) — idempotent
     // demo menu for an empty showroom tenant. Left out this pass.
 
+    let handles = build_handles(&pool).await;
+
     Ok(Tenant {
         slug: slug.to_owned(),
         pool,
         database_url,
+        handles,
     })
+}
+
+/// Build the 6 cached config handles from a pool — the same boot sequence
+/// main.rs runs for the global handles, in the same order (branding BEFORE
+/// jsonld, which consumes the branding snapshot). Used per-tenant in Model B;
+/// Model A reuses the globals it already built (see `Tenant::passthrough`).
+pub async fn build_handles(pool: &SqlitePool) -> TenantHandles {
+    use rusterando_frontend::branding::{ssr::load_branding, BrandingHandle};
+    use rusterando_frontend::pages::seo::{build_restaurant_jsonld, JsonLdHandle};
+    use rusterando_frontend::pages::settings::{
+        ssr::{i18n_enabled, orders_paused, theme as theme_ssr},
+        I18nHandle, OrdersPausedHandle, ThemeHandle,
+    };
+    use rusterando_frontend::stripe::{ssr::load_mode, StripeModeHandle};
+
+    let theme = ThemeHandle::new(theme_ssr(pool).await);
+    let branding = BrandingHandle::new(load_branding(pool).await);
+    let jsonld = JsonLdHandle::new(build_restaurant_jsonld(pool, &branding.get()).await);
+    let stripe_mode = StripeModeHandle::new(load_mode(pool).await);
+    let i18n = I18nHandle::new(i18n_enabled(pool).await);
+    let orders_paused = OrdersPausedHandle::new(orders_paused(pool).await);
+
+    TenantHandles {
+        theme,
+        branding,
+        i18n,
+        orders_paused,
+        stripe_mode,
+        jsonld,
+    }
 }
 
 // ---------------------------------------------------------------------------
