@@ -782,19 +782,29 @@ pub async fn build_menu_pdf(
 // Re-rendered at boot + after every menu/extras/branding edit.
 // ---------------------------------------------------------------------------
 
-/// Render the default tri-fold (full, with ingredients) menu to
-/// `<site_root>/menu.pdf` and the condensed in-house variant to
-/// `<site_root>/menu-kompakt.pdf`, atomically (write a temp file then rename
-/// so nginx never serves a half-written PDF). Best-effort: returns the first
-/// error but always attempts both.
+/// Render the tri-fold (full) + condensed menus to the site root, atomically
+/// (temp file then rename so nginx never serves a half-written PDF).
+///
+/// `slug` scopes the filenames per tenant: empty (single-tenant / apex) keeps
+/// the canonical `menu.pdf` / `menu-kompakt.pdf` (the nginx offline-fallback
+/// names). A non-empty slug writes `<slug>-menu.pdf` / `<slug>-menu-kompakt.pdf`
+/// so multi-tenant shops don't overwrite each other's cache. Best-effort:
+/// returns the first error but always attempts both.
 pub async fn write_menu_pdf_cache(
     db: &SqlitePool,
     site_root: &str,
     uploads_dir: &str,
     site_url: String,
     shop_branding: &rusterando_frontend::branding::Branding,
+    slug: &str,
 ) -> anyhow::Result<()> {
-    for (file, show_ingredients) in [("menu.pdf", true), ("menu-kompakt.pdf", false)] {
+    let prefix = if slug.is_empty() {
+        String::new()
+    } else {
+        format!("{slug}-")
+    };
+    for (stem, show_ingredients) in [("menu.pdf", true), ("menu-kompakt.pdf", false)] {
+        let file = format!("{prefix}{stem}");
         let bytes = build_menu_pdf(
             db,
             site_url.clone(),
@@ -804,7 +814,7 @@ pub async fn write_menu_pdf_cache(
             show_ingredients,
         )
         .await?;
-        let dst = std::path::Path::new(site_root).join(file);
+        let dst = std::path::Path::new(site_root).join(&file);
         let tmp = std::path::Path::new(site_root).join(format!(".{file}.tmp"));
         tokio::fs::write(&tmp, &bytes).await?;
         tokio::fs::rename(&tmp, &dst).await?;
@@ -831,12 +841,17 @@ pub struct MenuPdfCacheImpl {
 #[async_trait::async_trait]
 impl rusterando_frontend::pages::push::MenuPdfCache for MenuPdfCacheImpl {
     async fn rebuild(&self, db: &SqlitePool) -> anyhow::Result<()> {
+        // The boot/global cache keeps the canonical `menu.pdf` names (empty
+        // slug) — it's the nginx offline fallback for the apex/main shop.
+        // Per-tenant edit-triggered rebuilds go through `rebuild_for` with the
+        // tenant's slug + branding + uploads dir.
         write_menu_pdf_cache(
             db,
             &self.site_root,
             &self.uploads_dir,
             self.site_url.clone(),
             &self.branding.get(),
+            "",
         )
         .await
     }

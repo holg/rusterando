@@ -1535,12 +1535,23 @@ async fn upload_image_handler(
 /// the UI to switch.
 async fn pdf_cover_upload_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
+    // Per-request tenant (from resolve_tenant). The cover record MUST land in
+    // the current tenant's DB, not the global pool — without this, every
+    // tenant's upload went into rusterando.db and their own PDF showed the
+    // baked-default (davids) cover.
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
     headers: axum::http::HeaderMap,
     mut multipart: axum::extract::Multipart,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use sha2::{Digest, Sha256};
+
+    // The tenant's pool, else the global one (apex / single-tenant).
+    let db = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => t.pool.clone(),
+        None => state.db.clone(),
+    };
 
     let admin_ok = headers
         .get(axum::http::header::COOKIE)
@@ -1638,7 +1649,7 @@ async fn pdf_cover_upload_handler(
     .bind(&filename)
     .bind(mime)
     .bind(size)
-    .fetch_one(&state.db)
+    .fetch_one(&db)
     .await;
 
     match row {
@@ -2332,6 +2343,12 @@ struct MenuPdfParams {
 async fn menu_pdf_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Query(p): axum::extract::Query<MenuPdfParams>,
+    // The per-request tenant, inserted by the `resolve_tenant` middleware.
+    // `None` on the apex / single-tenant → fall back to the global pool.
+    // This raw axum handler is OUTSIDE the Leptos per-request context swap, so
+    // without this it always rendered the global (parent) tenant's menu — e.g.
+    // flizza.localhost/menu.pdf returned rusterando's PDF.
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
     use axum::http::StatusCode;
@@ -2350,18 +2367,42 @@ async fn menu_pdf_handler(
         Some("1") | Some("true") | Some("yes")
     );
     let show_ingredients = !condensed;
-    // Distinct download filename per format + variant.
     let variant = if condensed { "-kompakt" } else { "" };
-    let filename = match format {
-        "a5-zickzack" => format!("davids-pizzeria-speisekarte-a5-zickzack{variant}.pdf"),
-        _ => format!("davids-pizzeria-speisekarte{variant}.pdf"),
-    };
 
     let site_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
 
-    let branding = state.branding.get();
+    // Per-request tenant's pool + branding + slug, else the global ones (apex /
+    // single-tenant). So each shop's /menu.pdf renders its OWN menu.
+    let (pool, branding, slug) = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => {
+            (t.pool.clone(), t.handles.branding.get(), t.slug.clone())
+        }
+        None => (state.db.clone(), state.branding.get(), String::new()),
+    };
+
+    // Download filename: `<menu-domain>_<tenant>.pdf` — the shop name as the
+    // "menu domain" (slugified) plus the tenant slug, so a customer who saves
+    // multiple shops' menus gets distinct files instead of every tenant
+    // sharing one name. e.g. `flizza-pizzeria_flizza-speisekarte.pdf`.
+    let domain = rusterando_shared::models::seo_slug(&branding.display_name());
+    let domain = if domain.is_empty() {
+        "menu".to_string()
+    } else {
+        domain
+    };
+    let tenant_part = if slug.is_empty() {
+        String::new()
+    } else {
+        format!("_{slug}")
+    };
+    let fmt_part = if format == "a5-zickzack" {
+        "-a5-zickzack"
+    } else {
+        ""
+    };
+    let filename = format!("{domain}{tenant_part}-speisekarte{fmt_part}{variant}.pdf");
     match rusterando_server::pdf::build_menu_pdf(
-        &state.db,
+        &pool,
         site_url,
         &branding,
         &state.uploads_dir,
