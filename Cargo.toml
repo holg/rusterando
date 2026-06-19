@@ -6,6 +6,7 @@ members = [
     "crates/rusterando-frontend",
     "crates/rusterando-server",
     "crates/rusterando-shared",
+    "crates/menu-import"
 ]
 # Excluded from the workspace:
 #   src-tauri/         legacy Tauri WebView shell, archived in favour of
@@ -41,7 +42,8 @@ leptos = { version = "0.8" }
 leptos_meta = { version = "0.8" }
 leptos_router = { version = "0.8" }
 leptos_axum = { version = "0.8" }
-
+# clap
+clap = { version = "4.6", features = ["derive"] }
 # Axum 0.8 — `multipart` enables `axum::extract::Multipart` used by the
 # image-upload route in /api/admin/upload_image.
 axum = { version = "0.8", features = ["multipart"] }

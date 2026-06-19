@@ -1,0 +1,22 @@
+[package]
+name = "menu-import"
+version = "0.1.0"
+edition = "2021"
+
+# One-shot CLI: provision a new shop's .env + sqlite, run the workspace
+# migrations against it, and import a scraped/parsed menu.json into the
+# menu_categories / menu_items tables. Not part of the deployed server.
+[[bin]]
+name = "menu-import"
+path = "src/main.rs"
+
+[dependencies]
+sqlx = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+dotenvy = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
