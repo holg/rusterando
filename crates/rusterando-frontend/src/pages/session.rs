@@ -206,6 +206,19 @@ pub fn RoleSwitcher(
     }
 }
 
+/// Per-tenant auth secrets (admin/kitchen/driver passwords), parsed from the
+/// tenant's `.env`. Provided into request context by the tenant router so
+/// every login checks the CURRENT tenant's password — not the process-global
+/// one. `None` field = not set in that tenant's `.env`. In single-tenant
+/// (Model A) this carries the global `.env` values, so behaviour is unchanged.
+#[cfg(feature = "ssr")]
+#[derive(Clone, Default)]
+pub struct TenantAuth {
+    pub admin_password: Option<String>,
+    pub kitchen_password: Option<String>,
+    pub driver_password: Option<String>,
+}
+
 #[cfg(feature = "ssr")]
 pub mod ssr {
     use super::*;
@@ -213,18 +226,24 @@ pub mod ssr {
     use leptos_axum::extract;
     use tower_cookies::{cookie::time::Duration, cookie::SameSite, Cookie, Cookies};
 
-    /// Look up the env-var password for the given role. Falls back to a dev
-    /// default for kitchen/driver so a developer can sign in without setting
-    /// the env, but ADMIN has no fallback (the existing admin behaviour).
+    /// Look up the expected password for `role`. Prefers the per-request
+    /// `TenantAuth` (the current tenant's `.env`); falls back to the process
+    /// env when it's absent (Model A / a tenant that didn't set the key).
+    /// Kitchen/Driver keep their dev defaults; Admin has no fallback.
     fn expected_password(role: Role) -> Option<String> {
+        let tenant = leptos::prelude::use_context::<super::TenantAuth>();
         match role {
-            Role::Admin => std::env::var("ADMIN_PASSWORD").ok(),
-            Role::Kitchen => {
-                Some(std::env::var("KITCHEN_PASSWORD").unwrap_or_else(|_| "kueche".to_string()))
-            }
-            Role::Driver => {
-                Some(std::env::var("DRIVER_PASSWORD").unwrap_or_else(|_| "fahrer".to_string()))
-            }
+            Role::Admin => tenant
+                .and_then(|t| t.admin_password)
+                .or_else(|| std::env::var("ADMIN_PASSWORD").ok()),
+            Role::Kitchen => tenant
+                .and_then(|t| t.kitchen_password)
+                .or_else(|| std::env::var("KITCHEN_PASSWORD").ok())
+                .or_else(|| Some("kueche".to_string())),
+            Role::Driver => tenant
+                .and_then(|t| t.driver_password)
+                .or_else(|| std::env::var("DRIVER_PASSWORD").ok())
+                .or_else(|| Some("fahrer".to_string())),
         }
     }
 

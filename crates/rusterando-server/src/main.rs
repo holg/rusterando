@@ -602,6 +602,10 @@ async fn main() {
                     };
                     provide_context(pool);
                     provide_context(pwd.clone());
+                    // Per-tenant auth secrets (admin/kitchen/driver passwords)
+                    // so logins check the RIGHT tenant's password. Default
+                    // (empty) on the apex fallback → login fns fall back to env.
+                    provide_context(tenant.as_ref().map(|t| t.auth.clone()).unwrap_or_default());
                     provide_context(notifier.clone());
                     provide_context(apns.clone());
                     provide_context(sink.clone());
@@ -2367,6 +2371,9 @@ async fn server_fn_handler(
                 };
                 provide_context(pool);
                 provide_context(pwd.clone());
+                // Per-tenant auth (admin/kitchen/driver passwords) — the login
+                // server fns read this so each tenant checks its OWN password.
+                provide_context(tenant.as_ref().map(|t| t.auth.clone()).unwrap_or_default());
                 provide_context(notifier.clone());
                 provide_context(apns.clone());
                 provide_context(sink.clone());

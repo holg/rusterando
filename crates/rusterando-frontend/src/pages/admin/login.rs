@@ -10,11 +10,16 @@ pub async fn admin_login(password: String) -> Result<bool, ServerFnError> {
     use std::sync::Arc;
     use tower_cookies::{Cookie, Cookies};
 
-    let expected = use_context::<Arc<String>>()
+    // Per-tenant admin password (from the current tenant's `.env`) wins; fall
+    // back to the boot-global `Arc<String>` (Model A / unset). Without the
+    // tenant check, every tenant accepted the parent showroom's password.
+    let expected = use_context::<crate::pages::session::TenantAuth>()
+        .and_then(|t| t.admin_password)
+        .or_else(|| use_context::<Arc<String>>().map(|a| (*a).clone()))
         .ok_or_else(|| ServerFnError::new("admin password not configured"))?;
     let cookies: Cookies = extract().await?;
 
-    if password != *expected {
+    if password != expected {
         return Ok(false);
     }
 

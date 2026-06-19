@@ -201,6 +201,10 @@ pub struct Tenant {
     pub database_url: String,
     /// Per-tenant cached config handles.
     pub handles: TenantHandles,
+    /// Per-tenant auth secrets (admin/kitchen/driver passwords) from its
+    /// `.env`. Provided into context so logins check the RIGHT tenant's
+    /// password, not the process-global one.
+    pub auth: rusterando_frontend::pages::session::TenantAuth,
 }
 
 impl Tenant {
@@ -213,11 +217,21 @@ impl Tenant {
         database_url: String,
         handles: TenantHandles,
     ) -> Self {
+        // Single-tenant auth comes from the process env (the loaded `.env`),
+        // matching the existing behaviour. `expected_password` also falls back
+        // to env, so leaving these None would work too — but populating them
+        // keeps the source of truth on the tenant uniformly.
+        let auth = rusterando_frontend::pages::session::TenantAuth {
+            admin_password: std::env::var("ADMIN_PASSWORD").ok(),
+            kitchen_password: std::env::var("KITCHEN_PASSWORD").ok(),
+            driver_password: std::env::var("DRIVER_PASSWORD").ok(),
+        };
         Self {
             slug,
             pool,
             database_url,
             handles,
+            auth,
         }
     }
 }
@@ -349,11 +363,20 @@ pub async fn build_tenant(slug: &str, env_file: &str) -> anyhow::Result<Tenant> 
 
     let handles = build_handles(&pool).await;
 
+    // Auth secrets from THIS tenant's `.env` (parsed into `vars` above) — so
+    // logins check the right tenant's password, not the process-global one.
+    let auth = rusterando_frontend::pages::session::TenantAuth {
+        admin_password: vars.get("ADMIN_PASSWORD").cloned(),
+        kitchen_password: vars.get("KITCHEN_PASSWORD").cloned(),
+        driver_password: vars.get("DRIVER_PASSWORD").cloned(),
+    };
+
     Ok(Tenant {
         slug: slug.to_owned(),
         pool,
         database_url,
         handles,
+        auth,
     })
 }
 
