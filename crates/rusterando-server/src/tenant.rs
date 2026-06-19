@@ -367,8 +367,31 @@ pub struct TenantRouter {
 }
 
 /// Subdomain labels that mean "no specific tenant" → landing page passthrough.
+/// `localhost` is included so a bare `http://localhost:PORT` (or `127` from an
+/// IP host) shows the landing page instead of 404-ing during local testing.
 fn is_apex_label(label: &str) -> bool {
-    label.is_empty() || label == "rusterando" || label == "www"
+    matches!(label, "" | "rusterando" | "www" | "localhost" | "127")
+}
+
+/// Derive the tenant slug from a request's headers: `X-Tenant` (set by nginx),
+/// else the first label of the `Host` header (so `flizza.localhost:PORT` works
+/// header-less for local testing). Lowercased; empty when neither is present.
+/// Shared by the middleware AND `/__whoami` so they can never disagree.
+fn slug_from_headers(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-tenant")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_ascii_lowercase())
+        .or_else(|| {
+            headers
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|h| h.split(':').next())
+                .and_then(|h| h.split('.').next())
+                .map(|s| s.to_ascii_lowercase())
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve the tenant for this request and stash it in extensions.
@@ -383,7 +406,7 @@ pub async fn resolve_tenant(
     mut req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::http::{header, StatusCode};
+    use axum::http::StatusCode;
 
     if !router.multi_tenant {
         req.extensions_mut().insert(router.single.clone());
@@ -391,21 +414,7 @@ pub async fn resolve_tenant(
     }
 
     // Model B: derive the slug from X-Tenant, else the first Host label.
-    let slug = req
-        .headers()
-        .get("x-tenant")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_ascii_lowercase())
-        .or_else(|| {
-            req.headers()
-                .get(header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|h| h.split(':').next())
-                .and_then(|h| h.split('.').next())
-                .map(|s| s.to_ascii_lowercase())
-        })
-        .unwrap_or_default();
+    let slug = slug_from_headers(req.headers());
 
     if is_apex_label(&slug) {
         // Landing page — no tenant context. (Server fns that need a tenant
@@ -441,23 +450,30 @@ pub async fn whoami(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let host = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
 
     // /__whoami is on a sub-router WITHOUT the resolve_tenant layer, so resolve
-    // the slug here the same way the middleware would: single-tenant → the one
-    // passthrough tenant; multi-tenant → the X-Tenant header (apex → none).
+    // the slug here the SAME way the middleware does (shared `slug_from_headers`
+    // — X-Tenant, else the Host's first label): single-tenant → the one
+    // passthrough tenant; multi-tenant → derived slug (apex → none).
+    let slug = slug_from_headers(req.headers());
     let resolved = if !router.multi_tenant {
         router.single.slug.clone()
-    } else if is_apex_label(&xtenant.to_ascii_lowercase()) {
+    } else if is_apex_label(&slug) {
         "(none)".to_string()
     } else {
-        let slug = xtenant.to_ascii_lowercase();
         match router.tenants.get(&slug).await {
             Some(_) => slug,
             None => format!("(unknown: {slug})"),
         }
     };
     format!(
-        "mode     = {mode}\ntenant   = {resolved}\nx-tenant = {xtenant}\nenv      = .env.{resolved}\ndb       = data/{resolved}.sqlite\n"
+        "mode     = {mode}\ntenant   = {resolved}\nx-tenant = {xtenant}\nhost     = {host}\nenv      = .env.{resolved}\ndb       = data/{resolved}.sqlite\n"
     )
 }
 
