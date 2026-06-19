@@ -85,6 +85,8 @@ serde_json = "1"
 
 # Config
 dotenvy = "0.15"
+# Tenant discovery: glob `.env*` at boot to pick single- vs multi-tenant mode.
+glob = "0.3"
 
 # Errors
 thiserror = "2"

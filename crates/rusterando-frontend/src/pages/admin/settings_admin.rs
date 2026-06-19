@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use rusterando_shared::models::format_eur;
 
 use crate::pages::admin::shell::AdminShell;
-use crate::pages::settings::{list_settings, SettingRow, UpdateSetting};
+use crate::pages::settings::{deployment_info, list_settings, SettingRow, UpdateSetting};
 
 #[component]
 pub fn SettingsAdminPage() -> impl IntoView {
@@ -74,8 +74,64 @@ pub fn SettingsAdminPage() -> impl IntoView {
                     Err(e) => Some(view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any()),
                     Ok(_) => None,
                 })}
+
+                <DeploymentPanel/>
             </section>
         </AdminShell>
+    }
+}
+
+/// Read-only deployment / tenancy diagnostics, shown at the bottom of the
+/// settings page: which mode (Einzel-/Mehrmandanten) the binary booted in,
+/// the loaded `.env*` file(s), the active DB + service, and — from the live
+/// request — the Host and the nginx `X-Tenant` subdomain. German-only
+/// (admin convention).
+#[component]
+fn DeploymentPanel() -> impl IntoView {
+    let info = Resource::new(|| (), |_| async move { deployment_info().await });
+
+    view! {
+        <section class="deployment-panel">
+            <h2>"Deployment / Mandant"</h2>
+            <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+                {move || info.get().map(|res| match res {
+                    Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                    Ok(d) => {
+                        let (mode_label, mode_cls) = if d.multi_tenant {
+                            ("Mehrmandanten (Model B)", "pill warn")
+                        } else {
+                            ("Einzelmandant (Model A)", "pill ok")
+                        };
+                        let env_list = if d.env_files.is_empty() {
+                            "—".to_string()
+                        } else {
+                            d.env_files.join(", ")
+                        };
+                        let opt = |s: String| if s.is_empty() { "—".to_string() } else { s };
+                        view! {
+                            <dl class="kv">
+                                <dt>"Modus"</dt>
+                                <dd><span class=mode_cls>{mode_label}</span></dd>
+                                <dt>".env-Datei(en)"</dt>
+                                <dd><code>{env_list}</code></dd>
+                                <dt>"Mandant (Slug)"</dt>
+                                <dd><code>{d.tenant_slug}</code></dd>
+                                <dt>"Dienst"</dt>
+                                <dd><code>{d.service_name}</code></dd>
+                                <dt>"Datenbank"</dt>
+                                <dd><code>{d.database_url}</code></dd>
+                                <dt>"Bind-Adresse"</dt>
+                                <dd><code>{opt(d.site_addr)}</code></dd>
+                                <dt>"Host (diese Anfrage)"</dt>
+                                <dd><code>{opt(d.host)}</code></dd>
+                                <dt>"Subdomain (X-Tenant)"</dt>
+                                <dd><code>{opt(d.subdomain)}</code></dd>
+                            </dl>
+                        }.into_any()
+                    }
+                })}
+            </Suspense>
+        </section>
     }
 }
 

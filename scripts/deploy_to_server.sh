@@ -723,6 +723,12 @@ TimeoutStopSec=10
 LimitNOFILE=65536
 Environment=RUST_LOG=info
 Environment=TZ=$SHOP_TZ
+# Belt-and-suspenders: each per-shop deploy ships exactly ONE .env to its
+# own dir, so the binary already auto-detects single-tenant (Model A). This
+# kill-switch makes it impossible for a real shop to EVER enter the in-process
+# multi-tenant mode (Model B) even if a stray .env file leaks into its dir.
+# See docs/multi_tenant.md + crates/rusterando-server/src/tenant.rs.
+Environment=MULTI_TENANT=0
 Environment=LEPTOS_HASH_FILES=true
 Environment=LEPTOS_SITE_ROOT=$REMOTE_HTML_DIR
 Environment=LEPTOS_OUTPUT_NAME=$LEPTOS_OUTPUT_NAME_FOR_UNIT

@@ -111,6 +111,55 @@ impl UploadsDir {
     }
 }
 
+/// Deployment / tenancy diagnostics — what the admin sees at the bottom of
+/// /admin/settings. Resolved ONCE at server boot (the static parts) by the
+/// binary's mode-detect; the per-request `subdomain` is filled in by the
+/// diagnostics server fn from the live `X-Tenant` / Host header. Plain
+/// (de)serializable so the server fn returns it straight to the admin page.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeploymentInfo {
+    /// `true` when the binary booted in in-process multi-tenant mode
+    /// (≥2 `.env*`, distinct DBs). `false` = single-tenant (the real-shop
+    /// default — davidspizzeria.de).
+    pub multi_tenant: bool,
+    /// Which `.env*` file(s) this process loaded. Single-tenant: one entry
+    /// (or the `ENV_FILE=`/`<default .env>`); multi-tenant: every loaded slug.
+    pub env_files: Vec<String>,
+    /// The active tenant slug — DB filename stem in single-tenant
+    /// ("davidspizzeria"), or the registry's tenant list in multi-tenant.
+    pub tenant_slug: String,
+    /// systemd/binary service identity (LEPTOS_OUTPUT_NAME, falls back to the
+    /// DB stem) so the admin can tell which unit they're looking at.
+    pub service_name: String,
+    /// `DATABASE_URL` of the active DB (single-tenant) — confirms isolation.
+    pub database_url: String,
+    /// Bind address the process listens on (LEPTOS_SITE_ADDR).
+    pub site_addr: String,
+    /// The `Host` header of THIS request (e.g. "davidspizzeria.de").
+    pub host: String,
+    /// The nginx-supplied `X-Tenant` subdomain label for THIS request, if
+    /// present (multi-tenant routing). Empty in single-tenant deploys.
+    pub subdomain: String,
+}
+
+/// Boot-time deployment snapshot, provided into server-fn context so the
+/// diagnostics server fn can read it without re-globbing the filesystem on
+/// every request. The per-request `host`/`subdomain` are layered on top from
+/// the live request headers. Same context-handle pattern as ThemeHandle.
+#[cfg(feature = "ssr")]
+#[derive(Clone, Default)]
+pub struct DeploymentHandle(pub std::sync::Arc<DeploymentInfo>);
+
+#[cfg(feature = "ssr")]
+impl DeploymentHandle {
+    pub fn new(info: DeploymentInfo) -> Self {
+        Self(std::sync::Arc::new(info))
+    }
+    pub fn get(&self) -> DeploymentInfo {
+        (*self.0).clone()
+    }
+}
+
 /// Public-facing snapshot — what the menu/checkout/home pages need to
 /// render. Cached in checkout context so the form picks it up via the
 /// existing `load_checkout_context` server fn.
@@ -187,6 +236,40 @@ pub async fn list_settings_all() -> Result<Vec<SettingRow>, ServerFnError> {
             hint_de,
         })
         .collect())
+}
+
+/// Deployment / tenancy diagnostics for the admin settings page. Returns the
+/// boot-time mode snapshot (`DeploymentHandle` from context) with the live
+/// `Host` + `X-Tenant` headers of THIS request layered on. Admin only.
+#[server(name = DeploymentInfoFn, prefix = "/api", endpoint = "deployment_info")]
+pub async fn deployment_info() -> Result<DeploymentInfo, ServerFnError> {
+    use axum::http::HeaderMap;
+    use leptos_axum::extract;
+
+    crate::pages::admin::require_admin().await?;
+
+    // Boot snapshot (mode, env files, service, db). Absent on a printerless /
+    // misconfigured boot → default (single-tenant, empty), never an error.
+    let mut info = use_context::<DeploymentHandle>()
+        .map(|h| h.get())
+        .unwrap_or_default();
+
+    // Layer the live request headers. nginx sets `X-Tenant` to the subdomain
+    // label in multi-tenant deploys; `Host` is always present.
+    if let Ok(headers) = extract::<HeaderMap>().await {
+        info.host = headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        info.subdomain = headers
+            .get("x-tenant")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+    }
+
+    Ok(info)
 }
 
 /// Update a single setting's value. Admin only.

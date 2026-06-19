@@ -1642,6 +1642,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2e102e6eb644d3e0b186fc161e4460417880a0a0b87d235f2e5b8fb30f2e9e0"
 
 [[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
 name = "gloo-net"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2646,10 +2652,11 @@ dependencies = [
 
 [[package]]
 name = "kitchen-protocol"
-version = "0.2.0"
+version = "2.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -4379,6 +4386,7 @@ dependencies = [
  "console_log",
  "http 1.4.0",
  "js-sys",
+ "kitchen-protocol",
  "leptos",
  "leptos_axum",
  "leptos_meta",
@@ -4416,6 +4424,7 @@ dependencies = [
  "dotenvy",
  "ecow",
  "futures",
+ "glob",
  "http 1.4.0",
  "image",
  "kitchen-protocol",

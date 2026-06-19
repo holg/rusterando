@@ -80,6 +80,10 @@ struct AppState {
     /// on an open `/api/live/*` connection (the old cause of the >60 s 502
     /// restart window — see the shutdown block in `main`).
     shutdown: tokio::sync::watch::Receiver<bool>,
+    /// Boot-time deployment/tenancy snapshot (single vs multi-tenant, env
+    /// files, service identity). Read by the admin /settings diagnostics fn.
+    #[allow(dead_code)]
+    deployment: rusterando_frontend::pages::settings::DeploymentHandle,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
@@ -172,6 +176,14 @@ async fn main() {
         .connect_with(connect_opts)
         .await
         .expect("open sqlite pool");
+
+    // Resolve single- vs multi-tenant mode from env + the working dir, and log
+    // it LOUDLY. Model A (single-tenant) is the fail-safe default — see
+    // `tenant::detect` + docs/multi_tenant.md. This snapshot also feeds the
+    // admin /settings deployment-diagnostics panel.
+    let deployment = rusterando_server::tenant::detect();
+    rusterando_server::tenant::log_mode(&deployment);
+    let deployment_handle = rusterando_frontend::pages::settings::DeploymentHandle::new(deployment);
 
     // Two-layer migrations:
     //   * the embedded folder under repo `migrations/` is the
@@ -398,6 +410,7 @@ async fn main() {
         uploads_dir: uploads_dir.clone(),
         jsonld,
         shutdown: shutdown_rx,
+        deployment: deployment_handle,
     };
 
     let routes = generate_route_list(App);
@@ -488,6 +501,7 @@ async fn main() {
                 let uploads =
                     rusterando_frontend::pages::settings::UploadsDir(state.uploads_dir.clone());
                 let jsonld = state.jsonld.clone();
+                let deployment = state.deployment.clone();
                 move || {
                     provide_context(db.clone());
                     provide_context(pwd.clone());
@@ -506,6 +520,8 @@ async fn main() {
                     provide_context(live.clone());
                     provide_context(uploads.clone());
                     provide_context(jsonld.clone());
+                    // DeploymentHandle — admin /settings diagnostics panel.
+                    provide_context(deployment.clone());
                 }
             },
             {
@@ -2201,6 +2217,7 @@ async fn server_fn_handler(
             let uploads =
                 rusterando_frontend::pages::settings::UploadsDir(state.uploads_dir.clone());
             let jsonld = state.jsonld.clone();
+            let deployment = state.deployment.clone();
             move || {
                 provide_context(db.clone());
                 provide_context(pwd.clone());
@@ -2216,6 +2233,8 @@ async fn server_fn_handler(
                 provide_context(live.clone());
                 provide_context(uploads.clone());
                 provide_context(jsonld.clone());
+                // DeploymentHandle — read by the deployment_info server fn.
+                provide_context(deployment.clone());
             }
         },
         req,

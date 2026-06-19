@@ -7,3 +7,4 @@ pub mod health;
 pub mod kitchen;
 pub mod pdf;
 pub mod printer_artifacts;
+pub mod tenant;
