@@ -65,7 +65,7 @@
         "additives_label": "Добавки:",
         "add_to_size": "Добавить",
         "expand_extras": "Добавить ингредиенты",
-        "expand_removals": "Zutaten weglassen",
+        "expand_removals": "Убрать ингредиенты",
         "removal_prefix": "без ",
         "menu_number_prefix": "№ {n}",
         "options_choose_n": "Выберите {min}–{max}.",

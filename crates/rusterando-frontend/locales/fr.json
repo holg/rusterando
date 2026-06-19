@@ -65,7 +65,7 @@
         "additives_label": "Additifs :",
         "add_to_size": "Ajouter",
         "expand_extras": "Ajouter des suppléments",
-        "expand_removals": "Zutaten weglassen",
+        "expand_removals": "Retirer des ingrédients",
         "removal_prefix": "sans ",
         "menu_number_prefix": "N° {n}",
         "options_choose_n": "Veuillez choisir {min}–{max}.",
@@ -101,7 +101,10 @@
         "decrement": "moins",
         "increment": "plus",
         "edit_extras": "Modifier les suppléments",
-        "remove": "supprimer"
+        "remove": "supprimer",
+        "giveaway_revoked": "🎁 Le cadeau gratuit sera retiré au paiement — la commande minimale de {amount} n’est plus atteinte.",
+        "sauce_garlic": "Sauce à l’ail",
+        "sauce_herb_butter": "Beurre aux herbes"
     },
     "voucher": {
         "enter_code": "Entrez un code",
@@ -182,10 +185,79 @@
         "estimated_delivery": "Livraison prévue",
         "voucher": "Bon",
         "reply_placeholder": "Répondre au restaurant…",
-        "reply_send": "Envoyer la réponse"
+        "reply_send": "Envoyer la réponse",
+        "delivery_address": "Adresse de livraison",
+        "delivery_chip": "🛵 Livraison",
+        "delivery_fee": "Supplément de livraison",
+        "delivery_time": "Délai de livraison",
+        "delivery_zone": "Zone de livraison : {zone}",
+        "email": "E-mail",
+        "grand_total": "Total",
+        "items_heading": "Commande",
+        "messages_heading": "📣 Messages du restaurant",
+        "name": "Nom",
+        "notify_btn": "🔔 Activer les notifications",
+        "notify_title": "Être notifié des nouveaux messages / changements de statut",
+        "order_number_inline": "Numéro de commande :",
+        "payment_hint_cash_delivery": "Paiement en espèces à la livraison au chauffeur.",
+        "payment_hint_cash_pickup": "Paiement en espèces au retrait.",
+        "payment_hint_cash_pickup_addr": "Paiement en espèces au retrait — {address}.",
+        "payment_hint_failed": "Échec du paiement. Veuillez réessayer.",
+        "payment_hint_failed_phone": "Échec du paiement. Veuillez réessayer ou commander par téléphone : {phone}.",
+        "payment_hint_paid": "Paiement confirmé. La commande est en cuisine.",
+        "payment_hint_pending": "Paiement en cours — cette page se mettra à jour dès la confirmation.",
+        "phone": "Téléphone",
+        "pickup_chip": "🏪 Retrait",
+        "pickup_time": "Retrait",
+        "see_menu": "Voir le reste de la carte",
+        "subtotal": "Sous-total",
+        "thanks": "Merci pour votre commande !"
     },
     "errors": {
         "page_not_found": "Page introuvable.",
         "not_logged_in": "non connecté"
+    },
+    "lieferservice": {
+        "delivery_eta": "Délai de livraison",
+        "delivery_fee": "Frais de livraison",
+        "eta_minutes": "env. {n} min",
+        "fee_free": "gratuit",
+        "min_order": "Commande minimum",
+        "title": "Livraison de pizzas {area}"
+    },
+    "notify": {
+        "order_updated": "Commande mise à jour",
+        "status_prefix": "Statut : {label}"
+    },
+    "payment_status": {
+        "cash_on_pickup": "Espèces au retrait",
+        "failed": "Échec du paiement",
+        "paid": "Payé en ligne ✓",
+        "pending": "Paiement en attente",
+        "refunded": "Remboursé",
+        "unknown": "—"
+    },
+    "shop_status": {
+        "closed": "🔴 Fermé",
+        "closed_now": "🟡 Actuellement fermé",
+        "closed_outside_hours": "Nous sommes actuellement fermés. Les commandes sont possibles pendant nos heures d’ouverture.",
+        "gate_back_at": "Nous reprenons les commandes à partir de {time}.",
+        "open": "🟢 Ouvert maintenant",
+        "open_hint": "Commande en ligne possible",
+        "opens_today_at": "Ouvert aujourd’hui à partir de {time}.",
+        "paused_no_orders": "Nous n’acceptons pas de commandes en ligne pour le moment.",
+        "paused_until": "Pause — de retour pour les commandes à partir de {time}.",
+        "ruhetag": "Jour de fermeture aujourd’hui — merci de commander un autre jour."
+    },
+    "status": {
+        "cancelled": "Annulée",
+        "delivered": "Livrée",
+        "out_for_delivery": "En route",
+        "pending_payment": "Paiement en attente",
+        "picked_up": "Récupérée",
+        "preparing": "En préparation",
+        "ready_for_pickup": "Prête au retrait",
+        "received": "Reçue",
+        "unknown": "Inconnu"
     }
 }

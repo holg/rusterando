@@ -65,7 +65,7 @@
         "additives_label": "Additives:",
         "add_to_size": "Add",
         "expand_extras": "Add extras",
-        "expand_removals": "Zutaten weglassen",
+        "expand_removals": "Remove ingredients",
         "removal_prefix": "without ",
         "menu_number_prefix": "No. {n}",
         "options_choose_n": "Please choose {min}–{max}.",
