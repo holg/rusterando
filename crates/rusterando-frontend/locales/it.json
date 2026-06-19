@@ -101,7 +101,10 @@
         "decrement": "meno",
         "increment": "più",
         "edit_extras": "Modifica aggiunte",
-        "remove": "rimuovi"
+        "remove": "rimuovi",
+        "giveaway_revoked": "🎁 L’omaggio gratuito verrà rimosso al checkout — l’ordine minimo di {amount} non è più raggiunto.",
+        "sauce_garlic": "Salsa all’aglio",
+        "sauce_herb_butter": "Burro alle erbe"
     },
     "voucher": {
         "enter_code": "Inserisci un codice",
@@ -182,10 +185,79 @@
         "estimated_delivery": "Consegna prevista",
         "voucher": "Buono",
         "reply_placeholder": "Rispondi al ristorante…",
-        "reply_send": "Invia risposta"
+        "reply_send": "Invia risposta",
+        "delivery_address": "Indirizzo di consegna",
+        "delivery_chip": "🛵 Consegna",
+        "delivery_fee": "Supplemento di consegna",
+        "delivery_time": "Tempo di consegna",
+        "delivery_zone": "Zona di consegna: {zone}",
+        "email": "E-mail",
+        "grand_total": "Totale",
+        "items_heading": "Ordine",
+        "messages_heading": "📣 Messaggi dal ristorante",
+        "name": "Nome",
+        "notify_btn": "🔔 Attiva le notifiche",
+        "notify_title": "Ricevi una notifica per nuovi messaggi / cambi di stato",
+        "order_number_inline": "Numero ordine:",
+        "payment_hint_cash_delivery": "Pagamento in contanti alla consegna al fattorino.",
+        "payment_hint_cash_pickup": "Pagamento in contanti al ritiro.",
+        "payment_hint_cash_pickup_addr": "Pagamento in contanti al ritiro — {address}.",
+        "payment_hint_failed": "Pagamento non riuscito. Riprova.",
+        "payment_hint_failed_phone": "Pagamento non riuscito. Riprova oppure ordina per telefono: {phone}.",
+        "payment_hint_paid": "Pagamento confermato. L’ordine è in cucina.",
+        "payment_hint_pending": "Pagamento in elaborazione — questa pagina si aggiornerà appena arriva la conferma.",
+        "phone": "Telefono",
+        "pickup_chip": "🏪 Ritiro",
+        "pickup_time": "Ritiro",
+        "see_menu": "Vedi il resto del menù",
+        "subtotal": "Subtotale",
+        "thanks": "Grazie per il tuo ordine!"
     },
     "errors": {
         "page_not_found": "Pagina non trovata.",
         "not_logged_in": "non connesso"
+    },
+    "lieferservice": {
+        "delivery_eta": "Tempo di consegna",
+        "delivery_fee": "Costo di consegna",
+        "eta_minutes": "circa {n} min",
+        "fee_free": "gratis",
+        "min_order": "Ordine minimo",
+        "title": "Consegna pizza {area}"
+    },
+    "notify": {
+        "order_updated": "Ordine aggiornato",
+        "status_prefix": "Stato: {label}"
+    },
+    "payment_status": {
+        "cash_on_pickup": "Contanti al ritiro",
+        "failed": "Pagamento non riuscito",
+        "paid": "Pagato online ✓",
+        "pending": "Pagamento in attesa",
+        "refunded": "Rimborsato",
+        "unknown": "—"
+    },
+    "shop_status": {
+        "closed": "🔴 Chiuso",
+        "closed_now": "🟡 Attualmente chiuso",
+        "closed_outside_hours": "Siamo attualmente chiusi. Gli ordini sono possibili durante i nostri orari di apertura.",
+        "gate_back_at": "Torniamo a prendere ordini dalle {time}.",
+        "open": "🟢 Aperto ora",
+        "open_hint": "Ordine online disponibile",
+        "opens_today_at": "Oggi aperto dalle {time}.",
+        "paused_no_orders": "Al momento non accettiamo ordini online.",
+        "paused_until": "Pausa — di nuovo disponibili per gli ordini dalle {time}.",
+        "ruhetag": "Oggi giorno di chiusura — ordina un altro giorno."
+    },
+    "status": {
+        "cancelled": "Annullato",
+        "delivered": "Consegnato",
+        "out_for_delivery": "In consegna",
+        "pending_payment": "Pagamento in attesa",
+        "picked_up": "Ritirato",
+        "preparing": "In preparazione",
+        "ready_for_pickup": "Pronto per il ritiro",
+        "received": "Ricevuto",
+        "unknown": "Sconosciuto"
     }
 }

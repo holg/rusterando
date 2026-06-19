@@ -101,7 +101,10 @@
         "decrement": "menos",
         "increment": "más",
         "edit_extras": "Editar extras",
-        "remove": "quitar"
+        "remove": "quitar",
+        "giveaway_revoked": "🎁 El regalo gratis se eliminará al pagar — ya no se alcanza el pedido mínimo de {amount}.",
+        "sauce_garlic": "Salsa de ajo",
+        "sauce_herb_butter": "Mantequilla de hierbas"
     },
     "voucher": {
         "enter_code": "Introduce un código",
@@ -182,10 +185,79 @@
         "estimated_delivery": "Entrega estimada",
         "voucher": "Cupón",
         "reply_placeholder": "Responder al restaurante…",
-        "reply_send": "Enviar respuesta"
+        "reply_send": "Enviar respuesta",
+        "delivery_address": "Dirección de entrega",
+        "delivery_chip": "🛵 Entrega",
+        "delivery_fee": "Recargo de entrega",
+        "delivery_time": "Tiempo de entrega",
+        "delivery_zone": "Zona de reparto: {zone}",
+        "email": "Correo electrónico",
+        "grand_total": "Total",
+        "items_heading": "Pedido",
+        "messages_heading": "📣 Mensajes del restaurante",
+        "name": "Nombre",
+        "notify_btn": "🔔 Activar notificaciones",
+        "notify_title": "Recibir aviso de nuevos mensajes / cambios de estado",
+        "order_number_inline": "Número de pedido:",
+        "payment_hint_cash_delivery": "Pago en efectivo al repartidor en la entrega.",
+        "payment_hint_cash_pickup": "Pago en efectivo al recoger.",
+        "payment_hint_cash_pickup_addr": "Pago en efectivo al recoger — {address}.",
+        "payment_hint_failed": "El pago ha fallado. Inténtalo de nuevo.",
+        "payment_hint_failed_phone": "El pago ha fallado. Inténtalo de nuevo o pide por teléfono: {phone}.",
+        "payment_hint_paid": "Pago confirmado. El pedido está en la cocina.",
+        "payment_hint_pending": "Procesando el pago — esta página se actualizará en cuanto llegue la confirmación.",
+        "phone": "Teléfono",
+        "pickup_chip": "🏪 Recogida",
+        "pickup_time": "Recogida",
+        "see_menu": "Ver el resto de la carta",
+        "subtotal": "Subtotal",
+        "thanks": "¡Gracias por tu pedido!"
     },
     "errors": {
         "page_not_found": "Página no encontrada.",
         "not_logged_in": "no conectado"
+    },
+    "lieferservice": {
+        "delivery_eta": "Tiempo de entrega",
+        "delivery_fee": "Gastos de envío",
+        "eta_minutes": "aprox. {n} min",
+        "fee_free": "gratis",
+        "min_order": "Pedido mínimo",
+        "title": "Reparto de pizzas {area}"
+    },
+    "notify": {
+        "order_updated": "Pedido actualizado",
+        "status_prefix": "Estado: {label}"
+    },
+    "payment_status": {
+        "cash_on_pickup": "Efectivo al recoger",
+        "failed": "Pago fallido",
+        "paid": "Pagado en línea ✓",
+        "pending": "Pago pendiente",
+        "refunded": "Reembolsado",
+        "unknown": "—"
+    },
+    "shop_status": {
+        "closed": "🔴 Cerrado",
+        "closed_now": "🟡 Cerrado ahora",
+        "closed_outside_hours": "Estamos cerrados en este momento. Los pedidos son posibles durante nuestro horario de apertura.",
+        "gate_back_at": "Volvemos a aceptar pedidos a partir de las {time}.",
+        "open": "🟢 Abierto ahora",
+        "open_hint": "Pedido en línea disponible",
+        "opens_today_at": "Hoy abierto a partir de las {time}.",
+        "paused_no_orders": "Por el momento no aceptamos pedidos en línea.",
+        "paused_until": "Pausa — de nuevo disponibles para pedidos a partir de las {time}.",
+        "ruhetag": "Hoy día de cierre — por favor pide otro día."
+    },
+    "status": {
+        "cancelled": "Cancelado",
+        "delivered": "Entregado",
+        "out_for_delivery": "En camino",
+        "pending_payment": "Pago pendiente",
+        "picked_up": "Recogido",
+        "preparing": "En preparación",
+        "ready_for_pickup": "Listo para recoger",
+        "received": "Recibido",
+        "unknown": "Desconocido"
     }
 }

@@ -101,7 +101,10 @@
         "decrement": "меньше",
         "increment": "больше",
         "edit_extras": "Изменить добавки",
-        "remove": "удалить"
+        "remove": "удалить",
+        "giveaway_revoked": "🎁 Бесплатный подарок будет убран при оформлении — минимальная сумма заказа {amount} больше не достигнута.",
+        "sauce_garlic": "Чесночный соус",
+        "sauce_herb_butter": "Травяное масло"
     },
     "voucher": {
         "enter_code": "Введите код",
@@ -182,10 +185,79 @@
         "estimated_delivery": "Ожидаемая доставка",
         "voucher": "Купон",
         "reply_placeholder": "Ответить ресторану…",
-        "reply_send": "Отправить ответ"
+        "reply_send": "Отправить ответ",
+        "delivery_address": "Адрес доставки",
+        "delivery_chip": "🛵 Доставка",
+        "delivery_fee": "Доплата за доставку",
+        "delivery_time": "Время доставки",
+        "delivery_zone": "Зона доставки: {zone}",
+        "email": "Эл. почта",
+        "grand_total": "Итого",
+        "items_heading": "Заказ",
+        "messages_heading": "📣 Сообщения от ресторана",
+        "name": "Имя",
+        "notify_btn": "🔔 Включить уведомления",
+        "notify_title": "Получать уведомления о новых сообщениях / изменениях статуса",
+        "order_number_inline": "Номер заказа:",
+        "payment_hint_cash_delivery": "Оплата наличными курьеру при доставке.",
+        "payment_hint_cash_pickup": "Оплата наличными при самовывозе.",
+        "payment_hint_cash_pickup_addr": "Оплата наличными при самовывозе — {address}.",
+        "payment_hint_failed": "Оплата не прошла. Пожалуйста, попробуйте ещё раз.",
+        "payment_hint_failed_phone": "Оплата не прошла. Попробуйте ещё раз или закажите по телефону: {phone}.",
+        "payment_hint_paid": "Оплата подтверждена. Заказ передан на кухню.",
+        "payment_hint_pending": "Оплата обрабатывается — страница обновится, как только придёт подтверждение.",
+        "phone": "Телефон",
+        "pickup_chip": "🏪 Самовывоз",
+        "pickup_time": "Самовывоз",
+        "see_menu": "Посмотреть остальное меню",
+        "subtotal": "Промежуточный итог",
+        "thanks": "Спасибо за ваш заказ!"
     },
     "errors": {
         "page_not_found": "Страница не найдена.",
         "not_logged_in": "не авторизован"
+    },
+    "lieferservice": {
+        "delivery_eta": "Время доставки",
+        "delivery_fee": "Стоимость доставки",
+        "eta_minutes": "около {n} мин",
+        "fee_free": "бесплатно",
+        "min_order": "Минимальный заказ",
+        "title": "Доставка пиццы {area}"
+    },
+    "notify": {
+        "order_updated": "Заказ обновлён",
+        "status_prefix": "Статус: {label}"
+    },
+    "payment_status": {
+        "cash_on_pickup": "Наличными при самовывозе",
+        "failed": "Оплата не прошла",
+        "paid": "Оплачено онлайн ✓",
+        "pending": "Ожидает оплаты",
+        "refunded": "Возвращено",
+        "unknown": "—"
+    },
+    "shop_status": {
+        "closed": "🔴 Закрыто",
+        "closed_now": "🟡 Сейчас закрыто",
+        "closed_outside_hours": "Сейчас мы закрыты. Заказы принимаются в часы работы.",
+        "gate_back_at": "Снова принимаем заказы с {time}.",
+        "open": "🟢 Открыто сейчас",
+        "open_hint": "Доступен онлайн-заказ",
+        "opens_today_at": "Сегодня открыто с {time}.",
+        "paused_no_orders": "В настоящее время мы не принимаем онлайн-заказы.",
+        "paused_until": "Перерыв — снова принимаем заказы с {time}.",
+        "ruhetag": "Сегодня выходной — пожалуйста, закажите в другой день."
+    },
+    "status": {
+        "cancelled": "Отменён",
+        "delivered": "Доставлен",
+        "out_for_delivery": "В пути",
+        "pending_payment": "Ожидает оплаты",
+        "picked_up": "Забран",
+        "preparing": "Готовится",
+        "ready_for_pickup": "Готов к выдаче",
+        "received": "Принят",
+        "unknown": "Неизвестно"
     }
 }

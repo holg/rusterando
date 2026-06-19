@@ -101,7 +101,10 @@
         "decrement": "menos",
         "increment": "mais",
         "edit_extras": "Editar extras",
-        "remove": "remover"
+        "remove": "remover",
+        "giveaway_revoked": "🎁 O brinde grátis será removido no checkout — o pedido mínimo de {amount} já não é atingido.",
+        "sauce_garlic": "Molho de alho",
+        "sauce_herb_butter": "Manteiga de ervas"
     },
     "voucher": {
         "enter_code": "Introduza um código",
@@ -182,10 +185,79 @@
         "estimated_delivery": "Entrega prevista",
         "voucher": "Cupom",
         "reply_placeholder": "Responder ao restaurante…",
-        "reply_send": "Enviar resposta"
+        "reply_send": "Enviar resposta",
+        "delivery_address": "Endereço de entrega",
+        "delivery_chip": "🛵 Entrega",
+        "delivery_fee": "Acréscimo de entrega",
+        "delivery_time": "Tempo de entrega",
+        "delivery_zone": "Zona de entrega: {zone}",
+        "email": "E-mail",
+        "grand_total": "Total",
+        "items_heading": "Pedido",
+        "messages_heading": "📣 Mensagens do restaurante",
+        "name": "Nome",
+        "notify_btn": "🔔 Ativar notificações",
+        "notify_title": "Ser notificado sobre novas mensagens / mudanças de estado",
+        "order_number_inline": "Número do pedido:",
+        "payment_hint_cash_delivery": "Pagamento em dinheiro na entrega ao estafeta.",
+        "payment_hint_cash_pickup": "Pagamento em dinheiro no levantamento.",
+        "payment_hint_cash_pickup_addr": "Pagamento em dinheiro no levantamento — {address}.",
+        "payment_hint_failed": "O pagamento falhou. Tente novamente.",
+        "payment_hint_failed_phone": "O pagamento falhou. Tente novamente ou faça o pedido por telefone: {phone}.",
+        "payment_hint_paid": "Pagamento confirmado. O pedido está na cozinha.",
+        "payment_hint_pending": "A processar o pagamento — esta página será atualizada assim que a confirmação chegar.",
+        "phone": "Telefone",
+        "pickup_chip": "🏪 Levantamento",
+        "pickup_time": "Levantamento",
+        "see_menu": "Ver o resto do menu",
+        "subtotal": "Subtotal",
+        "thanks": "Obrigado pelo seu pedido!"
     },
     "errors": {
         "page_not_found": "Página não encontrada.",
         "not_logged_in": "não autenticado"
+    },
+    "lieferservice": {
+        "delivery_eta": "Tempo de entrega",
+        "delivery_fee": "Taxa de entrega",
+        "eta_minutes": "aprox. {n} min",
+        "fee_free": "grátis",
+        "min_order": "Pedido mínimo",
+        "title": "Entrega de pizzas {area}"
+    },
+    "notify": {
+        "order_updated": "Pedido atualizado",
+        "status_prefix": "Estado: {label}"
+    },
+    "payment_status": {
+        "cash_on_pickup": "Dinheiro no levantamento",
+        "failed": "Pagamento falhado",
+        "paid": "Pago online ✓",
+        "pending": "Pagamento pendente",
+        "refunded": "Reembolsado",
+        "unknown": "—"
+    },
+    "shop_status": {
+        "closed": "🔴 Fechado",
+        "closed_now": "🟡 Fechado neste momento",
+        "closed_outside_hours": "Estamos fechados neste momento. Os pedidos são possíveis durante o nosso horário de funcionamento.",
+        "gate_back_at": "Voltamos a aceitar pedidos a partir das {time}.",
+        "open": "🟢 Aberto agora",
+        "open_hint": "Pedido online disponível",
+        "opens_today_at": "Hoje aberto a partir das {time}.",
+        "paused_no_orders": "De momento não aceitamos pedidos online.",
+        "paused_until": "Pausa — disponíveis novamente para pedidos a partir das {time}.",
+        "ruhetag": "Hoje dia de descanso — por favor faça o pedido noutro dia."
+    },
+    "status": {
+        "cancelled": "Cancelado",
+        "delivered": "Entregue",
+        "out_for_delivery": "A caminho",
+        "pending_payment": "Pagamento pendente",
+        "picked_up": "Levantado",
+        "preparing": "Em preparação",
+        "ready_for_pickup": "Pronto para levantamento",
+        "received": "Recebido",
+        "unknown": "Desconhecido"
     }
 }
