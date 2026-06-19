@@ -14,6 +14,23 @@ pub fn AdminShell(children: Children) -> impl IntoView {
         logout.dispatch(AdminLogout {});
     };
 
+    // The logout server fn clears the `admin_session` cookie, but it's
+    // dispatched as an in-page fetch (not a form navigation), so the
+    // `leptos_axum::redirect` it returns doesn't move the browser — the admin
+    // would stay on the now-unauthenticated page with stale in-memory state.
+    // Once the action resolves Ok, force a FULL page load to /admin/login: the
+    // admin-auth middleware re-checks the (now-absent) cookie on that real
+    // navigation and the session is truly gone. Same reload trick the
+    // stripe-mode flip uses in settings_admin.rs.
+    #[cfg(feature = "hydrate")]
+    Effect::new(move |_| {
+        if matches!(logout.value().get(), Some(Ok(()))) {
+            if let Some(w) = web_sys::window() {
+                let _ = w.location().set_href("/admin/login");
+            }
+        }
+    });
+
     // Brand text via Resource (same pattern as stripe chip + theme).
     // Previously this was a `#[cfg(feature = "ssr")]` context read, which
     // rendered "Davids Pizzeria — Admin" on the server but

@@ -43,8 +43,14 @@ pub async fn admin_logout() -> Result<(), ServerFnError> {
     use leptos_axum::extract;
     use tower_cookies::{Cookie, Cookies};
     let cookies: Cookies = extract().await?;
+    // Clear the session cookie. The attributes MUST match the ones set at
+    // login (HttpOnly, SameSite=Lax, Path=/) — a browser only overwrites/
+    // deletes a cookie whose key attributes line up; a mismatch can leave the
+    // original in place. Max-Age=0 expires it immediately.
     let mut c = Cookie::new("admin_session", "");
     c.set_path("/");
+    c.set_http_only(true);
+    c.set_same_site(tower_cookies::cookie::SameSite::Lax);
     c.set_max_age(tower_cookies::cookie::time::Duration::ZERO);
     cookies.add(c);
     leptos_axum::redirect("/");
