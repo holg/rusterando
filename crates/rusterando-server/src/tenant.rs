@@ -30,37 +30,42 @@ pub fn detect() -> DeploymentInfo {
     let site_addr = std::env::var("LEPTOS_SITE_ADDR").unwrap_or_default();
 
     let env_file = std::env::var("ENV_FILE").ok().filter(|s| !s.is_empty());
-    let kill_switch = std::env::var("MULTI_TENANT")
-        .map(|v| v == "0")
-        .unwrap_or(false);
 
-    // The env files visible in the working directory. bare `.env` counts.
+    // The env files matching the (possibly ENV_GLOB-scoped) pattern. bare
+    // `.env` counts. Used by the count heuristic + the load report.
     let env_files = glob_env_files();
 
-    // --- The 4-gate rule (first match wins; Model A is the default) ---------
-    // 1. MULTI_TENANT=0 kill-switch  -> single-tenant, forced.
-    // 2. ENV_FILE pinned             -> single-tenant, forced.
-    // 3. count `.env*` <= 1          -> single-tenant.
-    // 4. >=2 env files               -> multi-tenant candidate; the registry
-    //    (follow-up) enforces distinct DBs and may fall back to single. For
-    //    DETECTION we report multi-tenant here.
-    let multi_tenant = !kill_switch && env_file.is_none() && env_files.len() >= 2;
+    // --- Mode selection (Model A = the fail-safe default) -------------------
+    // `MULTI_TENANT` is the EXPLICIT selector, read from the active `.env`
+    // (e.g. `.env.rusterando` sets MULTI_TENANT=1). It wins over everything:
+    //   MULTI_TENANT=1            -> multi-tenant (explicit opt-in)
+    //   MULTI_TENANT=0 (or false) -> single-tenant (kill-switch)
+    // When UNSET, fall back to the safe heuristic: a pinned single ENV_FILE,
+    // or ≤1 discovered env file ⇒ single; ≥2 ⇒ multi.
+    let multi_tenant = match std::env::var("MULTI_TENANT").ok().as_deref() {
+        Some("1") | Some("true") | Some("yes") | Some("on") => true,
+        Some("0") | Some("false") | Some("no") | Some("off") | Some("") => false,
+        Some(_) | None => env_file.is_none() && env_files.len() >= 2,
+    };
 
-    // What we report as "loaded": the pinned ENV_FILE, else the discovered set
-    // (single-tenant collapses to the one file actually in effect).
-    let reported_env_files = match (&env_file, multi_tenant) {
-        (Some(f), _) => vec![f.clone()],
-        (None, true) => env_files,
-        (None, false) => {
-            // Single-tenant: the bare `.env` if present, else whatever the one
-            // discovered file was, else "(env injected)" for prod systemd
-            // which sets the environment directly without a file on disk.
-            if env_files.is_empty() {
-                vec!["(env injected by systemd)".to_string()]
-            } else {
-                env_files
-            }
+    // What we report as the env file(s) in effect.
+    let reported_env_files = if multi_tenant {
+        // Multi: the discovered candidate set (the load report names the
+        // actual tenants). Fall back to the parent ENV_FILE if the glob came
+        // up empty.
+        if env_files.is_empty() {
+            env_file.clone().into_iter().collect()
+        } else {
+            env_files
         }
+    } else if let Some(f) = &env_file {
+        // Single, pinned to one profile.
+        vec![f.clone()]
+    } else if env_files.is_empty() {
+        // Single, env injected directly (prod systemd, no file on disk).
+        vec!["(env injected by systemd)".to_string()]
+    } else {
+        env_files
     };
 
     DeploymentInfo {
@@ -82,9 +87,11 @@ pub fn detect() -> DeploymentInfo {
 /// journal.
 pub fn log_mode(info: &DeploymentInfo) {
     if info.multi_tenant {
+        // The per-tenant load report (logged separately right after this in
+        // main.rs) is the authoritative list; this line just announces the
+        // mode + which env file(s) were discovered as the parent/candidates.
         tracing::warn!(
-            "MODE: multi-tenant — {} env files: {}",
-            info.env_files.len(),
+            "MODE: multi-tenant — discovered env file(s): {}",
             info.env_files.join(", ")
         );
     } else {
@@ -112,12 +119,31 @@ fn db_stem(db_url: &str) -> String {
         .unwrap_or_else(|| "rusterando".to_string())
 }
 
-/// All `.env*` files in the current working directory (sorted, deduped).
-/// Bare `.env` counts toward the multi-tenant trigger. Backup-ish siblings
-/// (`.env.bak`, `.env.example`, `.env.*.example`) are excluded so a stray
-/// template can't flip a real shop — only real profile files count.
+/// The glob pattern used to discover tenant env files. Resolution order:
+///   1. explicit `ENV_GLOB` (operator override),
+///   2. else, when a parent `ENV_FILE` is set, scope to ITS children:
+///      `ENV_FILE=.env.rusterando` ⇒ `.env.rusterando*` — so the rusterando
+///      profile owns `.env.rusterando` + `.env.rusterando.flizza` + … and
+///      `.env.davids` / bare `.env` in the same dir are IGNORED (you run the
+///      real rusterando/flizza tenants in place without touching anything),
+///   3. else the wide default `.env*`.
+fn env_glob_pattern() -> String {
+    if let Some(g) = std::env::var("ENV_GLOB").ok().filter(|s| !s.is_empty()) {
+        return g;
+    }
+    if let Some(f) = std::env::var("ENV_FILE").ok().filter(|s| !s.is_empty()) {
+        // `.env.rusterando` → `.env.rusterando*` (matches itself + children).
+        return format!("{f}*");
+    }
+    ".env*".to_string()
+}
+
+/// All env files matching the glob (default `.env*`) in the working dir,
+/// sorted + deduped. Bare `.env` counts toward the multi-tenant trigger.
+/// Backup-ish siblings (`.env.bak`, `.env.example`, …) are always excluded so
+/// a stray template can't flip a real shop — only real profile files count.
 fn glob_env_files() -> Vec<String> {
-    let mut out: Vec<String> = glob::glob(".env*")
+    let mut out: Vec<String> = glob::glob(&env_glob_pattern())
         .map(|paths| {
             paths
                 .filter_map(Result::ok)
@@ -217,12 +243,12 @@ impl Tenants {
         v
     }
 
-    /// Build `.env.<slug>` into a tenant and insert/replace it. Rejects a NEW
-    /// slug whose resolved DB collides with an already-loaded tenant's
-    /// (distinct DBs are mandatory). Re-loading the SAME slug onto its own DB
-    /// is fine (in-place replace).
-    pub async fn load(&self, slug: &str) -> anyhow::Result<()> {
-        let tenant = build_tenant(slug).await?;
+    /// Build a tenant from `env_file` under `slug` and insert/replace it.
+    /// Rejects a NEW slug whose resolved DB collides with an already-loaded
+    /// tenant's (distinct DBs are mandatory). Re-loading the SAME slug onto its
+    /// own DB is fine (in-place replace).
+    pub async fn load(&self, slug: &str, env_file: &str) -> anyhow::Result<()> {
+        let tenant = build_tenant(slug, env_file).await?;
         let mut map = self.0.write().await;
         if let Some((existing_slug, _)) = map
             .iter()
@@ -238,6 +264,22 @@ impl Tenants {
         Ok(())
     }
 
+    /// Reload a tenant by slug (the hot-add path). Finds its env file among the
+    /// discovered set — the child whose `slug_from_filename` matches — then
+    /// loads it. Errors clearly if no file maps to that slug.
+    pub async fn load_by_slug(&self, slug: &str) -> anyhow::Result<()> {
+        let file = glob_env_files()
+            .into_iter()
+            .find(|f| slug_from_filename(f) == slug)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no env file maps to slug '{slug}' (looked for one whose \
+                     name yields '{slug}' under the active ENV_GLOB/ENV_FILE)"
+                )
+            })?;
+        self.load(slug, &file).await
+    }
+
     /// Directly insert a pre-built tenant (used for the Model-A passthrough,
     /// which wraps the global pool rather than re-opening from `.env`).
     pub async fn insert(&self, tenant: Tenant) {
@@ -250,18 +292,18 @@ pub fn valid_slug(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
-/// Build a tenant from `.env.<slug>`. Parses the env file into a LOCAL map
-/// (never mutates the process environment — that would clobber other tenants),
-/// opens `data/<slug>.sqlite` (WAL + 5s busy_timeout, matching the Model-A
-/// pool), and runs migrations. Per-tenant handles are a follow-up.
-pub async fn build_tenant(slug: &str) -> anyhow::Result<Tenant> {
+/// Build a tenant `slug` from its env file at `env_file` (the REAL filename,
+/// which may be a child like `.env.rusterando.flizza`, not `.env.<slug>`).
+/// Parses the env file into a LOCAL map (never mutates the process
+/// environment — that would clobber other tenants), opens its `DATABASE_URL`
+/// (WAL + 5s busy_timeout, matching the Model-A pool), and runs migrations.
+pub async fn build_tenant(slug: &str, env_file: &str) -> anyhow::Result<Tenant> {
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
     anyhow::ensure!(valid_slug(slug), "invalid tenant slug: {slug:?}");
 
-    let env_path = format!(".env.{slug}");
-    let vars: HashMap<String, String> = dotenvy::from_path_iter(&env_path)
-        .map_err(|e| anyhow::anyhow!("read {env_path}: {e}"))?
+    let vars: HashMap<String, String> = dotenvy::from_path_iter(env_file)
+        .map_err(|e| anyhow::anyhow!("read {env_file}: {e}"))?
         .filter_map(Result::ok)
         .collect();
 
@@ -313,6 +355,126 @@ pub async fn build_tenant(slug: &str) -> anyhow::Result<Tenant> {
         database_url,
         handles,
     })
+}
+
+/// Outcome of trying to load one tenant env file — for the boot report.
+pub enum TenantLoad {
+    Loaded {
+        file: String,
+        slug: String,
+        db: String,
+    },
+    /// File present but NOT loaded — `reason` says exactly why.
+    Skipped {
+        file: String,
+        slug: String,
+        reason: String,
+    },
+}
+
+/// The tenant slug for an env filename.
+///
+/// When a PARENT profile is active (`ENV_FILE=.env.rusterando`), a child file
+/// `.env.rusterando.flizza` yields the slug `flizza` (the label after the
+/// parent prefix) — so `.env.rusterando.*` are the rusterando tenants. The
+/// parent file itself (`.env.rusterando`) yields `rusterando`, which is an apex
+/// label and gets skipped as the landing/showroom.
+///
+/// With NO parent, the slug is everything after `.env.` — so `.env.flizza` →
+/// `flizza`, and `.env.rusterando.flizza` → `rusterando.flizza` (rejected as
+/// invalid, with a clear message: dots aren't allowed in a single-label slug).
+pub fn slug_from_filename(file: &str) -> String {
+    let parent = std::env::var("ENV_FILE").ok().filter(|s| !s.is_empty());
+    slug_from_filename_with_parent(file, parent.as_deref())
+}
+
+/// Pure core of `slug_from_filename` (testable — no env read). `parent` is the
+/// active `ENV_FILE`, if any.
+fn slug_from_filename_with_parent(file: &str, parent: Option<&str>) -> String {
+    if let Some(parent) = parent.filter(|s| !s.is_empty()) {
+        if let Some(rest) = file.strip_prefix(&format!("{parent}.")) {
+            return rest.to_string();
+        }
+    }
+    file.strip_prefix(".env.").unwrap_or(file).to_string()
+}
+
+/// Discover and load every tenant env file (honouring `ENV_GLOB`), returning a
+/// per-file report. EXPLAINS each skip precisely: bare `.env`, apex label,
+/// invalid slug (and which char), or the underlying build/migrate/collision
+/// error. Never aborts — a broken tenant logs + skips, the rest load.
+pub async fn load_all_tenants(registry: &Tenants) -> Vec<TenantLoad> {
+    let mut report = Vec::new();
+    for file in glob_env_files() {
+        // The bare `.env` has no slug — it's the single-tenant default file,
+        // not a Model-B tenant. Report it so its presence is visible.
+        if file == ".env" {
+            report.push(TenantLoad::Skipped {
+                file: file.clone(),
+                slug: String::new(),
+                reason: "bare `.env` is the single-tenant default file, not a \
+                         multi-tenant tenant (give each tenant its own \
+                         `.env.<slug>`)"
+                    .to_string(),
+            });
+            continue;
+        }
+        let slug = slug_from_filename(&file);
+
+        if is_apex_label(&slug) {
+            report.push(TenantLoad::Skipped {
+                file: file.clone(),
+                slug: slug.clone(),
+                reason: format!(
+                    "slug '{slug}' is an apex/landing label (reserved) — it \
+                     resolves to the landing page, not a tenant"
+                ),
+            });
+            continue;
+        }
+        if !valid_slug(&slug) {
+            let bad: String = slug
+                .chars()
+                .filter(|c| !(c.is_ascii_alphanumeric() || *c == '-'))
+                .collect();
+            report.push(TenantLoad::Skipped {
+                file: file.clone(),
+                slug: slug.clone(),
+                reason: format!(
+                    "slug '{slug}' is invalid — only [a-z0-9-] allowed, but it \
+                     contains {bad:?}. A tenant slug must be a single DNS label \
+                     (it becomes `<slug>.rusterando.de` + `data/<slug>.sqlite`). \
+                     Rename the file to `.env.<single-label>` (e.g. \
+                     `.env.flizza`), or set its slug another way."
+                ),
+            });
+            continue;
+        }
+
+        match registry.load(&slug, &file).await {
+            Ok(()) => {
+                let db = registry
+                    .get(&slug)
+                    .await
+                    .map(|t| t.database_url)
+                    .unwrap_or_default();
+                report.push(TenantLoad::Loaded {
+                    file: file.clone(),
+                    slug,
+                    db,
+                });
+            }
+            Err(e) => report.push(TenantLoad::Skipped {
+                file: file.clone(),
+                slug,
+                // e already carries the precise cause: `read .env.x` parse
+                // error at a line, DB collision, parse DATABASE_URL, open pool,
+                // or migrate failure.
+                reason: format!("{e:#}"),
+            }),
+        }
+    }
+    report
 }
 
 /// Build the 6 cached config handles from a pool — the same boot sequence
@@ -501,11 +663,11 @@ pub async fn reload_tenant(
     if !valid_slug(&slug) {
         return StatusCode::BAD_REQUEST.into_response();
     }
-    match router.tenants.load(&slug).await {
+    match router.tenants.load_by_slug(&slug).await {
         Ok(()) => (StatusCode::OK, format!("loaded {slug}\n")).into_response(),
         Err(e) => {
             tracing::warn!("reload tenant {slug} failed: {e}");
-            (StatusCode::BAD_REQUEST, format!("reload failed: {e}\n")).into_response()
+            (StatusCode::BAD_REQUEST, format!("reload failed: {e:#}\n")).into_response()
         }
     }
 }
@@ -529,5 +691,39 @@ mod tests {
         assert!(!is_non_profile_env(".env"));
         assert!(!is_non_profile_env(".env.davids"));
         assert!(!is_non_profile_env(".env.rusterando.flizza"));
+    }
+
+    #[test]
+    fn slug_derivation_parent_aware() {
+        // No parent: slug is everything after `.env.`
+        assert_eq!(
+            slug_from_filename_with_parent(".env.flizza", None),
+            "flizza"
+        );
+        assert_eq!(
+            slug_from_filename_with_parent(".env.rusterando.flizza", None),
+            "rusterando.flizza" // dotted -> later rejected by valid_slug
+        );
+        // Parent `.env.rusterando`: child yields the label after the prefix.
+        let p = Some(".env.rusterando");
+        assert_eq!(
+            slug_from_filename_with_parent(".env.rusterando.flizza", p),
+            "flizza"
+        );
+        // The parent file itself -> "rusterando" (an apex label -> skipped).
+        assert_eq!(
+            slug_from_filename_with_parent(".env.rusterando", p),
+            "rusterando"
+        );
+        assert!(is_apex_label("rusterando"));
+    }
+
+    #[test]
+    fn valid_slug_rejects_dots_and_traversal() {
+        assert!(valid_slug("flizza"));
+        assert!(valid_slug("neue-doener"));
+        assert!(!valid_slug("rusterando.flizza")); // dot
+        assert!(!valid_slug("../etc")); // path traversal
+        assert!(!valid_slug("")); // empty
     }
 }

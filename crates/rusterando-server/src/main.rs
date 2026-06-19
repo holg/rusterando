@@ -357,18 +357,31 @@ async fn main() {
     );
     let tenants = rusterando_server::tenant::Tenants::new();
     if multi_tenant {
-        for name in std::fs::read_dir(".")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| e.file_name().into_string().ok())
-            .filter(|n| n.starts_with(".env.") && !n.ends_with(".example") && !n.ends_with(".bak"))
-        {
-            let slug = name.trim_start_matches(".env.").to_string();
-            match tenants.load(&slug).await {
-                Ok(()) => tracing::info!("tenant loaded: {slug}"),
-                Err(e) => tracing::warn!("tenant {slug} skipped: {e}"),
+        // Load every tenant env file, with a PRECISE per-file report: each
+        // skip says exactly why (invalid slug + offending char, apex label,
+        // DB collision, parse/migrate error). Never aborts boot.
+        use rusterando_server::tenant::TenantLoad;
+        let report = rusterando_server::tenant::load_all_tenants(&tenants).await;
+        let (mut loaded, mut skipped) = (0u32, 0u32);
+        for entry in &report {
+            match entry {
+                TenantLoad::Loaded { file, slug, db } => {
+                    loaded += 1;
+                    tracing::info!("tenant loaded: {slug}  (from {file} → {db})");
+                }
+                TenantLoad::Skipped { file, slug, reason } => {
+                    skipped += 1;
+                    tracing::warn!("tenant SKIPPED: {file} (slug '{slug}') — {reason}");
+                }
             }
+        }
+        tracing::info!("tenant load summary: {loaded} loaded, {skipped} skipped");
+        if loaded == 0 {
+            tracing::warn!(
+                "no tenants loaded — every `/api/*` request will 404. Check the \
+                 SKIPPED lines above; set ENV_GLOB to scope which `.env*` files \
+                 count (e.g. ENV_GLOB=.env.rusterando*)."
+            );
         }
     } else {
         tenants.insert(single_tenant.clone()).await;
