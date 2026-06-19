@@ -92,6 +92,26 @@ impl axum::extract::FromRef<AppState> for LeptosOptions {
     }
 }
 
+/// Read the per-request tenant's SqlitePool out of the Leptos context.
+///
+/// `resolve_tenant` stashed the `Tenant` in the request extensions; leptos_axum
+/// auto-provides the request `Parts` (incl. extensions) into the reactive
+/// context before our context closures run, so we pull the tenant's pool from
+/// there. Returns `None` when no tenant resolved (apex/landing) — callers fall
+/// back to the global pool. Must run inside a Leptos owner (the context
+/// closure), which is exactly where it's called.
+fn tenant_pool_from_context() -> Option<sqlx::SqlitePool> {
+    use leptos::prelude::use_context;
+    use_context::<http::request::Parts>()
+        .and_then(|parts| {
+            parts
+                .extensions
+                .get::<rusterando_server::tenant::Tenant>()
+                .cloned()
+        })
+        .map(|t| t.pool)
+}
+
 /// Load the dotenv file, honouring an `ENV_FILE` override so a single
 /// checkout can run any tenant/profile without symlinking or sourcing:
 ///
@@ -183,7 +203,42 @@ async fn main() {
     // admin /settings deployment-diagnostics panel.
     let deployment = rusterando_server::tenant::detect();
     rusterando_server::tenant::log_mode(&deployment);
+    let multi_tenant = deployment.multi_tenant;
+    let single_tenant = rusterando_server::tenant::Tenant {
+        slug: deployment.tenant_slug.clone(),
+        pool: db.clone(),
+        database_url: deployment.database_url.clone(),
+    };
     let deployment_handle = rusterando_frontend::pages::settings::DeploymentHandle::new(deployment);
+
+    // Tenant registry. Model A: a single passthrough tenant wrapping the
+    // global pool — server fns see today's exact pool. Model B: build one
+    // tenant per `.env.<slug>`, skipping any that fail or collide on DB; if
+    // fewer than 2 survive we'd still route, but the deployment label already
+    // warned. The `resolve_tenant` middleware reads these per request.
+    let tenants = rusterando_server::tenant::Tenants::new();
+    if multi_tenant {
+        for name in std::fs::read_dir(".")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.starts_with(".env.") && !n.ends_with(".example") && !n.ends_with(".bak"))
+        {
+            let slug = name.trim_start_matches(".env.").to_string();
+            match tenants.load(&slug).await {
+                Ok(()) => tracing::info!("tenant loaded: {slug}"),
+                Err(e) => tracing::warn!("tenant {slug} skipped: {e}"),
+            }
+        }
+    } else {
+        tenants.insert(single_tenant.clone()).await;
+    }
+    let tenant_router = rusterando_server::tenant::TenantRouter {
+        tenants: tenants.clone(),
+        multi_tenant,
+        single: single_tenant.clone(),
+    };
 
     // Two-layer migrations:
     //   * the embedded folder under repo `migrations/` is the
@@ -503,7 +558,17 @@ async fn main() {
                 let jsonld = state.jsonld.clone();
                 let deployment = state.deployment.clone();
                 move || {
-                    provide_context(db.clone());
+                    // Per-request POOL: the `resolve_tenant` middleware stashed
+                    // the request's Tenant in extensions; leptos_axum has
+                    // already provided the request `Parts` into context, so we
+                    // read the tenant's pool and provide THAT as the
+                    // SqlitePool. Model A's single tenant wraps the global pool,
+                    // so this is identical to `provide_context(db)` there; in
+                    // Model B every `use_context::<SqlitePool>()` transparently
+                    // gets the right tenant's DB. Falls back to the global pool
+                    // when no tenant resolved (apex/landing).
+                    let pool = tenant_pool_from_context().unwrap_or_else(|| db.clone());
+                    provide_context(pool);
                     provide_context(pwd.clone());
                     provide_context(notifier.clone());
                     provide_context(apns.clone());
@@ -639,6 +704,16 @@ async fn main() {
         .fallback(leptos_axum::file_and_error_handler::<LeptosOptions, _>(
             shell,
         ))
+        // Tenant routing: resolve the per-request Tenant from X-Tenant/Host and
+        // stash it in extensions BEFORE the Leptos handlers run (their context
+        // closures read it back to swap the pool). In Model A this always
+        // inserts the single passthrough tenant — identical to today. Layered
+        // here (inside locale/i18n, outside Leptos) so every handler sees it.
+        // Uses TenantRouter state, not AppState.
+        .layer(axum::middleware::from_fn_with_state(
+            tenant_router.clone(),
+            rusterando_server::tenant::resolve_tenant,
+        ))
         // /de/* canonicalisation runs first so all downstream layers
         // (rate-limit, admin-auth, Leptos) see the canonical URL.
         .layer(axum::middleware::from_fn(locale_canonicalize_middleware))
@@ -657,6 +732,24 @@ async fn main() {
         .layer(axum::middleware::from_fn(admin_auth_middleware))
         .layer(CookieManagerLayer::new())
         .with_state(state);
+
+    // Tenant control/debug routes carry their own TenantRouter state, so they
+    // live on a small sub-router merged into the app. `/__whoami` is the
+    // transport probe; the reload endpoint hot-adds a tenant (token-gated,
+    // multi-tenant only). These bypass the admin-cookie middleware on purpose
+    // — `/__whoami` is harmless and reload has its own ADMIN_TOKEN gate.
+    let app = app.merge(
+        Router::new()
+            .route(
+                "/__whoami",
+                axum::routing::get(rusterando_server::tenant::whoami),
+            )
+            .route(
+                "/admin/tenant/{slug}/reload",
+                axum::routing::post(rusterando_server::tenant::reload_tenant),
+            )
+            .with_state(tenant_router.clone()),
+    );
 
     // Self-monitor: sample fd usage every 30 s. Logs proof-of-life
     // periodically when healthy, escalates on a leak, PROACTIVELY
@@ -2219,7 +2312,9 @@ async fn server_fn_handler(
             let jsonld = state.jsonld.clone();
             let deployment = state.deployment.clone();
             move || {
-                provide_context(db.clone());
+                // Per-request pool swap — see the routes closure for the why.
+                let pool = tenant_pool_from_context().unwrap_or_else(|| db.clone());
+                provide_context(pool);
                 provide_context(pwd.clone());
                 provide_context(notifier.clone());
                 provide_context(apns.clone());
