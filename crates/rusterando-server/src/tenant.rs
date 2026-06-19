@@ -459,7 +459,15 @@ pub async fn load_all_tenants(registry: &Tenants) -> Vec<TenantLoad> {
         }
         let slug = slug_from_filename(&file);
 
-        if is_apex_label(&slug) {
+        // The active PARENT profile (e.g. `.env.rusterando` itself) is BOTH the
+        // apex/landing AND its own real shop — it has its own DATABASE_URL
+        // (rusterando.db) and serves `rusterando.de` / bare host. So load it as
+        // a tenant under its slug; the router maps the apex host to it. Other
+        // apex-reserved labels (`www`, empty) are NOT files, so they never
+        // reach here.
+        let active_parent = std::env::var("ENV_FILE").ok().filter(|s| !s.is_empty());
+        let is_active_parent = active_parent.as_deref() == Some(file.as_str());
+        if is_apex_label(&slug) && !is_active_parent {
             report.push(TenantLoad::Skipped {
                 file: file.clone(),
                 slug: slug.clone(),
@@ -564,6 +572,11 @@ pub struct TenantRouter {
     /// Model A: the single tenant wrapping the global pool. Always inserted
     /// regardless of headers. `None` would be a bug (we always build it).
     pub single: Tenant,
+    /// Multi-tenant: the slug of the PARENT profile (e.g. `rusterando`), which
+    /// is also its own shop. The apex host (`rusterando.de`, bare `localhost`,
+    /// `www`) resolves to THIS tenant instead of falling back to the global
+    /// pool. Empty if the parent wasn't loaded as a tenant.
+    pub apex_slug: String,
 }
 
 /// Subdomain labels that mean "no specific tenant" → landing page passthrough.
@@ -599,8 +612,10 @@ fn slug_from_headers(headers: &axum::http::HeaderMap) -> String {
 /// - **Model A**: always insert the single passthrough tenant (the header is
 ///   irrelevant — there's exactly one shop). Behaviour identical to today.
 /// - **Model B**: read `X-Tenant` (nginx), fall back to the first `Host` label
-///   for header-less local testing. Apex/`www`/empty → pass through with NO
-///   tenant (landing page). Unknown slug → 404. Known → insert.
+///   for header-less local testing. The apex host (`rusterando.de` / bare
+///   `localhost` / `www`) maps to the PARENT profile's own shop tenant
+///   (`apex_slug`, e.g. `rusterando`) — the main domain serves its real menu.
+///   If no parent tenant loaded, apex → static landing. Unknown slug → 404.
 pub async fn resolve_tenant(
     axum::extract::State(router): axum::extract::State<TenantRouter>,
     mut req: axum::extract::Request,
@@ -614,12 +629,16 @@ pub async fn resolve_tenant(
     }
 
     // Model B: derive the slug from X-Tenant, else the first Host label.
-    let slug = slug_from_headers(req.headers());
+    let mut slug = slug_from_headers(req.headers());
 
+    // Apex host (rusterando.de / bare localhost / www) → the parent profile's
+    // own shop tenant (e.g. `rusterando`), if it was loaded. So the main domain
+    // serves its real menu, not a blank landing.
     if is_apex_label(&slug) {
-        // Landing page — no tenant context. (Server fns that need a tenant
-        // will error cleanly; the apex page itself is static.)
-        return next.run(req).await;
+        if router.apex_slug.is_empty() {
+            return next.run(req).await; // no parent tenant — static landing
+        }
+        slug = router.apex_slug.clone();
     }
     if !valid_slug(&slug) {
         return StatusCode::BAD_REQUEST.into_response();

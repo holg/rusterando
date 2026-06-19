@@ -139,26 +139,29 @@ fn resolved_tenant_ctx(
 fn load_env() {
     match std::env::var("ENV_FILE") {
         Ok(path) if !path.is_empty() => {
-            // Explicit operator request — this file is AUTHORITATIVE, so use
-            // the OVERRIDE loader: its values win over anything already in the
-            // process env. This matters under `cargo leptos watch`, which
-            // sources the project `.env` itself and injects those vars (e.g.
-            // `LEPTOS_OUTPUT_NAME=davidspizzeria`) into the spawned server —
-            // without override, `ENV_FILE=.env.rusterando` would silently keep
-            // davidspizzeria's bundle name and the page would 404 on the wrong
-            // /pkg/<name>.js.
+            // Explicit operator request — this file is AUTHORITATIVE for the
+            // TENANT's config (DATABASE_URL, MULTI_TENANT, ADMIN_PASSWORD, …),
+            // so use the OVERRIDE loader: its values win over anything already
+            // in the process env.
             //
-            // BUT a few `LEPTOS_*` vars are owned by the cargo-leptos harness,
-            // NOT the tenant: the bind address + reload port + site root are
-            // how `watch` and the server agree on where to listen and find
-            // assets. If the tenant `.env` overrode `LEPTOS_SITE_ADDR`, the
-            // server would bind a different port than cargo-leptos expects and
-            // the page would never load. So we SNAPSHOT those harness vars
-            // before the override and restore them after. Fail loud on a
-            // malformed file.
+            // The `LEPTOS_*` build/harness vars are a DIFFERENT story. Under
+            // `cargo leptos watch` cargo-leptos reads the project `.env`
+            // (NOT this ENV_FILE — it has no such concept) to build + name the
+            // ONE shared WASM bundle, and injects those vars into the spawned
+            // server. They must match what cargo-leptos actually built/expects:
+            //   - SITE_ADDR / RELOAD_PORT — the port it serves on.
+            //   - OUTPUT_NAME / SITE_ROOT / SITE_PKG_DIR — the shared bundle's
+            //     name + location. Overriding OUTPUT_NAME here would make the
+            //     server reference `/pkg/<other>.js` while cargo-leptos wrote a
+            //     differently-named file → 404, no hydration, blank pages.
+            // So we SNAPSHOT whatever cargo-leptos set and RESTORE it after the
+            // override (harness wins for these; tenant wins for everything
+            // else). In prod (systemd, no cargo-leptos) none are pre-set, so
+            // the `.env`'s values apply normally. Fail loud on a malformed file.
             const HARNESS_VARS: &[&str] = &[
                 "LEPTOS_SITE_ADDR",
                 "LEPTOS_RELOAD_PORT",
+                "LEPTOS_OUTPUT_NAME",
                 "LEPTOS_SITE_ROOT",
                 "LEPTOS_SITE_PKG_DIR",
             ];
@@ -171,9 +174,6 @@ fn load_env() {
                 panic!("ENV_FILE={path} could not be loaded: {e}");
             });
 
-            // Restore any harness var cargo-leptos had set (so its value wins
-            // over the tenant `.env`). If it wasn't set in the environment,
-            // leave whatever the `.env` provided.
             for (k, v) in preserved {
                 if let Some(v) = v {
                     std::env::set_var(k, v);
@@ -437,10 +437,26 @@ async fn main() {
     } else {
         tenants.insert(single_tenant.clone()).await;
     }
+    // The apex slug: the parent profile's own shop, derived from ENV_FILE's
+    // slug (e.g. `.env.rusterando` → `rusterando`). Only set it if that tenant
+    // actually loaded, so the apex host maps to a real tenant; else empty (the
+    // apex serves the static landing).
+    let apex_slug = if multi_tenant {
+        let parent = std::env::var("ENV_FILE").unwrap_or_default();
+        let s = rusterando_server::tenant::slug_from_filename(&parent);
+        if tenants.get(&s).await.is_some() {
+            s
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
     let tenant_router = rusterando_server::tenant::TenantRouter {
         tenants: tenants.clone(),
         multi_tenant,
         single: single_tenant.clone(),
+        apex_slug,
     };
 
     // Live customer channel hub (SSE). In-memory broadcast; nothing to
