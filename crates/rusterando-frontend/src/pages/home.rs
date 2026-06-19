@@ -306,7 +306,7 @@ pub fn Home() -> impl IntoView {
                 // /qr.svg endpoint (Cache-Control 1h, defaults to site_url),
                 // size=1024 so the saved vector has a large min-dimension for
                 // print. `download` names the saved file.
-                <a class="btn ghost" href="/qr.svg?size=1024" download="davidspizzeria-qr.svg">
+                <a class="btn ghost" href="/qr.svg?size=1024" download="menu-qr.svg">
                     {format!("⬇ {}", crate::t!("home.qr_download"))}
                 </a>
             </p>

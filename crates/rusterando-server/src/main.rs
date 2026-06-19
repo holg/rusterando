@@ -674,7 +674,23 @@ async fn main() {
             }
         }
     };
-    tracing::info!("davidspizzeria listening on http://{addr}");
+    // Label the listen line with the active tenant (the DB filename stem,
+    // e.g. "flizza" / "davidspizzeria") rather than a hardcoded name, so
+    // multi-tenant runs are self-evident in the logs.
+    let tenant = std::env::var("DATABASE_URL")
+        .ok()
+        .and_then(|u| {
+            std::path::Path::new(
+                u.trim_start_matches("sqlite:")
+                    .split('?')
+                    .next()
+                    .unwrap_or(""),
+            )
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "rusterando".into());
+    tracing::info!("{tenant} listening on http://{addr}");
 
     // Graceful shutdown on SIGTERM (sent by `systemctl restart` /
     // `systemctl stop`). The signal handler stops `accept()` on the
