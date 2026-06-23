@@ -125,6 +125,8 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::driver::login::DriverLogin>();
     leptos::server_fn::axum::register_explicit::<pages::driver::board::ListDriverOrders>();
     leptos::server_fn::axum::register_explicit::<pages::driver::board::DriverAdvance>();
+    // Driver → customer live GPS location (pushed every ~10s while delivering).
+    leptos::server_fn::axum::register_explicit::<pages::driver::board::PushDriverLocation>();
     // Opening-hours editor + quick open/close + snooze (/admin/hours).
     leptos::server_fn::axum::register_explicit::<pages::admin::hours::LoadHoursAdmin>();
     leptos::server_fn::axum::register_explicit::<pages::admin::hours::UpdateHourRow>();
@@ -137,6 +139,10 @@ pub fn register_server_fns() {
     // Live customer channel: admin → customer order message + delivery ack.
     leptos::server_fn::axum::register_explicit::<pages::order::SetOrderMessage>();
     leptos::server_fn::axum::register_explicit::<pages::order::AckOrderMessage>();
+    // Customer (VIP) reply on their own order page. Was DEFINED but never
+    // registered → the reply POST hung/404'd (Safari shows it as CORS). Same
+    // unregistered-server-fn class of bug as the admin hangs.
+    leptos::server_fn::axum::register_explicit::<pages::order::SendCustomerMessage>();
     // Shop open/closed status for the menu page's status bar.
     leptos::server_fn::axum::register_explicit::<pages::menu::ShopStatus>();
 }

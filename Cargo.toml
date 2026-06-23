@@ -6,6 +6,11 @@ members = [
     "crates/rusterando-frontend",
     "crates/rusterando-server",
     "crates/rusterando-shared",
+    "crates/rusterando-i18n-pack",
+    "crates/rusterando-i18n-mgmt",
+    "crates/rusterando-i18n-core",
+    "crates/rusterando-i18n-tui",
+    "crates/rusterando-wasm-split",
     "crates/menu-import"
 ]
 # Excluded from the workspace:

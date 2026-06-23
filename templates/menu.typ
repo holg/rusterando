@@ -16,6 +16,7 @@
         delivery_lines: ("Stadt ab 15 € + 1,50 €",),
         extras_pizza_lines: ("Krabben 1 €",),
         extras_pasta_lines: ("Krabben 1 €",),
+        cover_mode: "text",
       ),
       categories: ((
         id: "demo",
@@ -423,18 +424,79 @@
 
 // ----- Cover panel (left third of page 1) ----------------------------------
 //
-// David's photo collage — full-bleed on the outside-front of the
-// folded leporello. Wickelfalz: left panel of the print sheet ends
-// up as the visible cover after the right panel folds in first.
-// Image is a static asset embedded in pdf.rs (`/img/cover.jpg`).
+// The outside-front of the folded leporello (Wickelfalz: this left panel of
+// the print sheet is the visible cover after the right panel folds in first).
+//
+// Two modes, chosen by `data.branding.cover_mode` (the `pdf_cover_mode`
+// admin setting):
+//   "image" — full-bleed photo from `/img/cover.jpg` (the admin Cover-
+//             Bibliothek, falling back to the bundled cover in pdf.rs).
+//   "text"  — a typeset text cover built from the shop's branding (name,
+//             address, phone, hours). No photo — so every tenant gets a
+//             correct, own-branded cover with nothing to upload.
+// Anything other than "image" is treated as "text" (text is the safe default
+// for a fresh tenant with no cover photo).
 
-#let cover-panel = box(
+#let cover-image-panel = box(
   width: 100%,
   height: 100%,
   clip: true,
 )[
   #image("/img/cover.jpg", width: 100%, height: 100%, fit: "cover")
 ]
+
+#let cover-text-panel = rect(
+  width: 100%,
+  height: 100%,
+  fill: col-side,
+  stroke: none,
+  inset: 14mm,
+)[
+  #set text(fill: col-side-fg)
+  #set align(center)
+
+  #v(1fr)
+
+  #text(size: 40pt, weight: "bold")[#data.branding.name]
+
+  #if data.branding.at("tagline", default: "") != "" [
+    #v(3mm)
+    #text(size: 13pt, fill: col-orange, style: "italic")[#data.branding.tagline]
+  ]
+
+  #v(8mm)
+  #line(length: 40%, stroke: 0.5pt + col-side-fg)
+  #v(8mm)
+
+  #text(size: 11pt)[
+    #upper(data.branding.address)
+  ]
+
+  #v(4mm)
+  #text(size: 12pt, weight: "bold")[#data.branding.phone]
+
+  #v(10mm)
+
+  #if data.branding.hours_lines.len() > 0 [
+    #text(size: 8pt, weight: "bold")[ÖFFNUNGSZEITEN]
+    #v(2mm)
+    #set text(size: 9pt)
+    #for line in data.branding.hours_lines {
+      line
+      linebreak()
+    }
+  ]
+
+  #v(1fr)
+
+  #text(size: 8pt, fill: col-orange)[SPEISEKARTE]
+]
+
+#let cover-panel = if data.branding.at("cover_mode", default: "text") == "image" {
+  cover-image-panel
+} else {
+  cover-text-panel
+}
 
 // ----- Page 1 + 2: cover + QR/ads + menu flow ------------------------------
 //

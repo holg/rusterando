@@ -3589,6 +3589,47 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   &:hover { filter: brightness(0.97); }
 }
 
+// Auth-status control: a live "are we still signed in?" chip next to the
+// [Abmelden] button in every staff shell (admin/kitchen/driver). The chip
+// heartbeats current_role() (30s + on focus, 8s timeout) so the operator
+// sees the TRUE server-side session state instead of trusting a stale
+// cookie. Same chip language as the mode/online chips.
+//   .authed      — green, role label (Admin/Küche/Fahrer)
+//   .checking    — neutral, "…" (heartbeat in flight)
+//   .unreachable — amber, "Server antwortet nicht" (timed out)
+//   .expired     — red, "Sitzung abgelaufen" (server says not signed in);
+//                  rendered as a link to the login page.
+.auth-control {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+}
+.auth-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .2rem .55rem;
+  border-radius: 999px;
+  font-size: .8rem;
+  font-weight: 700;
+  text-decoration: none;
+  letter-spacing: .03em;
+  border: 1px solid transparent;
+  user-select: none;
+  white-space: nowrap;
+  .dot { width: .6rem; height: .6rem; border-radius: 50%; flex: 0 0 auto; }
+  .label { font-size: .8rem; }
+  &.authed   { background: #e6f6ec; color: #15703a; border-color: #98d5a6; .dot { background: #15703a; } }
+  &.checking { background: #eef0f2; color: #555; border-color: #cdd2d7; .dot { background: #9aa3ab; } }
+  &.unreachable { background: #fff8e1; color: #8a6100; border-color: #f0cf7a; .dot { background: #f0a500; } }
+  &.expired  {
+    background: #fdecea; color: #8e1c14; border-color: #f3b5ae;
+    .dot { background: #c62828; }
+    cursor: pointer;
+    &:hover { filter: brightness(0.97); }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // /admin/customers
 // ---------------------------------------------------------------------------
@@ -4331,6 +4372,11 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
 // a torn-edge feel. Every `.r-line` is one printed line.
 .receipt-paper {
   --col-ch: 0.62rem; // approx single-char advance at our font-size
+  // Header logo-band height. Derived from the print: the brand mark (aspect
+  // ~4.8:1) fills ~78% of the column, so band height ≈ (0.78 · content-width) /
+  // 4.8. At our 42-col paper that's ≈ 62px — matching the printer's composed
+  // band, so preview + real print read at the same size.
+  --r-band-h: 62px;
   font-family: "SFMono-Regular", "Consolas", "Liberation Mono", Menlo, monospace;
   font-size: 12.5px;
   line-height: 1.32;
@@ -4358,20 +4404,39 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   // Combined header row: channel icon (left) + Rusterando brand mark
   // (right) on ONE line, exactly as the Pi composes the single band.
   .r-raster {
+    // Mirror the printer's composed header band: both logos scaled to a COMMON
+    // HEIGHT, laid side-by-side with a gap, the whole row filling the receipt
+    // column width (the Pi scales channel + gap + brand to the full ~336-dot
+    // column → a band ~6.9 char-rows tall). The old `height: 56px` kept the
+    // logos at natural width, so the row never filled the column and read much
+    // smaller than the actual print.
+    //
+    // CSS model: a fixed-height flex row; each <img> keeps its true aspect via
+    // `height: 100%; width: auto`, so the browser reproduces the print's
+    // "common height, natural widths" exactly — and the proportions stay
+    // correct for BOTH channels (pickup ~square vs delivery wider) without
+    // hardcoding per-channel percentages. The band height lives in one place,
+    // `--r-band-h` on .receipt-paper (print-derived ≈ 62px), and the per-logo
+    // max-width caps stop the wide brand mark from overrunning the paper.
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 0.7rem;
-    margin: 0.3rem 0;
+    gap: 0.5rem;
+    margin: 0.45rem 0;
+    height: var(--r-band-h, 100px);
     .r-logo {
       // 1-bit art: keep the dithered pixels crisp, never smooth.
       image-rendering: pixelated;
       display: block;
+      height: 100%;
       width: auto;
-      // Scale both to a common height so they read as one logo line,
-      // matching the printer's HEADER_LOGO_HEIGHT composition.
-      height: 56px;
+      // Don't let the wide brand mark overflow the paper: cap its width and let
+      // height shrink to keep aspect (object-fit), matching the print's
+      // scale-to-fit-width behaviour on narrow paper.
+      max-width: 78%;
+      object-fit: contain;
     }
+    .r-logo-channel { max-width: 18%; }
   }
 
   .r-qr {

@@ -58,25 +58,41 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
+    // Defensive decoding: every text column is read as `Option<String>` and
+    // COALESCE'd, so a NULL in a column we treat as required (e.g. a legacy
+    // order with no contact_name, or a tenant DB seeded differently) degrades to
+    // "" instead of failing the whole admin board with a decode error (which
+    // Safari surfaces as a misleading CORS message). `stripe_mode` is also
+    // COALESCE'd so a DB that predates the stripe_mode migration still loads.
     let rows = sqlx::query_as::<
         _,
         (
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            String,
-            i64,
-            String,
-            String,
-            Option<String>,
-            String,
+            String,         // id
+            String,         // order_number (coalesced)
+            String,         // status (coalesced)
+            String,         // contact_name (coalesced)
+            String,         // contact_phone (coalesced)
+            Option<String>, // scheduled_for
+            String,         // created_at (coalesced)
+            i64,            // total_cents (coalesced)
+            String,         // payment_status (coalesced)
+            String,         // order_type (coalesced)
+            Option<String>, // delivery_address_json
+            String,         // stripe_mode (coalesced)
         ),
     >(
-        "SELECT id, order_number, status, contact_name, contact_phone, scheduled_for, created_at,
-                total_cents, payment_status, order_type, delivery_address_json, stripe_mode
+        "SELECT id,
+                COALESCE(order_number, '')    AS order_number,
+                COALESCE(status, '')          AS status,
+                COALESCE(contact_name, '')    AS contact_name,
+                COALESCE(contact_phone, '')   AS contact_phone,
+                scheduled_for,
+                COALESCE(created_at, '')      AS created_at,
+                COALESCE(total_cents, 0)      AS total_cents,
+                COALESCE(payment_status, '')  AS payment_status,
+                COALESCE(order_type, '')      AS order_type,
+                delivery_address_json,
+                COALESCE(stripe_mode, 'sandbox') AS stripe_mode
          FROM orders
          WHERE status IN ('received', 'preparing', 'ready_for_pickup', 'pending_payment')
          ORDER BY created_at ASC",

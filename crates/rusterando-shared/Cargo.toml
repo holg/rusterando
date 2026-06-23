@@ -9,3 +9,7 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
+# Content hashing for the assets module (wasm/JS checksums + manifest).
+# Pure-Rust, wasm32-compatible; only sha256_hex ships in the WASM bundle,
+# the file/manifest helpers are cfg(not(wasm32)).
+sha2 = "0.10"

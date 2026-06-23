@@ -1,0 +1,24 @@
+[package]
+name = "rusterando-i18n-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal UI to manage translations over SSH (iPhone-optimised): per-locale gap report + edit, writing the tenant DB's _<lang> override cells. Shares gap logic with the i18n management wasm via rusterando-i18n-core."
+
+[[bin]]
+name = "i18n-tui"
+path = "src/main.rs"
+
+[dependencies]
+# Shared gap computation — same source of truth as the mgmt wasm.
+rusterando-i18n-core = { path = "../rusterando-i18n-core" }
+ratatui = "0.29"
+crossterm = "0.28"
+# Bundled SQLite (no system libsqlite needed on the VPS) for reading/writing the
+# tenant DB's _<lang> override cells.
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+# Execute the REAL built pack .wasm (source #2) by hand-marshalling the
+# wasm-bindgen string ABI. `cranelift` off-by-default keeps it lean; the default
+# features include the compiler we need. Pinned to a known-good minor.
+wasmtime = { version = "27", default-features = false, features = ["cranelift", "runtime", "gc", "gc-drc"] }

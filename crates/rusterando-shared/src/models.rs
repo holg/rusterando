@@ -14,6 +14,15 @@ pub struct MenuItem {
     pub menu_number: Option<String>,
     pub name: String,
     pub description: Option<String>,
+    /// The canonical GERMAN base of `name`/`description` (the un-coalesced DB
+    /// column). Carried so the client can ask the translation pack for an
+    /// empty-cell fallback: `t_menu(name, name_source)`. Equals `name` /
+    /// `description` on the German locale and on the admin path. Defaulted so
+    /// older payloads / callers that don't set it still deserialize.
+    #[serde(default)]
+    pub name_source: String,
+    #[serde(default)]
+    pub description_source: Option<String>,
     pub item_type: String,
     pub price_small_cents: i64,
     pub price_large_cents: Option<i64>,
@@ -404,6 +413,17 @@ pub enum LiveKind {
     /// `order_id` is empty/ignored for these. `level` drives the banner
     /// colour (green/amber/red); `reason` is the German caption.
     ShopStatus { level: ShopLevel, reason: String },
+    /// The delivery driver's live position for THIS order, pushed periodically
+    /// from the driver's phone (Geolocation API) while a delivery is active.
+    /// Order-keyed → only the matching customer's `/api/live/orders/{id}`
+    /// stream receives it. Coordinates are micro-degrees (degrees × 1e6) so the
+    /// enum can stay `Eq` (raw f64 isn't); ~0.1 m precision, plenty for "driver
+    /// is on the way". `at_unix` is the capture time (seconds) for staleness.
+    DriverLocation {
+        lat_e6: i32,
+        lon_e6: i32,
+        at_unix: i64,
+    },
 }
 
 /// Three-level shop status, driving the colour of the customer banner and

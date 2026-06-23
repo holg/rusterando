@@ -1,0 +1,26 @@
+[package]
+name = "rusterando-wasm-split"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable hand-split wasm machinery: build-time JSON→static-slice codegen + a browser interop for calling a window-registered split wasm. Shared by the i18n pack/mgmt wasms and any future split-wasm tool."
+
+[lib]
+# Plain lib — consumed both as a normal [dependency] (the `interop` module, in
+# hydrate builds) and as a [build-dependency] (the `build` module, in build.rs).
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Codegen helpers for use inside a consumer's build.rs (build-dependency side).
+# Pulls serde_json; never in the shipped wasm.
+build = ["dep:serde_json"]
+# Browser interop for calling a loaded split wasm via window.__<name>.<fn>.
+# Hydrate-only; pulls the wasm-bindgen stack.
+interop = ["dep:wasm-bindgen", "dep:js-sys", "dep:web-sys", "dep:wasm-bindgen-futures"]
+
+[dependencies]
+serde_json = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["Window"] }

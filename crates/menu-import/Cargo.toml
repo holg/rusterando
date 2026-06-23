@@ -10,7 +10,14 @@ edition = "2021"
 name = "menu-import"
 path = "src/main.rs"
 
+# Checksum the built WASM/JS bundle → manifest.json + .sha256 files, using
+# the shared asset-hashing. Reusable from the wasm build / deploy flow.
+[[bin]]
+name = "asset-manifest"
+path = "src/bin/asset-manifest.rs"
+
 [dependencies]
+rusterando-shared = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

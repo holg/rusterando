@@ -86,6 +86,11 @@ pub struct Branding {
     pub delivery_lines: Vec<String>,
     pub extras_pizza_lines: Vec<String>,
     pub extras_pasta_lines: Vec<String>,
+    /// PDF front-cover mode: `"image"` (photo from the Cover-Bibliothek /
+    /// bundled fallback) or `"text"` (typeset cover from this branding). Read
+    /// from the `pdf_cover_mode` setting; `"text"` is the default so a fresh
+    /// tenant never inherits another shop's baked cover photo.
+    pub cover_mode: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -553,6 +558,14 @@ pub async fn load_menu_payload(
         .await
         .unwrap_or_else(default_extras_pasta_lines);
 
+    // Front-cover mode. Default "text" so a tenant with no cover photo gets a
+    // proper own-branded text cover instead of inheriting the bundled davids
+    // photo. Only "image" switches to the photo path.
+    let cover_mode = match read_setting(db, "pdf_cover_mode").await.as_deref() {
+        Some("image") => "image".to_string(),
+        _ => "text".to_string(),
+    };
+
     Ok(MenuPdfPayload {
         branding: Branding {
             name: shop_branding.display_name(),
@@ -563,6 +576,7 @@ pub async fn load_menu_payload(
             delivery_lines,
             extras_pizza_lines,
             extras_pasta_lines,
+            cover_mode,
         },
         categories,
         allergens,
@@ -633,9 +647,34 @@ async fn read_setting_lines(db: &SqlitePool, key: &str) -> Option<Vec<String>> {
 /// files live in its `covers/` subdir; ad-slot images live directly under
 /// it. Passed in (rather than hardcoded) so the path always matches
 /// whatever directory the static server serves `/img/uploads/` from.
-pub async fn load_pdf_overrides(db: &SqlitePool, uploads_dir: &str) -> PdfOverrides {
-    let template_source = read_active_theme_source(db).await;
-    let cover_image = read_active_cover_bytes(db, uploads_dir).await;
+/// `shared` is the reserved `_shared` tenant pool (see
+/// `tenant::load_shared_pool`). When this tenant hasn't configured its own
+/// PDF cover image or theme/template, the value falls back to `_shared`'s
+/// before the bundled `include_*!` default. Ad-slot overlays are tenant-only
+/// (no shared fallback — they're per-shop promos, not chrome). Pass `None` to
+/// disable the shared fallback (single-tenant Model A, or `_shared` unopenable).
+pub async fn load_pdf_overrides(
+    db: &SqlitePool,
+    uploads_dir: &str,
+    shared: Option<&SqlitePool>,
+) -> PdfOverrides {
+    let template_source = match read_active_theme_source(db).await {
+        Some(s) => Some(s),
+        // Fall back to the shared tenant's active theme. `_shared`'s uploads
+        // live in the same uploads_dir tree (covers/ subdir), so cover bytes
+        // resolve the same way.
+        None => match shared {
+            Some(s) => read_active_theme_source(s).await,
+            None => None,
+        },
+    };
+    let cover_image = match read_active_cover_bytes(db, uploads_dir).await {
+        Some(b) => Some(b),
+        None => match shared {
+            Some(s) => read_active_cover_bytes(s, uploads_dir).await,
+            None => None,
+        },
+    };
     let ad_cover_image = read_image_setting(db, "pdf_ad_cover_image", uploads_dir).await;
     let ad_center_image = read_image_setting(db, "pdf_ad_center_image", uploads_dir).await;
     let ad_back_image = read_image_setting(db, "pdf_ad_back_image", uploads_dir).await;
@@ -765,9 +804,10 @@ pub async fn build_menu_pdf(
     uploads_dir: &str,
     format: &str,
     show_ingredients: bool,
+    shared: Option<&SqlitePool>,
 ) -> anyhow::Result<Vec<u8>> {
     let payload = load_menu_payload(db, site_url, shop_branding).await?;
-    let overrides = load_pdf_overrides(db, uploads_dir).await;
+    let overrides = load_pdf_overrides(db, uploads_dir, shared).await;
     let format = format.to_string();
     tokio::task::spawn_blocking(move || {
         render_menu_pdf(&payload, &overrides, &format, show_ingredients)
@@ -797,6 +837,7 @@ pub async fn write_menu_pdf_cache(
     site_url: String,
     shop_branding: &rusterando_frontend::branding::Branding,
     slug: &str,
+    shared: Option<&SqlitePool>,
 ) -> anyhow::Result<()> {
     let prefix = if slug.is_empty() {
         String::new()
@@ -812,6 +853,7 @@ pub async fn write_menu_pdf_cache(
             uploads_dir,
             "trifold",
             show_ingredients,
+            shared,
         )
         .await?;
         let dst = std::path::Path::new(site_root).join(&file);
@@ -836,6 +878,9 @@ pub struct MenuPdfCacheImpl {
     pub uploads_dir: String,
     pub site_url: String,
     pub branding: rusterando_frontend::branding::BrandingHandle,
+    /// Reserved `_shared` tenant pool — fallback for cover/theme when the
+    /// rebuilt tenant has none. `None` if the shared DB couldn't be opened.
+    pub shared: Option<SqlitePool>,
 }
 
 #[async_trait::async_trait]
@@ -852,6 +897,7 @@ impl rusterando_frontend::pages::push::MenuPdfCache for MenuPdfCacheImpl {
             self.site_url.clone(),
             &self.branding.get(),
             "",
+            self.shared.as_ref(),
         )
         .await
     }
@@ -919,4 +965,84 @@ pub async fn seed_pdf_library_if_empty(db: &SqlitePool, uploads_dir: &str) -> an
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod cover_tests {
+    use super::*;
+
+    fn sample_payload(cover_mode: &str) -> MenuPdfPayload {
+        MenuPdfPayload {
+            branding: Branding {
+                name: "Test Pizzeria".into(),
+                tagline: "frisch & lecker".into(),
+                address: "Teststraße 1, 12345 Teststadt".into(),
+                phone: "Tel. 0123-456789".into(),
+                hours_lines: vec!["Mo–So 11:30–22:00".into()],
+                delivery_lines: vec!["Stadt ab 15 €".into()],
+                extras_pizza_lines: vec!["Krabben 1 €".into()],
+                extras_pasta_lines: vec!["Krabben 1 €".into()],
+                cover_mode: cover_mode.into(),
+            },
+            categories: vec![PdfCategory {
+                id: "c1".into(),
+                name: "Pizza".into(),
+                items: vec![PdfItem {
+                    menu_number: Some("1".into()),
+                    name: "Margherita".into(),
+                    description: Some("mit Tomaten und Mozzarella".into()),
+                    allergen_codes: None,
+                    additive_codes: None,
+                    is_spicy: false,
+                    price_small_cents: 500,
+                    price_large_cents: Some(800),
+                    size_small_label: Some("22cm".into()),
+                    size_large_label: Some("30cm".into()),
+                }],
+            }],
+            allergens: vec![],
+            additives: vec![],
+            site_url: "https://example.com".into(),
+        }
+    }
+
+    // The text cover must render without a Typst error (no image dependency).
+    #[test]
+    fn text_cover_renders() {
+        let payload = sample_payload("text");
+        let overrides = PdfOverrides {
+            template_source: None,
+            cover_image: None,
+            ad_cover_image: None,
+            ad_center_image: None,
+            ad_back_image: None,
+        };
+        let bytes = render_menu_pdf(&payload, &overrides, "trifold", true)
+            .expect("text cover should render");
+        assert!(
+            bytes.len() > 1000,
+            "PDF suspiciously small: {}",
+            bytes.len()
+        );
+    }
+
+    // The image cover must still render (falls back to bundled ASSET_COVER).
+    #[test]
+    fn image_cover_renders() {
+        let payload = sample_payload("image");
+        let overrides = PdfOverrides {
+            template_source: None,
+            cover_image: None,
+            ad_cover_image: None,
+            ad_center_image: None,
+            ad_back_image: None,
+        };
+        let bytes = render_menu_pdf(&payload, &overrides, "trifold", true)
+            .expect("image cover should render");
+        assert!(
+            bytes.len() > 1000,
+            "PDF suspiciously small: {}",
+            bytes.len()
+        );
+    }
 }

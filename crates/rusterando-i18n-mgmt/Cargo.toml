@@ -1,0 +1,24 @@
+[package]
+name = "rusterando-i18n-mgmt"
+version = "0.1.0"
+edition = "2021"
+description = "Management .wasm for per-shop translation gap reporting — given a shop's German menu phrases, reports which are untranslated per locale. Loaded only in admin."
+
+# cdylib → the admin-loadable .wasm (wasm-bindgen --target web).
+# rlib   → native unit tests.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Runtime deps: wasm-bindgen + the shared gap logic (rusterando-i18n-core, pure,
+# no deps). The translation COVERAGE (which (locale, german) pairs the pack has)
+# is baked into static slices by build.rs — same source-of-truth as the i18n
+# pack (generated/menu.json), no JSON parser shipped. The gap COMPUTATION lives
+# in i18n-core so the TUI and this wasm can't drift.
+[dependencies]
+wasm-bindgen = { workspace = true }
+rusterando-i18n-core = { path = "../rusterando-i18n-core" }
+
+# Build-time only: shared wasm-split codegen bakes the pack's menu coverage into
+# a static slice. Never ships in the wasm.
+[build-dependencies]
+rusterando-wasm-split = { path = "../rusterando-wasm-split", features = ["build"] }

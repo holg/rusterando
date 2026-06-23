@@ -313,6 +313,67 @@ pub async fn driver_advance(id: String, status: String) -> Result<(), ServerFnEr
     Ok(())
 }
 
+/// Push the driver's live GPS position for an order to the customer's open
+/// `/api/live/orders/{id}` stream. Called every ~10 s from the driver's board
+/// while a delivery is active. Deliberately LIGHTWEIGHT: driver-role-gated,
+/// validates the order is actually out for delivery, then broadcasts — NO DB
+/// write (position is ephemeral; persisting every tick would thrash the DB).
+/// Coordinates are micro-degrees (deg × 1e6).
+#[server(name = PushDriverLocation, prefix = "/api", endpoint = "push_driver_location")]
+pub async fn push_driver_location(
+    id: String,
+    lat_e6: i32,
+    lon_e6: i32,
+) -> Result<(), ServerFnError> {
+    use crate::pages::session::{ssr::require_any, Role};
+    use sqlx::SqlitePool;
+
+    require_any(&[Role::Driver]).await?;
+
+    // Sanity: lat ∈ [-90,90], lon ∈ [-180,180] in micro-degrees.
+    if lat_e6.unsigned_abs() > 90_000_000 || lon_e6.unsigned_abs() > 180_000_000 {
+        return Err(ServerFnError::new("Ungültige Koordinaten"));
+    }
+
+    // Only broadcast for an order that's actually out for delivery — so a driver
+    // can't leak their position to an unrelated/finished order's stream.
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    let ok: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM orders WHERE id = ?1 AND status = 'out_for_delivery'")
+            .bind(&id)
+            .fetch_optional(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("verify order: {e}")))?;
+    if ok.is_none() {
+        return Err(ServerFnError::new("Bestellung nicht in Zustellung"));
+    }
+
+    if let Some(hub) = use_context::<crate::live::LiveHub>() {
+        // Capture time for the customer to show staleness ("vor 12 s"). We avoid
+        // chrono here; the customer page can also just trust freshness.
+        let at_unix = ssr_now_unix();
+        hub.send(rusterando_shared::models::LiveEvent {
+            order_id: id,
+            kind: rusterando_shared::models::LiveKind::DriverLocation {
+                lat_e6,
+                lon_e6,
+                at_unix,
+            },
+        });
+    }
+    Ok(())
+}
+
+/// Current unix time (seconds). SSR-only helper for the location timestamp.
+#[cfg(feature = "ssr")]
+fn ssr_now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------
@@ -361,8 +422,6 @@ pub fn DriverBoardPage() -> impl IntoView {
         },
         |_| async move { list_driver_orders().await },
     );
-    let logout = ServerAction::<crate::pages::session::SessionLogout>::new();
-
     let on_start_tour = move |_| {
         let ids = selected.get_untracked();
         if ids.is_empty() {
@@ -381,7 +440,9 @@ pub fn DriverBoardPage() -> impl IntoView {
                 <span class="brand">"🛵 Fahrer"</span>
                 <crate::pages::session::RoleSwitcher current=crate::pages::session::Role::Driver/>
                 <button class="btn ghost" on:click=move |_| orders.refetch()>"Aktualisieren"</button>
-                <button class="logout" on:click=move |_| { logout.dispatch(crate::pages::session::SessionLogout {}); }>"Abmelden"</button>
+                // Live auth-status chip + [Abmelden] (heartbeat current_role,
+                // shows "Sitzung abgelaufen" if the server dropped the cookie).
+                <crate::pages::session::LogoutButton role=crate::pages::session::Role::Driver/>
             </header>
             <main class="orders-page">
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>

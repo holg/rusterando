@@ -177,6 +177,9 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
         menu_number: Option<String>,
         name: String,
         description: Option<String>,
+        // The canonical German base (un-coalesced) — for the client pack swap.
+        name_source: String,
+        description_source: Option<String>,
         item_type: String,
         price_small_cents: i64,
         price_large_cents: Option<i64>,
@@ -207,7 +210,8 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
         crate::i18n::coalesce_col("description", "")
     };
     let sql = format!(
-        "SELECT id, category_id, menu_number, {name_col} AS name, {desc_col} AS description, item_type,
+        "SELECT id, category_id, menu_number, {name_col} AS name, {desc_col} AS description,
+                name AS name_source, description AS description_source, item_type,
                 price_small_cents, price_large_cents, size_small_label, size_large_label,
                 allergen_codes, additive_codes, is_spicy, is_available, is_listed, sort_order,
                 included_extras_count, flat_extra_price_cents, allow_extras
@@ -323,6 +327,8 @@ async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>,
                 menu_number: r.menu_number,
                 name: r.name,
                 description: r.description,
+                name_source: r.name_source,
+                description_source: r.description_source,
                 item_type: r.item_type,
                 price_small_cents: r.price_small_cents,
                 price_large_cents: r.price_large_cents,
@@ -1064,14 +1070,28 @@ fn Card(it: MenuItem) -> impl IntoView {
     };
 
     let card_id = item_id.clone();
+    // Name + description are DB-first with a client pack fallback: render them as
+    // reactive closures over `t_menu` so they show the DB value on first paint
+    // and swap to the translation pack's string (keyed by the German source) once
+    // the pack loads — but only when the DB `_<lang>` cell was empty. A DB
+    // override always wins. On German they're the DB value unchanged.
+    let name_db = it.name.clone();
+    let name_src = it.name_source.clone();
+    let name_view = move || crate::i18n::t_menu(&name_db, &name_src);
+    let desc_pair = it
+        .description
+        .clone()
+        .map(|d| (d, it.description_source.clone().unwrap_or_default()));
     view! {
         <article id=card_id class:card=true class:unavailable=unavailable>
             <div class="card-head">
                 {number.map(|n| view! { <span class="num">{n}</span> })}
-                <h3>{it.name.clone()}</h3>
+                <h3>{name_view}</h3>
                 {spicy.then(|| view! { <span class="spicy" title="scharf">"🌶"</span> })}
             </div>
-            {it.description.clone().map(|d| view! { <p class="desc">{d}</p> })}
+            {desc_pair.map(|(d, src)| view! {
+                <p class="desc">{move || crate::i18n::t_menu(&d, &src)}</p>
+            })}
             <div class="codes">
                 {allergens.map(|s| view! {
                     <span class="codeset allergens">

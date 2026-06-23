@@ -57,15 +57,17 @@ if ! lsof -i ":${SITE_PORT}" >/dev/null 2>&1; then
     SERVER_PID=$!
 
     # Unhashed (dev) builds: wasm-bindgen's JS glue hardcodes
-    # `new URL('davidspizzeria_bg.wasm', import.meta.url)` and our
+    # `new URL('rusterando_bg.wasm', import.meta.url)` and our
     # CachedHydrationScripts preload emits the same `_bg` name, but
-    # cargo-leptos writes the binary as `davidspizzeria.wasm` (no _bg).
-    # Bridge with a relative symlink, leptos-style. (Prod uses
+    # cargo-leptos writes the binary as `rusterando.wasm` (no _bg). The
+    # leptos output name is `rusterando` (Cargo.toml), NOT the old
+    # `davidspizzeria` — a wrong name 404s the wasm and silently breaks
+    # hydration. Bridge with a relative symlink, leptos-style. (Prod uses
     # hash-files=true, which rewrites the glue URL — no symlink needed.)
     # Poll briefly: the build writes pkg/ before the HTTP listener is up.
     ( for _ in $(seq 1 90); do
-        if [[ -f target/site/pkg/davidspizzeria.wasm ]]; then
-          ln -sfn davidspizzeria.wasm target/site/pkg/davidspizzeria_bg.wasm
+        if [[ -f target/site/pkg/rusterando.wasm ]]; then
+          ln -sfn rusterando.wasm target/site/pkg/rusterando_bg.wasm
           break
         fi
         sleep 1

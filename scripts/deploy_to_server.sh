@@ -665,6 +665,28 @@ cmd_upload() {
         if [[ "$upload_env" != "$ENV_FILE" ]]; then
             rm -f "$upload_env"
         fi
+
+        # Multi-tenant parent: also ship this profile's tenant children
+        # (.env.<profile>.<tenant>) to the server, KEEPING their original
+        # names. The binary (ENV_FILE=.env, MULTI_TENANT=1) discovers them by
+        # the `<parent>.<slug>` pattern and loads each as a tenant. Each child
+        # must carry its OWN distinct DATABASE_URL; collisions are rejected at
+        # boot. Single-tenant profiles ship nothing extra.
+        if [[ ( "${MULTI_TENANT:-0}" == "1" || "${MULTI_TENANT:-}" == "true" ) && -n "$ENV_PROFILE" ]]; then
+            shopt -s nullglob
+            local tenant_files=( ".env.$ENV_PROFILE".* )
+            shopt -u nullglob
+            if [[ ${#tenant_files[@]} -gt 0 ]]; then
+                echo "Multi-tenant: uploading ${#tenant_files[@]} tenant env file(s)..."
+                for tf in "${tenant_files[@]}"; do
+                    echo "  → $tf"
+                    scp -q "$tf" "$SSH_HOST:$REMOTE_BIN_DIR/$tf"
+                    ssh_cmd "sudo chmod 600 $REMOTE_BIN_DIR/$tf"
+                done
+            else
+                echo "Multi-tenant: no .env.$ENV_PROFILE.* tenant files found locally — parent only."
+            fi
+        fi
     fi
 
     # Fix permissions
@@ -696,6 +718,16 @@ cmd_setup() {
     # wrong wall-clock. Pin it here (IANA name, so DST MEZ↔MESZ is handled
     # automatically). Override per shop in .env with TZ=...
     SHOP_TZ="${TZ:-Europe/Berlin}"
+    # Multi-tenant parent (MULTI_TENANT=1 in this profile's .env): pin ENV_FILE
+    # to the uploaded parent profile (shipped as .env) so the binary treats it
+    # as the authoritative parent and loads its .env.<profile>.<tenant> children
+    # as tenants. Appended to the MULTI_TENANT= unit line as a second
+    # Environment= directive (newline-prefixed). Empty for single-tenant.
+    MULTI_TENANT_ENV_LINE=""
+    if [[ "${MULTI_TENANT:-0}" == "1" || "${MULTI_TENANT:-}" == "true" ]]; then
+        MULTI_TENANT_ENV_LINE="
+Environment=ENV_FILE=$REMOTE_BIN_DIR/.env"
+    fi
     cat <<EOF | ssh_cmd "sudo tee /etc/systemd/system/$APP_NAME.service > /dev/null"
 [Unit]
 Description=$APP_NAME web server
@@ -723,12 +755,15 @@ TimeoutStopSec=10
 LimitNOFILE=65536
 Environment=RUST_LOG=info
 Environment=TZ=$SHOP_TZ
-# Belt-and-suspenders: each per-shop deploy ships exactly ONE .env to its
-# own dir, so the binary already auto-detects single-tenant (Model A). This
-# kill-switch makes it impossible for a real shop to EVER enter the in-process
-# multi-tenant mode (Model B) even if a stray .env file leaks into its dir.
+# Tenancy selector, taken from the deployed profile's env (.env.<profile>).
+# A real single-shop profile leaves MULTI_TENANT unset → defaults to 0 here:
+# the binary auto-detects single-tenant (Model A), and this kill-switch makes
+# it impossible for a real shop to EVER enter in-process multi-tenant (Model B)
+# even if a stray .env leaks into its dir. A multi-tenant PARENT profile (e.g.
+# .env.rusterando) sets MULTI_TENANT=1, which flows through here and is paired
+# with ENV_FILE below so the parent + its .env.<profile>.<tenant> children load.
 # See docs/multi_tenant.md + crates/rusterando-server/src/tenant.rs.
-Environment=MULTI_TENANT=0
+Environment=MULTI_TENANT=${MULTI_TENANT:-0}${MULTI_TENANT_ENV_LINE}
 Environment=LEPTOS_HASH_FILES=true
 Environment=LEPTOS_SITE_ROOT=$REMOTE_HTML_DIR
 Environment=LEPTOS_OUTPUT_NAME=$LEPTOS_OUTPUT_NAME_FOR_UNIT

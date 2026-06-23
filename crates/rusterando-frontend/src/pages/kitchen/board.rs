@@ -282,15 +282,15 @@ pub fn KitchenBoardPage() -> impl IntoView {
         move || advance.version().get(),
         |_| async move { list_kitchen_orders().await },
     );
-    let logout = ServerAction::<crate::pages::session::SessionLogout>::new();
-
     view! {
         <div class="kitchen-shell">
             <header class="kitchen-bar">
                 <span class="brand">"🍳 Küche"</span>
                 <crate::pages::session::RoleSwitcher current=crate::pages::session::Role::Kitchen/>
                 <button class="btn ghost" on:click=move |_| orders.refetch()>"Aktualisieren"</button>
-                <button class="logout" on:click=move |_| { logout.dispatch(crate::pages::session::SessionLogout {}); }>"Abmelden"</button>
+                // Live auth-status chip + [Abmelden] (heartbeat current_role,
+                // shows "Sitzung abgelaufen" if the server dropped the cookie).
+                <crate::pages::session::LogoutButton role=crate::pages::session::Role::Kitchen/>
             </header>
             <main class="orders-page">
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>

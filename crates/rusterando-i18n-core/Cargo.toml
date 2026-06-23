@@ -1,0 +1,13 @@
+[package]
+name = "rusterando-i18n-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure translation gap-computation shared by the i18n management wasm and the i18n TUI — decoupled from the coverage source via the Coverage trait. No wasm, no I/O, no deps."
+
+[lib]
+crate-type = ["rlib"]
+
+# Zero dependencies on purpose: pure logic + hand-rolled JSON, so both the wasm
+# (rusterando-i18n-mgmt) and the native TUI (rusterando-i18n-tui) can depend on
+# it without pulling anything. The COVERAGE data + I/O live in the consumers.
+[dependencies]

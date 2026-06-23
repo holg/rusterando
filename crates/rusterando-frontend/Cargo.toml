@@ -12,6 +12,10 @@ rusterando-shared = { workspace = true }
 # preview renders the SAME `kitchen_protocol::receipt::build_receipt`
 # list the kitchen ticket is emitted from, so the preview can't drift.
 kitchen-protocol = { workspace = true }
+# Shared hand-split-wasm interop (call a window-registered split wasm). Only
+# the browser/hydrate build needs it (it pulls the wasm-bindgen stack), so it's
+# optional + enabled by the `hydrate` feature below.
+rusterando-wasm-split = { path = "../rusterando-wasm-split", features = ["interop"], optional = true }
 
 leptos = { workspace = true }
 leptos_meta = { workspace = true }
@@ -43,6 +47,8 @@ async-trait = { version = "0.1", optional = true }
 # WASM-only
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
+# Race the auth heartbeat's server-fn against a timeout (futures::select).
+futures = { workspace = true, optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { workspace = true, optional = true }
 console_log = { workspace = true, optional = true }
@@ -52,6 +58,10 @@ console_log = { workspace = true, optional = true }
 send_wrapper = "0.6"
 web-sys = { version = "0.3", features = [
     "Window",
+    # i18n translation-pack loader: listen for the pack-loaded CustomEvent on
+    # window so t!() views re-render once translations arrive.
+    "Event",
+    "EventTarget",
     # localStorage for crate::order_cache (revisit /orders/<id> instantly)
     "Storage",
     "Location",
@@ -93,10 +103,12 @@ hydrate = [
     "leptos/hydrate",
     "dep:wasm-bindgen",
     "dep:wasm-bindgen-futures",
+    "dep:futures",
     "dep:js-sys",
     "dep:console_error_panic_hook",
     "dep:console_log",
     "dep:web-sys",
+    "dep:rusterando-wasm-split",
 ]
 ssr = [
     "leptos/ssr",

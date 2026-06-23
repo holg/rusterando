@@ -1,0 +1,66 @@
+# i18n-pack topic manifest — product-agnostic categorization for the translation
+# `.wasm` pack builder (scripts/build-i18n-pack.sh → gen_i18n_pack.py).
+#
+# A pack is built by selecting LOCALES x TOPICS. Topics are the categorization
+# axis: a shop ships only the topics it uses (fat = all topics). The format is
+# deliberately product-agnostic so the lighting products (eulumdat / gldf-rs)
+# can adopt the same scheme with their own [product] + [topics] — each product
+# is its own topic space; this file describes the rusterando (menu/kitchen)
+# product only.
+#
+# Two kinds of source map into topics:
+#   * chrome topics — group the frontend locales/*.json NAMESPACES (the 14
+#     top-level keys: common, header, menu, cart, …). `namespaces = [...]`.
+#   * the menu-vocabulary topic — the rusterando-scrape menu_strings.*.json
+#     (deduped German menu phrases). `source = "menu"`.
+
+[product]
+name = "rusterando"
+# Human label; informational. The lighting products would set e.g. "eulumdat".
+description = "Pizzeria ordering + kitchen"
+
+# ---------------------------------------------------------------------------
+# Topics. Each topic lists either chrome `namespaces` (mapped to locales/*.json
+# top-level keys) or `source = "menu"` for the menu vocabulary. `shared = true`
+# marks a topic that's (almost) always needed — the builder includes it by
+# default even when a small profile narrows the topic set.
+# ---------------------------------------------------------------------------
+
+# Cross-cutting UI used everywhere (buttons, header, errors). Always shipped.
+[topics.shared]
+namespaces = ["common", "header", "errors"]
+shared = true
+
+# Customer-facing ordering flow — the public shop.
+[topics.shop]
+namespaces = ["home", "menu", "cart", "voucher", "checkout", "order_confirm", "lieferservice"]
+
+# Back-office / operational state — order lifecycle, payment + shop status,
+# notifications. The "kitchen"/ops side of the chrome strings. (The Pi printer's
+# own receipt strings live in the kitchen-protocol crate, NOT this i18n system
+# yet; this topic is the operational UI strings that DO exist here.)
+[topics.kitchen]
+namespaces = ["status", "payment_status", "shop_status", "notify"]
+
+# The menu-item vocabulary (names/descriptions/option labels), keyed by German
+# source. Large + grows with the menu; a shop with no online ordering can drop
+# it. Distinct from the `shop` chrome topic (UI labels vs item text).
+[topics.menu]
+source = "menu"
+
+# ---------------------------------------------------------------------------
+# Named build profiles. The builder's --profile selects one; explicit
+# --locales / --topics override. (Locale 'de' is never in a pack — it's the DB
+# base, always served first.)
+# ---------------------------------------------------------------------------
+
+# Everything: all 7 non-German locales, every topic.
+[profiles.fat]
+locales = ["en", "fr", "it", "es", "pt", "ru", "cn"]
+topics = ["shared", "shop", "kitchen", "menu"]
+
+# A lean public-shop bundle: a couple of locales, customer-facing topics only
+# (no back-office "kitchen" ops strings). 'shared' is auto-included.
+[profiles.small]
+locales = ["en"]
+topics = ["shop", "menu"]

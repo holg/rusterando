@@ -122,14 +122,17 @@ def browser_context_args(browser_context_args, base_url):
 def browser_type_launch_args(browser_type_launch_args):
     """Honour HEADLESS + SLOWMO from .env.
 
-    HEADLESS unset → don't touch defaults (lets `--headed` CLI win).
+    Headless is the hard default: tests run windowless unless you opt in.
+    HEADLESS unset → headless (the default).
     HEADLESS=true  → headless mode (no window).
-    HEADLESS=false → visible window.
+    HEADLESS=false → visible window (for watching / recording a demo).
     SLOWMO=300     → 300ms artificial delay between actions, for watching.
+
+    Note: `--headed` on the CLI still forces a window (pytest-playwright
+    reads it directly); this fixture only sets the *default* when neither
+    the CLI flag nor HEADLESS is given.
     """
-    extras = {}
-    if "HEADLESS" in os.environ:
-        extras["headless"] = _env_flag("HEADLESS", default=True)
+    extras = {"headless": _env_flag("HEADLESS", default=True)}
     slowmo = os.environ.get("SLOWMO")
     if slowmo:
         try:
@@ -137,6 +140,34 @@ def browser_type_launch_args(browser_type_launch_args):
         except ValueError:
             pass
     return {**browser_type_launch_args, **extras}
+
+
+# ---------------------------------------------------------------------------
+# Optional video recording
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def record_video() -> bool:
+    """Whether two-browser tests should record a side-by-side video.
+
+    OFF by default — recording is opt-in so the normal headless run stays
+    fast and litter-free. Turn it on with RECORD=1 (most useful together
+    with HEADLESS=false, since headless Chromium captures little):
+
+        RECORD=1 HEADLESS=false SLOWMO=350 pytest test_order_admin_message.py
+    """
+    return _env_flag("RECORD", default=False)
+
+
+def video_context_kwargs(record: bool, run_dir: Path, pane: dict) -> dict:
+    """Build the `new_context` video kwargs, or an empty dict when recording
+    is off. Lets a test write one `browser.new_context(**base, **extra)`
+    call that records or not without branching."""
+    if not record:
+        return {}
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return {"record_video_dir": str(run_dir), "record_video_size": pane}
 
 
 def pytest_configure(config):
@@ -176,13 +207,20 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def sandbox_only(page: Page, base_url: str) -> None:
+def sandbox_only(request, page: Page, base_url: str) -> None:
     """Refuse to run if the target shop is currently in Stripe live mode.
 
     Call the same server fn the admin chip uses: POST /api/get_stripe_mode
     (a leptos server fn — empty body, returns JSON). 'sandbox' → continue,
     anything else (including network errors) → skip the test.
+
+    Tests that create NO data and never touch Stripe (e.g. the auth-status
+    checks — they only log in and read current_role()) can opt out with the
+    `no_sandbox_guard` marker so they still run against a live shop. Anything
+    that places an order / writes rows must keep the guard.
     """
+    if request.node.get_closest_marker("no_sandbox_guard"):
+        return
     api = f"{base_url}/api/get_stripe_mode"
     try:
         resp = page.request.post(api, data="")

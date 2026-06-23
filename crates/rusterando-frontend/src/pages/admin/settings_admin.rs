@@ -189,6 +189,7 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
     let is_orders_paused = key == "orders_paused";
     let is_giveaway_enabled = key == "giveaway_enabled";
     let is_giveaway_order_types = key == "giveaway_order_types";
+    let is_pdf_cover_mode = key == "pdf_cover_mode";
     let is_receipt_qr_mode = key == "receipt_qr_mode";
     let is_receipt_toggle = matches!(key.as_str(), "receipt_show_allergens" | "receipt_show_logo");
     let preview_eur = Memo::new(move |_| {
@@ -296,6 +297,16 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
                 <option value="both">"Abholung + Lieferung"</option>
                 <option value="pickup">"Nur Abholung"</option>
                 <option value="delivery">"Nur Lieferung"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_pdf_cover_mode {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="text">"Text — gesetzte Titelseite aus den Shop-Daten (kein Foto)"</option>
+                <option value="image">"Foto — Titelbild aus der Cover-Bibliothek"</option>
             </select>
         }
         .into_any()

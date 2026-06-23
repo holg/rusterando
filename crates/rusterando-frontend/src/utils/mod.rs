@@ -206,6 +206,10 @@ pub fn subscribe_order_live(
                             status.set(Some(s));
                         }
                         LiveKind::ShopStatus { .. } => {}
+                        // Driver live-location pushes (task: customer order page
+                        // renders the driver pin). No UI consumer wired here yet
+                        // — ignore so the order SSE handler stays exhaustive.
+                        LiveKind::DriverLocation { .. } => {}
                     }
                 },
             );

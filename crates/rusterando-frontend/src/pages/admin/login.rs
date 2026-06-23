@@ -6,9 +6,7 @@ use leptos::prelude::*;
     endpoint = "admin_login"
 )]
 pub async fn admin_login(password: String) -> Result<bool, ServerFnError> {
-    use leptos_axum::extract;
     use std::sync::Arc;
-    use tower_cookies::{Cookie, Cookies};
 
     // Per-tenant admin password (from the current tenant's `.env`) wins; fall
     // back to the boot-global `Arc<String>` (Model A / unset). Without the
@@ -17,18 +15,17 @@ pub async fn admin_login(password: String) -> Result<bool, ServerFnError> {
         .and_then(|t| t.admin_password)
         .or_else(|| use_context::<Arc<String>>().map(|a| (*a).clone()))
         .ok_or_else(|| ServerFnError::new("admin password not configured"))?;
-    let cookies: Cookies = extract().await?;
 
     if password != expected {
         return Ok(false);
     }
 
-    let mut c = Cookie::new("admin_session", "ok");
-    c.set_path("/");
-    c.set_http_only(true);
-    c.set_same_site(tower_cookies::cookie::SameSite::Lax);
-    c.set_max_age(tower_cookies::cookie::time::Duration::hours(8));
-    cookies.add(c);
+    // Write the MODERN session cookie (`dp_session=admin`, 365 days) — the
+    // same long-lived cookie kitchen/driver use. The old `admin_session=ok`
+    // cookie expired after 8h, so admins were silently logged out mid-shift
+    // and the client kept trusting a cookie the server had already dropped.
+    // current_role() still honors the legacy cookie for sessions in flight.
+    crate::pages::session::ssr::set_session(crate::pages::session::Role::Admin).await?;
 
     leptos_axum::redirect("/admin");
     Ok(true)
@@ -40,19 +37,12 @@ pub async fn admin_login(password: String) -> Result<bool, ServerFnError> {
     endpoint = "admin_logout"
 )]
 pub async fn admin_logout() -> Result<(), ServerFnError> {
-    use leptos_axum::extract;
-    use tower_cookies::{Cookie, Cookies};
-    let cookies: Cookies = extract().await?;
-    // Clear the session cookie. The attributes MUST match the ones set at
-    // login (HttpOnly, SameSite=Lax, Path=/) — a browser only overwrites/
-    // deletes a cookie whose key attributes line up; a mismatch can leave the
-    // original in place. Max-Age=0 expires it immediately.
-    let mut c = Cookie::new("admin_session", "");
-    c.set_path("/");
-    c.set_http_only(true);
-    c.set_same_site(tower_cookies::cookie::SameSite::Lax);
-    c.set_max_age(tower_cookies::cookie::time::Duration::ZERO);
-    cookies.add(c);
+    // Clear BOTH the modern `dp_session` cookie (admin now uses it) and the
+    // legacy `admin_session=ok`. The shared logout sets each to Max-Age=0 with
+    // matching attributes (Path=/, HttpOnly, SameSite=Lax) — a browser only
+    // deletes a cookie whose key attributes line up, so the attributes must
+    // match the ones set at login or the original lingers.
+    crate::pages::session::ssr::logout().await?;
     leptos_axum::redirect("/");
     Ok(())
 }

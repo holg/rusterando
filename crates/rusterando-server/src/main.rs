@@ -84,6 +84,16 @@ struct AppState {
     /// files, service identity). Read by the admin /settings diagnostics fn.
     #[allow(dead_code)]
     deployment: rusterando_frontend::pages::settings::DeploymentHandle,
+    /// The built i18n pack's hashed JS filename (from pkg/i18n/manifest.json at
+    /// boot). Baked into window.__appBootstrap so the client loads the pack by
+    /// name with no runtime manifest fetch. Empty when no pack is built.
+    i18n_pack_info: rusterando_frontend::i18n::I18nPackInfo,
+    /// Reserved `_shared` tenant pool (`data/_shared.sqlite`) — a non-routable
+    /// fallback DB holding default PDF cover/theme/branding for tenants that
+    /// haven't configured their own. `None` if it couldn't be opened (degrades
+    /// to bundled `include_*!` defaults). Threaded into the PDF handlers.
+    #[allow(dead_code)]
+    shared_pool: Option<SqlitePool>,
 }
 
 impl axum::extract::FromRef<AppState> for LeptosOptions {
@@ -259,6 +269,26 @@ async fn main() {
     let deployment_tenant_slug = deployment.tenant_slug.clone();
     let deployment_database_url = deployment.database_url.clone();
     let deployment_handle = rusterando_frontend::pages::settings::DeploymentHandle::new(deployment);
+
+    // i18n pack info: read the built pack's hashed JS filename from
+    // `<site_root>/pkg/i18n/manifest.json` ONCE at boot. Baked into
+    // window.__appBootstrap so the client loads the pack directly by name with
+    // no runtime manifest fetch (which could 404 if leptos re-hashed it). Empty
+    // when no pack is built (German-only) — the loader then no-ops.
+    let i18n_pack_js: std::sync::Arc<str> = {
+        let path = format!("{}/pkg/i18n/manifest.json", leptos_options.site_root);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("js").and_then(|j| j.as_str()).map(String::from))
+            .map(|js| {
+                tracing::info!("i18n pack: {js} (from {path})");
+                js
+            })
+            .unwrap_or_default()
+            .into()
+    };
+    let i18n_pack_info = rusterando_frontend::i18n::I18nPackInfo(i18n_pack_js);
 
     // Two-layer migrations:
     //   * the embedded folder under repo `migrations/` is the
@@ -542,6 +572,12 @@ async fn main() {
     // in below for the SSE handlers).
     let shutdown_rx_for_cap = shutdown_rx.clone();
 
+    // Reserved `_shared` tenant DB — non-routable fallback for PDF
+    // cover/theme/branding when a tenant hasn't set its own. Opened once,
+    // shared process-wide. `None` (logged) if it can't be opened, in which
+    // case rendering degrades to the bundled `include_*!` defaults.
+    let shared_pool = rusterando_server::tenant::load_shared_pool().await;
+
     let state = AppState {
         leptos_options: leptos_options.clone(),
         db: db.clone(),
@@ -559,6 +595,8 @@ async fn main() {
         jsonld,
         shutdown: shutdown_rx,
         deployment: deployment_handle,
+        i18n_pack_info: i18n_pack_info.clone(),
+        shared_pool: shared_pool.clone(),
     };
 
     let routes = generate_route_list(App);
@@ -610,6 +648,7 @@ async fn main() {
             uploads_dir: state.uploads_dir.to_string(),
             site_url: menu_pdf_site_url,
             branding: state.branding.clone(),
+            shared: state.shared_pool.clone(),
         }) as std::sync::Arc<dyn rusterando_frontend::pages::push::MenuPdfCache>,
     );
 
@@ -650,7 +689,10 @@ async fn main() {
                     rusterando_frontend::pages::settings::UploadsDir(state.uploads_dir.clone());
                 let jsonld = state.jsonld.clone();
                 let deployment = state.deployment.clone();
+                let i18n_pack_info = state.i18n_pack_info.clone();
                 move || {
+                    // i18n pack filename → shell bakes it into __appBootstrap.
+                    provide_context(i18n_pack_info.clone());
                     // Per-request tenant: the `resolve_tenant` middleware
                     // stashed the request's Tenant in extensions; leptos_axum
                     // already provided the request `Parts` into context, so we
@@ -823,26 +865,29 @@ async fn main() {
         .fallback(leptos_axum::file_and_error_handler::<LeptosOptions, _>(
             shell,
         ))
+        // The i18n-toggle guard: 404 /<lang>/* when the shop's i18n setting is
+        // off. Registered BEFORE resolve_tenant so it runs AFTER it inbound
+        // (axum applies layers outermost-last) — the guard therefore sees the
+        // resolved Tenant in extensions and reads THAT tenant's i18n handle, so
+        // each tenant's multilingual toggle controls its own locale routes. It
+        // still takes AppState for the global-fallback handle.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            i18n_guard_middleware,
+        ))
         // Tenant routing: resolve the per-request Tenant from X-Tenant/Host and
-        // stash it in extensions BEFORE the Leptos handlers run (their context
-        // closures read it back to swap the pool). In Model A this always
-        // inserts the single passthrough tenant — identical to today. Layered
-        // here (inside locale/i18n, outside Leptos) so every handler sees it.
-        // Uses TenantRouter state, not AppState.
+        // stash it in extensions BEFORE the Leptos handlers AND the i18n guard
+        // run (they read it back — the handlers to swap the pool, the guard to
+        // read the tenant's i18n toggle). In Model A this always inserts the
+        // single passthrough tenant — identical to today. Uses TenantRouter
+        // state, not AppState.
         .layer(axum::middleware::from_fn_with_state(
             tenant_router.clone(),
             rusterando_server::tenant::resolve_tenant,
         ))
         // /de/* canonicalisation runs first so all downstream layers
-        // (rate-limit, admin-auth, Leptos) see the canonical URL.
+        // (tenant, i18n, rate-limit, admin-auth, Leptos) see the canonical URL.
         .layer(axum::middleware::from_fn(locale_canonicalize_middleware))
-        // Then the i18n-toggle guard: 404 /<lang>/* when the admin
-        // setting is off. Needs state to read the I18nHandle, so it
-        // uses from_fn_with_state.
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            i18n_guard_middleware,
-        ))
         // Rate limit must wrap EVERYTHING so it sees server-fn paths that
         // leptos_axum auto-registers (those bypass our /api/{*fn_name} catch-all).
         .layer(axum::middleware::from_fn(rate_limit_middleware))
@@ -1142,12 +1187,21 @@ async fn backfill_category_slugs(db: &SqlitePool) -> Result<(), sqlx::Error> {
 /// exactly which `/<lang>/*` URLs the router will actually serve.
 async fn sitemap_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
+    // Per-request tenant (from resolve_tenant). Used for the i18n toggle so the
+    // sitemap advertises the same /<lang>/* alternates the router will actually
+    // serve for THIS shop. NB: the dynamic category/zone slugs below still read
+    // `state.db` (the global pool) — the sitemap is not yet fully tenant-scoped
+    // (separate gap: tenant DB + tenant PUBLIC_URL base).
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
 
     let base = rusterando_frontend::pages::home::site_url();
     let base = base.trim_end_matches('/');
-    let i18n_on = state.i18n.get();
+    let i18n_on = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => t.handles.i18n.get(),
+        None => state.i18n.get(),
+    };
 
     // Helper: full absolute URL for a page in a given locale prefix.
     // `prefix == ""` is the default-locale (de), un-prefixed URL.
@@ -1288,9 +1342,7 @@ async fn robots_handler() -> impl axum::response::IntoResponse {
 async fn live_order_sse_handler(
     axum::extract::Path(order_id): axum::extract::Path<String>,
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::response::Sse<
-    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
-> {
+) -> impl axum::response::IntoResponse {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use futures::StreamExt;
 
@@ -1306,7 +1358,9 @@ async fn live_order_sse_handler(
             }
             // JSON-encode the LiveEvent as the SSE `data` payload.
             let json = serde_json::to_string(&ev).ok()?;
-            Some(Ok(Event::default().data(json)))
+            Some(Ok::<_, std::convert::Infallible>(
+                Event::default().data(json),
+            ))
         }
     });
     // End the stream the moment shutdown is signalled, so it never pins the
@@ -1323,7 +1377,20 @@ async fn live_order_sse_handler(
     // half-open for minutes/hours. Empirically (2026-05-30) this leaks
     // ~1 fd per 8 closed clients with the 15s default; 5s reduces the
     // window 3× and brings steady-state fds in line with active clients.
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))
+    let sse =
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)));
+    // `X-Accel-Buffering: no` tells nginx (and any buffering proxy) NOT to
+    // buffer this response — events flush to the browser immediately. Without
+    // it the stream can sit in nginx's buffer until it fills or the connection
+    // closes, so the customer's page only updates on a manual reload. Belt-and-
+    // suspenders alongside nginx `proxy_buffering off`.
+    (
+        [(
+            axum::http::header::HeaderName::from_static("x-accel-buffering"),
+            "no",
+        )],
+        sse,
+    )
 }
 
 /// Resolves when the shutdown watch flips to `true` (SIGTERM/SIGINT received).
@@ -1348,9 +1415,7 @@ async fn wait_for_shutdown(mut rx: tokio::sync::watch::Receiver<bool>) {
 /// live (no reload). Filters the shared hub to `ShopStatus` events.
 async fn live_shop_sse_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-) -> axum::response::Sse<
-    impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
-> {
+) -> impl axum::response::IntoResponse {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use futures::StreamExt;
     use rusterando_shared::models::LiveKind;
@@ -1363,13 +1428,25 @@ async fn live_shop_sse_handler(
             return None;
         }
         let json = serde_json::to_string(&ev).ok()?;
-        Some(Ok(Event::default().data(json)))
+        Some(Ok::<_, std::convert::Infallible>(
+            Event::default().data(json),
+        ))
     });
     // Close on shutdown so this stream never blocks the graceful drain.
     let stream = stream.take_until(wait_for_shutdown(state.shutdown.clone()));
 
     // 5s keep-alive (see live_order_sse_handler for the why).
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)))
+    let sse =
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)));
+    // X-Accel-Buffering: no — flush events through nginx immediately (see
+    // live_order_sse_handler).
+    (
+        [(
+            axum::http::header::HeaderName::from_static("x-accel-buffering"),
+            "no",
+        )],
+        sse,
+    )
 }
 
 /// Max upload size — keeps decompression bombs out and matches what a
@@ -1429,14 +1506,7 @@ async fn upload_image_handler(
 
     // Cookie gate. The leptos `require_admin` helper isn't reachable from
     // a non-server-fn route, so we read the same cookie ourselves.
-    let admin_ok = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| {
-            s.split(';')
-                .any(|c| c.trim().eq_ignore_ascii_case("admin_session=ok"))
-        })
-        .unwrap_or(false);
+    let admin_ok = header_has_admin_session(&headers);
     if !admin_ok {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -1553,14 +1623,7 @@ async fn pdf_cover_upload_handler(
         None => state.db.clone(),
     };
 
-    let admin_ok = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| {
-            s.split(';')
-                .any(|c| c.trim().eq_ignore_ascii_case("admin_session=ok"))
-        })
-        .unwrap_or(false);
+    let admin_ok = header_has_admin_session(&headers);
     if !admin_ok {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -1683,14 +1746,7 @@ async fn pdf_test_render_handler(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let admin_ok = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| {
-            s.split(';')
-                .any(|c| c.trim().eq_ignore_ascii_case("admin_session=ok"))
-        })
-        .unwrap_or(false);
+    let admin_ok = header_has_admin_session(&headers);
     if !admin_ok {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -1708,8 +1764,12 @@ async fn pdf_test_render_handler(
     // Pull live override images so the test-render uses the same
     // assets the real PDF will. Substitute the supplied template
     // source instead of the persisted one.
-    let mut overrides =
-        rusterando_server::pdf::load_pdf_overrides(&state.db, &state.uploads_dir).await;
+    let mut overrides = rusterando_server::pdf::load_pdf_overrides(
+        &state.db,
+        &state.uploads_dir,
+        state.shared_pool.as_ref(),
+    )
+    .await;
     let source = if body.trim().is_empty() {
         rusterando_server::pdf::TEMPLATE_SRC.to_string()
     } else {
@@ -1791,11 +1851,16 @@ async fn history_csv_handler(
     use axum::response::IntoResponse;
     use std::fmt::Write;
 
-    // Cookie auth gate (same as require_admin in server-fn world).
+    // Cookie auth gate (same as require_admin in server-fn world). Accept the
+    // modern dp_session=admin AND the legacy admin_session=ok.
     let authed = cookies
-        .get("admin_session")
-        .map(|c| c.value() == "ok")
-        .unwrap_or(false);
+        .get("dp_session")
+        .map(|c| c.value() == "admin")
+        .unwrap_or(false)
+        || cookies
+            .get("admin_session")
+            .map(|c| c.value() == "ok")
+            .unwrap_or(false);
     if !authed {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -2408,6 +2473,7 @@ async fn menu_pdf_handler(
         &state.uploads_dir,
         format,
         show_ingredients,
+        state.shared_pool.as_ref(),
     )
     .await
     {
@@ -2590,7 +2656,17 @@ async fn i18n_guard_middleware(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    if state.i18n.get() {
+    // Read the PER-TENANT i18n toggle: resolve_tenant ran just before this and
+    // stashed the request's Tenant in extensions, so each shop's own setting
+    // gates its own /<lang>/* routes. Fall back to the global handle only when
+    // no tenant resolved (shouldn't happen — Model A inserts the passthrough).
+    let i18n_on = req
+        .extensions()
+        .get::<rusterando_server::tenant::Tenant>()
+        .map(|t| t.handles.i18n.get())
+        .unwrap_or_else(|| state.i18n.get());
+
+    if i18n_on {
         return next.run(req).await;
     }
     // i18n disabled — block the 7 non-default locale prefixes.
@@ -2676,6 +2752,26 @@ async fn rate_limit_middleware(
 /// 303 redirect to `/admin/login` — 303 is the right status for "your
 /// GET turned into a redirect because of policy", and works on every
 /// browser + the iOS WebView shell.
+/// True if the raw `Cookie` header carries an admin session. Accepts BOTH the
+/// modern `dp_session=admin` cookie (set by admin_login since the 365-day
+/// migration) AND the legacy `admin_session=ok` (sessions in flight from
+/// before the migration). Every non-server-fn admin gate in this file routes
+/// through this so login can't silently mismatch the route guard — the bug
+/// that redirected a freshly-logged-in admin straight back to /admin/login.
+fn header_has_admin_session(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.split(';').any(|c| {
+                let c = c.trim();
+                c.eq_ignore_ascii_case("admin_session=ok")
+                    || c.eq_ignore_ascii_case("dp_session=admin")
+            })
+        })
+        .unwrap_or(false)
+}
+
 async fn admin_auth_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -2695,21 +2791,10 @@ async fn admin_auth_middleware(
         return next.run(req).await;
     }
 
-    // Cookie sniff. Same predicate as require_admin() but we read the
-    // raw header here so we don't need to plumb tower_cookies into the
-    // middleware (which is layered above the cookie manager for the
-    // SSR catch-all).
-    let authed = req
-        .headers()
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| {
-            s.split(';')
-                .any(|c| c.trim().eq_ignore_ascii_case("admin_session=ok"))
-        })
-        .unwrap_or(false);
-
-    if authed {
+    // Cookie sniff (accepts dp_session=admin OR legacy admin_session=ok). We
+    // read the raw header here so we don't need to plumb tower_cookies into
+    // the middleware (layered above the cookie manager for the SSR catch-all).
+    if header_has_admin_session(req.headers()) {
         return next.run(req).await;
     }
 

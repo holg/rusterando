@@ -462,6 +462,25 @@ if [ $LEPTOS_RC -eq 0 ]; then
     if [ -f "$BINARY_PATH" ]; then
       echo "Server binary size: $(du -h "$BINARY_PATH" | cut -f1)"
     fi
+
+    # Build the i18n translation-pack + mgmt wasm AFTER `cargo leptos build`.
+    # ORDER MATTERS: cargo-leptos runs with LEPTOS_HASH_FILES=true, which
+    # content-hashes EVERY file already in site/pkg. If the i18n files were
+    # placed first, leptos would hash them (manifest.json, the loaders, the
+    # pack wasm) and every fixed-path reference (the inlined loader's
+    # `fetch('/pkg/i18n/manifest.json')`, `import('/pkg/i18n/<pack>.js')`)
+    # would 404. Running these AFTER means the i18n subtree keeps the stable +
+    # content-hashed names that build-i18n-pack.sh assigns, and leptos never
+    # touches them. The loader code itself is inlined into the SSR shell, so
+    # only the DATA (manifest + pack wasm, fetched by their own hashed names)
+    # lives under /pkg/i18n/.
+    if [ -f scripts/build-i18n-pack.sh ]; then
+      echo "Building i18n translation pack (fat) into site/pkg/i18n …"
+      bash scripts/build-i18n-pack.sh --profile fat || echo "  ! i18n-pack build failed (non-fatal; i18n stays German-only)"
+      if [ -f scripts/build-i18n-mgmt.sh ]; then
+        bash scripts/build-i18n-mgmt.sh || echo "  ! i18n-mgmt build failed (non-fatal)"
+      fi
+    fi
   fi
 
   # Cross-build the Pi binary (rusterando-printer) for aarch64 targets.

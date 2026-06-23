@@ -202,7 +202,7 @@ pub mod ssr {
                 min_order_cents: gcfg.min_order_cents,
                 qualifies: paid_subtotal >= gcfg.min_order_cents,
                 claimed: has_giveaway_line,
-                item_id: GIVEAWAY_ITEM_ID.to_string(),
+                item_id: gcfg.item_id.clone(),
             })
         } else {
             None
@@ -734,7 +734,7 @@ pub async fn claim_giveaway(sauce_option_id: String) -> Result<CartView, ServerF
     )
     .bind(&line_id)
     .bind(&cart_id)
-    .bind(GIVEAWAY_ITEM_ID)
+    .bind(&gcfg.item_id)
     .bind(&opts_json)
     .bind(&selected_json)
     .execute(&db)

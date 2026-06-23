@@ -340,6 +340,12 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
             "giveaway_order_types muss 'both', 'pickup' oder 'delivery' sein.",
         ));
     }
+    // PDF front-cover mode.
+    if key == "pdf_cover_mode" && !matches!(value.trim(), "text" | "image") {
+        return Err(ServerFnError::new(
+            "pdf_cover_mode muss 'text' oder 'image' sein.",
+        ));
+    }
     if key == "theme" && !ALLOWED_THEMES.contains(&value.trim()) {
         return Err(ServerFnError::new("Thema muss 'warm' oder 'dark' sein."));
     }
@@ -448,13 +454,71 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
+    // The value actually persisted. Normally the trimmed input verbatim; the
+    // giveaway arm below may REWRITE it (resolving a menu_number to the
+    // canonical item id).
+    let mut store_value = value.trim().to_string();
+
+    // Giveaway article: must reference a real menu_item, else the claimed free
+    // line JOINs to nothing and silently vanishes from the cart. The admin
+    // knows the *menu number* (e.g. 99), not the internal id (e.g.
+    // `mc-004-i009`) — and on a reseeded/imported menu the two don't line up
+    // (Davids' `mi-400` ≈ number 400 is a coincidence; flizza's are unrelated).
+    // So accept EITHER: an exact `id`, or a `menu_number`, and store the
+    // resolved canonical id. Verified here (needs the pool) so the admin gets a
+    // clear error instead of a promo that does nothing.
+    if key == "giveaway_item_id" {
+        let input = value.trim();
+        if input.is_empty() {
+            return Err(ServerFnError::new("Artikel-ID darf nicht leer sein."));
+        }
+        // 1) Exact id match.
+        let by_id: Option<(String,)> = sqlx::query_as("SELECT id FROM menu_items WHERE id = ?1")
+            .bind(input)
+            .fetch_optional(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("prüfe Artikel-ID: {e}")))?;
+        // 2) Else by menu_number (what the admin sees on the menu / receipt).
+        let resolved = match by_id {
+            Some((id,)) => Some(id),
+            None => {
+                let by_num: Vec<(String,)> =
+                    sqlx::query_as("SELECT id FROM menu_items WHERE menu_number = ?1")
+                        .bind(input)
+                        .fetch_all(&db)
+                        .await
+                        .map_err(|e| ServerFnError::new(format!("prüfe Artikelnummer: {e}")))?;
+                match by_num.len() {
+                    0 => None,
+                    1 => Some(by_num[0].0.clone()),
+                    n => {
+                        return Err(ServerFnError::new(format!(
+                            "Artikelnummer '{input}' ist {n}× vergeben — bitte stattdessen \
+                             die eindeutige Artikel-ID angeben."
+                        )));
+                    }
+                }
+            }
+        };
+        match resolved {
+            Some(id) => store_value = id,
+            None => {
+                return Err(ServerFnError::new(format!(
+                    "Kein Artikel mit der ID oder Nummer '{input}' gefunden. Bitte eine \
+                     gültige Artikel-ID (z. B. mc-004-i009) oder die Artikelnummer aus der \
+                     Speisekarte angeben."
+                )));
+            }
+        }
+    }
+
     let res = sqlx::query(
         "UPDATE app_settings
          SET value = ?2, updated_at = CURRENT_TIMESTAMP
          WHERE key = ?1",
     )
     .bind(&key)
-    .bind(value.trim())
+    .bind(&store_value)
     .execute(&db)
     .await
     .map_err(|e| ServerFnError::new(format!("update setting: {e}")))?;
@@ -480,6 +544,11 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
         // — rebuild the cache so structured data reflects the edit.
         crate::pages::seo::rebuild_jsonld_cache().await;
         // Shop name/address/phone also print on the menu.pdf header/footer.
+        crate::pages::push::rebuild_menu_pdf_cache().await;
+    }
+    // Any pdf_* setting (cover mode, tagline, hours, extras lines) changes the
+    // rendered menu — rebuild the static cache so the offline fallback matches.
+    if key.starts_with("pdf_") {
         crate::pages::push::rebuild_menu_pdf_cache().await;
     }
     // Stripe mode flip is write-through too: the next checkout (and
@@ -550,12 +619,15 @@ pub mod ssr {
     /// button + nudge) and place_order (to enforce server-side). Defaults are
     /// the migration defaults: disabled, 20 € threshold, both order types, so
     /// a DB missing the rows behaves as "off".
-    #[derive(Debug, Clone, Copy)]
+    #[derive(Debug, Clone)]
     pub struct GiveawayConfig {
         pub enabled: bool,
         pub min_order_cents: i64,
         /// 'both' | 'pickup' | 'delivery' — which order types qualify.
         pub order_types: GiveawayOrderTypes,
+        /// The menu_item.id added as the free line. Admin-editable
+        /// (`giveaway_item_id` setting); defaults to `mi-400` (Pizzabrötchen).
+        pub item_id: String,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -604,10 +676,22 @@ pub mod ssr {
                     .flatten();
             GiveawayOrderTypes::parse(row.as_ref().map(|(v,)| v.as_str()).unwrap_or("both"))
         };
+        let item_id = {
+            let row: Option<(String,)> =
+                sqlx::query_as("SELECT value FROM app_settings WHERE key = 'giveaway_item_id'")
+                    .fetch_optional(db)
+                    .await
+                    .ok()
+                    .flatten();
+            row.map(|(v,)| v.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| crate::pages::cart::GIVEAWAY_ITEM_ID.to_string())
+        };
         GiveawayConfig {
             enabled,
             min_order_cents,
             order_types,
+            item_id,
         }
     }
 

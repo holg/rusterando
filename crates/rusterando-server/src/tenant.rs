@@ -553,6 +553,79 @@ pub async fn build_handles(pool: &SqlitePool) -> TenantHandles {
     }
 }
 
+/// Open the reserved `_shared` tenant DB — a single process-wide SQLite file
+/// (`data/_shared.sqlite`, overridable via `SHARED_DATABASE_URL`) that holds
+/// fallback assets (PDF cover image, PDF theme/template, branding-text
+/// defaults) used when a real tenant hasn't configured its own.
+///
+/// `_shared` is NOT a routable tenant: its slug contains an underscore, so
+/// `valid_slug("_shared")` is false and `resolve_tenant` can never map an
+/// incoming request to it. It lives outside the `Tenants` registry entirely —
+/// it's a fallback data source, threaded into PDF rendering, not a shop.
+///
+/// Returns `None` (logged) if it can't be opened/migrated, so a missing or
+/// broken shared DB degrades to the bundled `include_*!` defaults rather than
+/// aborting boot.
+pub async fn load_shared_pool() -> Option<SqlitePool> {
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+
+    let database_url = std::env::var("SHARED_DATABASE_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "sqlite:./data/_shared.sqlite".to_string());
+
+    // Ensure the parent dir exists for a default file URL.
+    if let Some(stripped) = database_url.strip_prefix("sqlite:") {
+        let path = stripped
+            .trim_start_matches("//")
+            .split('?')
+            .next()
+            .unwrap_or("");
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).ok();
+            }
+        }
+    }
+
+    let connect_opts = match database_url.parse::<SqliteConnectOptions>() {
+        Ok(o) => o
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(5)),
+        Err(e) => {
+            tracing::warn!("shared tenant: parse SHARED_DATABASE_URL ({database_url}): {e} — falling back to bundled defaults");
+            return None;
+        }
+    };
+
+    let pool = match SqlitePoolOptions::new()
+        .max_connections(2)
+        .connect_with(connect_opts)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                "shared tenant: open pool ({database_url}): {e} — falling back to bundled defaults"
+            );
+            return None;
+        }
+    };
+
+    if let Err(e) = sqlx::migrate!("../../migrations").run(&pool).await {
+        tracing::warn!(
+            "shared tenant: migrate ({database_url}): {e} — falling back to bundled defaults"
+        );
+        return None;
+    }
+
+    tracing::info!(
+        "shared tenant DB ready ({database_url}) — fallback for PDF cover/theme/branding"
+    );
+    Some(pool)
+}
+
 // ---------------------------------------------------------------------------
 // Request routing. `resolve_tenant` runs as an axum middleware BEFORE the
 // Leptos handlers; it inserts the resolved `Tenant` into request extensions.
@@ -797,5 +870,13 @@ mod tests {
         assert!(!valid_slug("rusterando.flizza")); // dot
         assert!(!valid_slug("../etc")); // path traversal
         assert!(!valid_slug("")); // empty
+    }
+
+    #[test]
+    fn shared_tenant_is_non_routable() {
+        // The reserved `_shared` fallback DB must NEVER be reachable as a
+        // subdomain. The underscore is the guarantee: `valid_slug` rejects it,
+        // so `resolve_tenant` can never map `_shared.rusterando.de` to it.
+        assert!(!valid_slug("_shared"));
     }
 }

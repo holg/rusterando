@@ -3,6 +3,17 @@ use leptos_meta::{provide_meta_context, HashedStylesheet, MetaTags};
 use leptos_router::components::{Route, Router, Routes};
 use leptos_router::{ParamSegment, StaticSegment};
 
+// The translation-pack loaders are INLINED into the SSR shell rather than
+// referenced as `/pkg/*.js` files. Why: the prod build runs with
+// LEPTOS_HASH_FILES=true, which cargo-leptos uses to content-hash every file in
+// site/pkg — including these loaders — so `wasm-split-loader.js` becomes
+// `wasm-split-loader.<hash>.js` on disk while the hardcoded <script src> still
+// asked for the unhashed name → 404. Inlining sidesteps the filename hashing
+// entirely (the loaders are tiny, ~5 KB). The pack DATA + wasm are still fetched
+// by hashed filename via manifest.json — only the small loader code is inlined.
+const WASM_SPLIT_LOADER_JS: &str = include_str!("static/wasm-split-loader.js");
+const I18N_LOADER_JS: &str = include_str!("static/i18n-loader.js");
+
 use crate::components::cart_drawer::{provide_cart_ctx, CartDrawer, CartFab};
 use crate::components::site_header::SiteHeader;
 use crate::components::test_mode_banner::TestModeBanner;
@@ -65,7 +76,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
     // be coordinated with the SSR stream markers. A plain inline
     // global is hydrate-safe by construction — same string on SSR
     // and hydrate, no async boundary.
-    let (bootstrap_script, page_title, jsonld, gsv) = {
+    let (bootstrap_script, page_title, jsonld, gsv, i18n_loader_on) = {
         #[cfg(feature = "ssr")]
         {
             let branding = use_context::<crate::branding::BrandingHandle>().map(|h| h.get());
@@ -90,8 +101,16 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             // shop with `"` or `\` in its display name can't break out
             // of the string literal.
             let name_json = serde_json::to_string(&name).unwrap_or_else(|_| "\"\"".to_string());
+            // The built i18n pack's hashed JS filename (read from manifest.json
+            // at boot). Baked in so the loader imports it DIRECTLY, no runtime
+            // manifest fetch. Empty string when no pack is built.
+            let pack_js = use_context::<crate::i18n::I18nPackInfo>()
+                .map(|p| p.get().to_string())
+                .unwrap_or_default();
+            let pack_js_json =
+                serde_json::to_string(&pack_js).unwrap_or_else(|_| "\"\"".to_string());
             let js = format!(
-                "window.__appBootstrap = {{ shop_name: {name_json}, i18n_enabled: {i18n_on}, stripe_sandbox: {stripe_sandbox} }};"
+                "window.__appBootstrap = {{ shop_name: {name_json}, i18n_enabled: {i18n_on}, stripe_sandbox: {stripe_sandbox}, i18n_pack_js: {pack_js_json} }};"
             );
             // Cached Restaurant JSON-LD (built at boot, rebuilt on edits).
             // Read here SYNCHRONOUSLY and baked into <head> below — the shell
@@ -100,7 +119,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             let ld = use_context::<crate::pages::seo::JsonLdHandle>()
                 .map(|h| h.get().to_string())
                 .unwrap_or_default();
-            (Some(js), name, ld, gsv)
+            (Some(js), name, ld, gsv, i18n_on)
         }
         #[cfg(not(feature = "ssr"))]
         {
@@ -109,6 +128,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 String::from("Mein Restaurant"),
                 String::new(),
                 String::new(),
+                false,
             )
         }
     };
@@ -166,6 +186,21 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 // traverses (the walker starts at <body>'s first
                 // child mounting `App`).
                 <script>{bootstrap_js}</script>
+                // Translation-pack loader (defines window.__loadI18nPack). Only
+                // emitted when i18n is enabled for this shop, so German-only
+                // shops never ship it. It merely DEFINES the loader; the actual
+                // pack fetch happens on hydrate only for non-German locales (see
+                // App() → hydrate_load_pack_on_ready). In <head>, outside the
+                // hydrate body-walk, so the conditional tag is hydration-safe.
+                {i18n_loader_on.then(|| view! {
+                    // Inlined loaders (see WASM_SPLIT_LOADER_JS comment): the
+                    // generic split-wasm factory first, then the thin i18n-pack
+                    // config that calls it. They only DEFINE window.__loadI18nPack;
+                    // the pack itself is fetched (by hashed name via manifest.json)
+                    // on hydrate for non-German locales.
+                    <script>{WASM_SPLIT_LOADER_JS}</script>
+                    <script>{I18N_LOADER_JS}</script>
+                })}
                 <script>
                     {r#"
                     // Translate vertical mouse-wheel into horizontal scroll on .category-tabs.
@@ -259,6 +294,16 @@ pub fn App() -> impl IntoView {
     let (loc, _rest) = crate::i18n::split_locale_prefix(&path);
     let initial = loc.unwrap_or(crate::i18n::Locale::DEFAULT);
     let _ = crate::i18n::provide_locale_ctx(initial);
+    // Pack-generation signal: bumped when the translation .wasm pack loads so
+    // every t!()/t_menu() view re-renders with the now-available translations.
+    let _ = crate::i18n::provide_pack_gen();
+    // On hydrate, when the active locale is non-German, lazily load the
+    // translation pack and bump the generation once it's ready. SSR does
+    // nothing here (renders German/DB), so the initial DOM matches.
+    #[cfg(feature = "hydrate")]
+    if initial != crate::i18n::Locale::DEFAULT {
+        crate::i18n::hydrate_load_pack_on_ready();
+    }
     // Map the resolved locale to a *static* base string — required
     // by Router's `base: Cow<'static, str>` prop. Default locale
     // uses "" so canonical URLs have no prefix.
@@ -331,6 +376,7 @@ pub fn App() -> impl IntoView {
                     }/>
                     <Route path=(StaticSegment("admin"), StaticSegment("address-attempts")) view=AddressAttemptsPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("pdf")) view=PdfAdminPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("translations")) view=crate::pages::admin::translations::TranslationsAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("pricing")) view=PricingAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("hours")) view=HoursAdminPage/>
                     <Route path=StaticSegment("kitchen") view=KitchenBoardPage/>

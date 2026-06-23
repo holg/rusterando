@@ -1,0 +1,24 @@
+[package]
+name = "rusterando-i18n-pack"
+version = "0.1.0"
+edition = "2021"
+description = "Hand-split translation .wasm pack for the rusterando frontend — chrome (shared/exclusive) + menu vocabulary, loaded on demand and cached by hash."
+
+# cdylib → the browser-loadable .wasm (via wasm-bindgen --target web).
+# rlib   → native unit tests + use by the build script.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Runtime deps: ONLY wasm-bindgen. The translation data is baked into static
+# Rust slices by build.rs (no JSON parser in the wasm) — see build.rs.
+[dependencies]
+wasm-bindgen = { workspace = true }
+
+# Build-time only: the shared wasm-split codegen turns the generated JSON into
+# static slices. Never ships in the wasm.
+[build-dependencies]
+rusterando-wasm-split = { path = "../rusterando-wasm-split", features = ["build"] }
+
+# Build profile note: the pack is built standalone by scripts/build-i18n-pack.sh
+# (cargo build --release --target wasm32-unknown-unknown -p rusterando-i18n-pack),
+# inheriting the workspace release profile (opt-level z) for a lean artifact.

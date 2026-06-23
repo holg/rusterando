@@ -3,34 +3,10 @@
 use leptos::prelude::*;
 
 use crate::branding::get_shop_name;
-use crate::pages::admin::login::{admin_logout, AdminLogout};
 use crate::stripe::get_stripe_mode;
 
 #[component]
 pub fn AdminShell(children: Children) -> impl IntoView {
-    let logout = ServerAction::<AdminLogout>::new();
-
-    let do_logout = move |_| {
-        logout.dispatch(AdminLogout {});
-    };
-
-    // The logout server fn clears the `admin_session` cookie, but it's
-    // dispatched as an in-page fetch (not a form navigation), so the
-    // `leptos_axum::redirect` it returns doesn't move the browser — the admin
-    // would stay on the now-unauthenticated page with stale in-memory state.
-    // Once the action resolves Ok, force a FULL page load to /admin/login: the
-    // admin-auth middleware re-checks the (now-absent) cookie on that real
-    // navigation and the session is truly gone. Same reload trick the
-    // stripe-mode flip uses in settings_admin.rs.
-    #[cfg(feature = "hydrate")]
-    Effect::new(move |_| {
-        if matches!(logout.value().get(), Some(Ok(()))) {
-            if let Some(w) = web_sys::window() {
-                let _ = w.location().set_href("/admin/login");
-            }
-        }
-    });
-
     // Brand text via Resource (same pattern as stripe chip + theme).
     // Previously this was a `#[cfg(feature = "ssr")]` context read, which
     // rendered "Davids Pizzeria — Admin" on the server but
@@ -159,7 +135,12 @@ pub fn AdminShell(children: Children) -> impl IntoView {
                     <a href="/admin/address-attempts">"Abgelehnte Adressen"</a>
                     <a href="/admin/hours">"Öffnungszeiten"</a>
                     <a href="/admin/pdf">"PDF-Editor"</a>
-                    <button class="logout" on:click=do_logout>"Abmelden"</button>
+                    <a href="/admin/translations">"Übersetzungen"</a>
+                    // Live auth-status chip + [Abmelden]. Replaces the old bare
+                    // button: it heartbeats current_role() (30s + on focus, 8s
+                    // timeout) so the admin sees if the server has expired the
+                    // session, instead of trusting a stale cookie and hanging.
+                    <crate::pages::session::LogoutButton role=crate::pages::session::Role::Admin/>
                 </nav>
             </header>
             <div class="admin-shell-body">
@@ -167,10 +148,4 @@ pub fn AdminShell(children: Children) -> impl IntoView {
             </div>
         </div>
     }
-}
-
-// Suppress unused-import warning when admin_logout is only used by the macro expansion.
-#[allow(dead_code)]
-fn _admin_logout_typecheck() {
-    let _ = admin_logout;
 }
