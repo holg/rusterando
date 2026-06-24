@@ -171,6 +171,7 @@ pub fn subscribe_order_live(
                         // Append to the chat-style log (oldest first).
                         LiveKind::Message(m) => {
                             let id = m.id;
+                            let from_customer = m.sender == "customer";
                             // Status changes are logged into the message stream too
                             // (body "Status: …") AND arrive as a dedicated `Status`
                             // event. Notify only via the `Status` branch so a single
@@ -180,7 +181,15 @@ pub fn subscribe_order_live(
                                 notify_customer("📣 Nachricht vom Restaurant", &m.body, &oid);
                             }
                             messages.update(|v| v.push(m));
-                            if ack_on_receive {
+                            // Delivery ack = "the OTHER side rendered my message".
+                            // Only ack messages NOT written by this page's own
+                            // sender. The customer page (`ack_on_receive=true`)
+                            // acks STAFF messages — but the SSE broadcast echoes
+                            // the customer's OWN message back to their page too,
+                            // and acking that would stamp delivered_at instantly,
+                            // wrongly clearing the admin board's unread badge. So
+                            // never ack a customer-authored message here.
+                            if ack_on_receive && !from_customer {
                                 let oid = oid.clone();
                                 leptos::task::spawn_local(async move {
                                     let _ = crate::pages::order::ack_order_message(oid, id).await;
