@@ -3010,6 +3010,61 @@ async fn append_order_message(
             ),
         });
     }
+
+    // A VIP customer wrote back — alert the admins on their phones. Staff
+    // messages don't push (the customer is notified via the order page's SSE
+    // OS-notification path instead). Best-effort, fire-and-forget: a missing
+    // push handle (no .p8 configured) or a failed send must never fail the
+    // message insert. The deep link drops the admin straight onto the order's
+    // detail page, where the reply box lives.
+    if sender == "customer" {
+        match use_context::<crate::pages::push::BroadcastSinkHandle>().flatten() {
+            Some(sink) => {
+                // Prefix the order number so the push is identifiable at a glance;
+                // fall back to the bare body if we can't read it.
+                let order_number: Option<String> =
+                    sqlx::query_scalar("SELECT order_number FROM orders WHERE id = ?1")
+                        .bind(order_id)
+                        .fetch_optional(db)
+                        .await
+                        .ok()
+                        .flatten();
+                let title = match order_number
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(num) => format!("📱 Kundennachricht · {num}"),
+                    None => "📱 Kundennachricht".to_string(),
+                };
+                // APNs alert bodies should stay short; the full text is on the page.
+                let body: String = if msg.chars().count() > 160 {
+                    let truncated: String = msg.chars().take(159).collect();
+                    format!("{truncated}…")
+                } else {
+                    msg.to_string()
+                };
+                let deep_link = format!("/admin/orders/{order_id}");
+                // Observable at info level: a successful APNs fan-out otherwise
+                // logs only at debug, so without this the feature is invisible
+                // in production (RUST_LOG=info). The fan-out itself logs the
+                // device count + per-token result under target "apns".
+                log::info!(
+                    "[orders] VIP customer message on {order_id} → push to admins (deep_link={deep_link})"
+                );
+                sink.notify_roles(&["admin"], &title, &body, Some(&deep_link));
+            }
+            None => {
+                // No push handle in context (APNs not configured / no .p8).
+                // Log it so a "no notification" report is explained rather
+                // than silent.
+                log::warn!(
+                    "[orders] VIP customer message on {order_id}: no push sink in context — admins NOT alerted"
+                );
+            }
+        }
+    }
+
     log::info!(
         "[orders] {sender} message appended to order {order_id} ({} chars)",
         msg.chars().count()

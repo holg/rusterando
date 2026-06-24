@@ -220,9 +220,14 @@ impl Inner {
         .await?;
 
         if tokens.is_empty() {
-            tracing::debug!(target: "apns", %role, "no devices registered, nothing to send");
+            tracing::info!(target: "apns", %role, "fan-out: no active devices for role, nothing to send");
             return Ok(());
         }
+
+        // Info-level so production (RUST_LOG=info) shows the fan-out reached
+        // real devices — the per-token result below stays at debug to avoid
+        // noise. Staff pushes are low-frequency, so this is cheap.
+        tracing::info!(target: "apns", %role, devices = tokens.len(), "fan-out: sending push");
 
         for (token,) in tokens {
             let builder = DefaultNotificationBuilder::new()

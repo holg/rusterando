@@ -37,6 +37,11 @@ pub struct AdminOrderRow {
     /// in the kitchen board so staff sees at a glance that this
     /// isn't a real customer.
     pub stripe_mode: String,
+    /// True when this order has at least one customer-written message that
+    /// no admin has opened yet (sender='customer', delivered_at IS NULL).
+    /// Drives the "neue Nachricht" badge on the board card; cleared when an
+    /// admin opens the order's detail page.
+    pub unread_customer_message: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -79,23 +84,36 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
             String,         // order_type (coalesced)
             Option<String>, // delivery_address_json
             String,         // stripe_mode (coalesced)
+            i64,            // unread_customer_message (0/1)
         ),
     >(
-        "SELECT id,
-                COALESCE(order_number, '')    AS order_number,
-                COALESCE(status, '')          AS status,
-                COALESCE(contact_name, '')    AS contact_name,
-                COALESCE(contact_phone, '')   AS contact_phone,
-                scheduled_for,
-                COALESCE(created_at, '')      AS created_at,
-                COALESCE(total_cents, 0)      AS total_cents,
-                COALESCE(payment_status, '')  AS payment_status,
-                COALESCE(order_type, '')      AS order_type,
-                delivery_address_json,
-                COALESCE(stripe_mode, 'sandbox') AS stripe_mode
-         FROM orders
-         WHERE status IN ('received', 'preparing', 'ready_for_pickup', 'pending_payment')
-         ORDER BY created_at ASC",
+        "SELECT o.id,
+                COALESCE(o.order_number, '')    AS order_number,
+                COALESCE(o.status, '')          AS status,
+                COALESCE(o.contact_name, '')    AS contact_name,
+                COALESCE(o.contact_phone, '')   AS contact_phone,
+                o.scheduled_for,
+                COALESCE(o.created_at, '')      AS created_at,
+                COALESCE(o.total_cents, 0)      AS total_cents,
+                COALESCE(o.payment_status, '')  AS payment_status,
+                COALESCE(o.order_type, '')      AS order_type,
+                o.delivery_address_json,
+                COALESCE(o.stripe_mode, 'sandbox') AS stripe_mode,
+                EXISTS (
+                    SELECT 1 FROM order_messages m
+                    WHERE m.order_id = o.id
+                      AND m.sender = 'customer'
+                      AND m.delivered_at IS NULL
+                ) AS unread_customer_message
+         FROM orders o
+         WHERE o.status IN ('received', 'preparing', 'ready_for_pickup', 'pending_payment')
+            OR EXISTS (
+                SELECT 1 FROM order_messages m
+                WHERE m.order_id = o.id
+                  AND m.sender = 'customer'
+                  AND m.delivered_at IS NULL
+            )
+         ORDER BY o.created_at ASC",
     )
     .fetch_all(&db)
     .await
@@ -118,6 +136,7 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
         order_type,
         addr_json,
         stripe_mode,
+        unread_customer_message,
     ) in rows
     {
         // Items summary in one query per order — fine for a kitchen with <100 active orders.
@@ -223,13 +242,18 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
             total_cents: total,
             items_summary,
             stripe_mode,
+            unread_customer_message: unread_customer_message != 0,
         };
 
         match status.as_str() {
             "received" | "pending_payment" => received.push(row),
             "preparing" => preparing.push(row),
             "ready_for_pickup" => ready.push(row),
-            _ => {}
+            // Already completed/cancelled but a VIP customer wrote back and no
+            // admin has opened it yet — surface it in the rightmost column so
+            // the reply isn't lost. The WHERE clause only let these through
+            // when unread, so this arm always carries an unread message.
+            _ => ready.push(row),
         }
     }
 
@@ -248,7 +272,27 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
 pub async fn get_admin_order(
     id: String,
 ) -> Result<crate::pages::order::OrderDetail, ServerFnError> {
+    use sqlx::SqlitePool;
+
     crate::pages::admin::require_admin().await?;
+
+    // Opening the order detail counts as "an admin has seen the customer's
+    // message" — stamp delivered_at on this order's unread customer messages
+    // so the board's "neue Nachricht" badge clears on its next 20s refetch.
+    // Best-effort: a failure here must not block loading the order.
+    if let Some(db) = use_context::<SqlitePool>() {
+        if let Err(e) = sqlx::query(
+            "UPDATE order_messages SET delivered_at = CURRENT_TIMESTAMP
+             WHERE order_id = ?1 AND sender = 'customer' AND delivered_at IS NULL",
+        )
+        .bind(&id)
+        .execute(&db)
+        .await
+        {
+            log::warn!("[orders] mark customer messages read for {id} failed: {e}");
+        }
+    }
+
     crate::pages::order::get_order(id).await
 }
 
@@ -362,6 +406,18 @@ pub fn AdminOrdersPage() -> impl IntoView {
         |_| async move { list_admin_orders().await },
     );
 
+    // Auto-refresh the board every 20s so new orders and — crucially — the
+    // "neue Nachricht" badge surface without the admin clicking Aktualisieren.
+    // The APNs push is the instant alert on their phone; this keeps the open
+    // board screen caught up. Hydrate-only (no SSR timers). AdminShell tabs
+    // force a full page reload on navigation, so the timer doesn't accumulate
+    // across views — it dies with the page. Mirrors `pause_poll`'s idiom.
+    #[cfg(feature = "hydrate")]
+    leptos::leptos_dom::helpers::set_interval(
+        move || orders.refetch(),
+        std::time::Duration::from_secs(20),
+    );
+
     view! {
         <AdminShell>
             <section class="admin-orders">
@@ -468,16 +524,24 @@ fn OrderCard(
         "🏪 ABHOLUNG"
     };
     let is_test = r.stripe_mode != "live";
-    let card_cls = if is_test {
-        "order-card test-order"
-    } else {
-        "order-card"
+    let has_unread_msg = r.unread_customer_message;
+    let card_cls = match (is_test, has_unread_msg) {
+        (true, true) => "order-card test-order has-unread-msg",
+        (true, false) => "order-card test-order",
+        (false, true) => "order-card has-unread-msg",
+        (false, false) => "order-card",
     };
     let created_label = fmt_created_local(&r.created_at);
     view! {
         <li class=card_cls>
             <div class="order-head">
-                <a class="order-num" href=detail_href>{r.order_number}</a>
+                <a class="order-num" href=detail_href.clone()>{r.order_number}</a>
+                {has_unread_msg.then(|| view! {
+                    <a class="msg-badge" href=detail_href
+                        title="Neue Kundennachricht — zum Antworten öffnen">
+                        "💬 Neue Nachricht"
+                    </a>
+                })}
                 <span class="order-time" title="Bestelleingang">{created_label}</span>
                 {is_test.then(|| view! {
                     <span class="test-pill" title="Sandbox/Test-Bestellung">"TEST"</span>

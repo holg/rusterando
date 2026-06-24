@@ -4083,6 +4083,39 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   background: rgba(255, 243, 205, 0.18);
 }
 
+// Unread VIP customer message: badge in the order head + a left accent on
+// the whole card so a board full of orders shows at a glance which one is
+// waiting on a reply. Clicking the badge (or the order number) opens the
+// detail page where the reply box lives.
+.order-card .msg-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.08rem 0.55rem;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  background: #e7f1ff;
+  color: #0b4fa6;
+  border: 1px solid #9ec5f0;
+  text-decoration: none;
+  white-space: nowrap;
+  animation: msg-badge-pulse 1.8s ease-in-out infinite;
+  &:hover { background: #d3e6ff; }
+}
+.order-card.has-unread-msg {
+  border-left: 4px solid #2b7de9;
+}
+// Keep the test-order tint but let the unread accent win the left border.
+.order-card.test-order.has-unread-msg {
+  border-left: 4px solid #2b7de9;
+  background: rgba(255, 243, 205, 0.18);
+}
+@keyframes msg-badge-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(43, 125, 233, 0.0); }
+  50% { box-shadow: 0 0 0 3px rgba(43, 125, 233, 0.18); }
+}
+
 // Buchhaltung filter checkbox
 .admin-history .filter .include-test {
   display: inline-flex;
