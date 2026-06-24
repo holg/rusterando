@@ -96,6 +96,12 @@ load_env_profile() {
     SSH_HOST="${SSH_HOST:?SSH_HOST not set in $ENV_FILE}"
     APP_NAME="${APP_NAME:-${BIN_NAME:-rusterando-server}}"
     REMOTE_BASE="${DEPLOY_REMOTE_BASE:-${REMOTE_BASE:-/var/www/example.com}}"
+    # Public site URL for the "Site: …" deploy banners. Comes from the
+    # profile's PUBLIC_URL (e.g. https://rusterando.de for -e rusterando);
+    # falls back to the remote base dir name (DEPLOY_REMOTE_BASE is
+    # /var/www/<host>) so a profile that omits PUBLIC_URL still prints the
+    # right host instead of a hardcoded one.
+    SITE_URL="${PUBLIC_URL:-https://$(basename "$REMOTE_BASE")}"
     REMOTE_BIN_DIR="$REMOTE_BASE"
     REMOTE_HTML_DIR="$REMOTE_BASE/html"
     REMOTE_DATA_DIR="$REMOTE_BASE/data"
@@ -597,7 +603,7 @@ REMOTE_EOF
 
     echo ""
     echo "=== Restore complete ==="
-    echo "Site: https://davidspizzeria.de"
+    echo "Site: $SITE_URL"
 }
 
 cmd_upload() {
@@ -816,7 +822,7 @@ cmd_deploy() {
     cmd_apply_seeds
     echo ""
     echo "=== Deploy complete ==="
-    echo "Site: https://davidspizzeria.de"
+    echo "Site: $SITE_URL"
 }
 
 # Apply per-deployment seed SQL files (e.g. branding.davids.sql) against
