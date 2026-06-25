@@ -4605,12 +4605,29 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
     let replier = ServerAction::<SendCustomerMessage>::new();
     let on_send_reply = move |_| {
         let body = reply_text.get();
-        if body.trim().is_empty() {
+        let trimmed = body.trim().to_string();
+        if trimmed.is_empty() {
             return;
         }
+        // Optimistic echo: show the customer's own reply in the thread the
+        // instant they hit send — don't wait for the SSE round-trip. Without
+        // this the textarea just clears with no visible result, so customers
+        // re-tap send (we saw one reply land 4× in a second). A placeholder
+        // with id=0 marks it "pending"; when the real message echoes back over
+        // SSE (real positive id, same body), the live handler replaces this
+        // placeholder instead of duplicating it (see subscribe_order_live).
+        messages.update(|v| {
+            v.push(rusterando_shared::models::OrderMessage {
+                id: 0,
+                body: trimmed.clone(),
+                created_at: "wird gesendet…".to_string(),
+                sender: "customer".to_string(),
+                delivered: false,
+            });
+        });
         replier.dispatch(SendCustomerMessage {
             order_id: reply_oid.get_value(),
-            message: body,
+            message: trimmed,
         });
         reply_text.set(String::new());
     };

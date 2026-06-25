@@ -180,7 +180,19 @@ pub fn subscribe_order_live(
                             if notify && !m.body.starts_with("Status: ") {
                                 notify_customer("📣 Nachricht vom Restaurant", &m.body, &oid);
                             }
-                            messages.update(|v| v.push(m));
+                            messages.update(|v| {
+                                // Reconcile an optimistic placeholder (id == 0,
+                                // appended on send so the customer sees their
+                                // reply instantly) with this real echo: drop the
+                                // pending entry with the same sender+body so the
+                                // message isn't shown twice. Real messages all
+                                // carry a positive DB id, so this only ever
+                                // removes a local placeholder.
+                                v.retain(|e| {
+                                    !(e.id == 0 && e.sender == m.sender && e.body == m.body)
+                                });
+                                v.push(m);
+                            });
                             // Delivery ack = "the OTHER side rendered my message".
                             // Only ack messages NOT written by this page's own
                             // sender. The customer page (`ack_on_receive=true`)
