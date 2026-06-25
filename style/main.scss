@@ -3955,6 +3955,23 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
     justify-content: space-between;
     gap: 0.8rem;
   }
+  // Text-vs-Foto cover switch in the Cover-Library card.
+  .cover-mode {
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    padding: 0.5rem 0.8rem 0.7rem;
+    margin: 0.2rem 0 0.8rem;
+    legend { font-weight: 700; padding: 0 0.3rem; font-size: 0.9rem; }
+    .cover-mode-opt {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      padding: 0.25rem 0;
+      cursor: pointer;
+      input { margin-top: 0.2rem; }
+    }
+    .hint.small { margin: 0.3rem 0 0; font-size: 0.8rem; }
+  }
   .field-actions {
     display: flex;
     gap: 0.4rem;

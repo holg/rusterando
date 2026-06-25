@@ -442,10 +442,12 @@ pub fn PdfAdminPage() -> impl IntoView {
                                     updater
                                 />
                                 <CoverLibraryCard
+                                    cover_mode=by_key("pdf_cover_mode")
                                     covers
                                     cover_activator
                                     cover_deleter
                                     cover_upload_bump
+                                    updater
                                 />
                                 <ImagesCard
                                     ad_cover=by_key("pdf_ad_cover_image")
@@ -747,14 +749,32 @@ async fn upload_via_fetch(_file: ()) -> Result<String, String> {
 
 #[component]
 fn CoverLibraryCard(
+    /// Current `pdf_cover_mode` setting: "text" (textual cover, default) or
+    /// "image" (use the active uploaded cover). Seeds the toggle below.
+    cover_mode: String,
     covers: Resource<Result<Vec<CoverRow>, ServerFnError>>,
     cover_activator: ServerAction<ActivatePdfCover>,
     cover_deleter: ServerAction<DeletePdfCover>,
     cover_upload_bump: RwSignal<u32>,
+    /// Shared settings writer (also used by the other cards). Writing
+    /// `pdf_cover_mode` flips text↔image; `update_setting` rebuilds the
+    /// cached menu.pdf, so the change takes effect on the next open.
+    updater: ServerAction<UpdateSetting>,
 ) -> impl IntoView {
     let new_label: RwSignal<String> = RwSignal::new(String::new());
     let uploading: RwSignal<bool> = RwSignal::new(false);
     let upload_err: RwSignal<Option<String>> = RwSignal::new(None);
+
+    // The toggle: an empty/unknown value falls back to "text" (the default),
+    // matching the renderer (pdf.rs reads anything ≠ "image" as text).
+    let use_image = RwSignal::new(cover_mode == "image");
+    let set_mode = move |image: bool| {
+        use_image.set(image);
+        updater.dispatch(UpdateSetting {
+            key: "pdf_cover_mode".to_string(),
+            value: if image { "image" } else { "text" }.to_string(),
+        });
+    };
 
     let on_pick = move |ev: leptos::ev::Event| {
         #[cfg(feature = "hydrate")]
@@ -796,6 +816,36 @@ fn CoverLibraryCard(
                 "Das aktive Cover wird in der PDF-Frontseite gerendert. "
                 "Format: JPEG oder PNG, max. 5 MB."
             </p>
+
+            // Text vs. Foto switch. This is the control that decides whether
+            // the PDF uses the textual title page (default) or the active
+            // uploaded cover — without it, uploading a cover changes nothing.
+            <fieldset class="cover-mode">
+                <legend>"Titelseite der PDF"</legend>
+                <label class="cover-mode-opt">
+                    <input type="radio" name="cover_mode"
+                        prop:checked=move || !use_image.get()
+                        on:change=move |_| set_mode(false)/>
+                    <span>
+                        <strong>"Textseite "</strong>
+                        <span class="muted small">"(Standard) — gesetzte Titelseite aus den Shop-Daten"</span>
+                    </span>
+                </label>
+                <label class="cover-mode-opt">
+                    <input type="radio" name="cover_mode"
+                        prop:checked=move || use_image.get()
+                        on:change=move |_| set_mode(true)/>
+                    <span>
+                        <strong>"Foto-Titelbild "</strong>
+                        <span class="muted small">"— verwendet das unten aktivierte Cover-Bild"</span>
+                    </span>
+                </label>
+                {move || use_image.get().then(|| view! {
+                    <p class="hint small">
+                        "Foto-Modus aktiv: stelle sicher, dass unten ein Cover ausgewählt ist."
+                    </p>
+                })}
+            </fieldset>
 
             <Suspense fallback=|| view! { <p class="muted">"Lädt…"</p> }>
                 {move || covers.get().map(|res| match res {
