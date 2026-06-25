@@ -557,12 +557,20 @@ pub async fn add_to_cart(
     // Merge with an existing identical line (same item + same options + same
     // extras + same option picks). Different extras → new line, even if the
     // base item matches.
+    //
+    // `is_giveaway = 0`: NEVER merge a paid add into the free giveaway line.
+    // The giveaway adds mi-400 (Pizzabrötchen) at qty 1 / price 0 with a
+    // chosen sauce; a customer ordering the SAME item with the SAME sauce as a
+    // PAID line matches every other column, so without this guard the paid
+    // quantity was summed onto the 0€ giveaway line — handing out 3 free
+    // instead of 1 (the DP-2506-0002 bug). Keep the two lines distinct.
     let existing: Option<(String, i64)> = sqlx::query_as(
         "SELECT id, quantity FROM cart_items
          WHERE cart_id = ?1 AND menu_item_id = ?2 AND options_json = ?3
                AND COALESCE(extras_json, '') = COALESCE(?4, '')
                AND COALESCE(selected_options_json, '') = COALESCE(?5, '')
-               AND COALESCE(removals_json, '') = COALESCE(?6, '')",
+               AND COALESCE(removals_json, '') = COALESCE(?6, '')
+               AND is_giveaway = 0",
     )
     .bind(&cart_id)
     .bind(&menu_item_id)
