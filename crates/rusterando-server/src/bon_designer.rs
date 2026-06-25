@@ -19,11 +19,18 @@ use kitchen_protocol::receipt::{
     HEADER_LOGO_HEIGHT, RECEIPT_WIDTH,
 };
 
-/// Print-head dot width to rasterize the header band at. The 80-mm head is
-/// ~512 dots; we target the receipt's column width in dots (42 cols × 8
-/// dots/char ≈ 336) so the band sits comfortably with margins. Height
-/// follows aspect from the composed SVG.
-const HEADER_TARGET_WIDTH: u16 = (RECEIPT_WIDTH * 8) as u16;
+/// Print-head dot width to rasterize the header band at — this is the lever
+/// for how BIG both top logos (channel icon + paid/unpaid brand mark) print.
+/// The 80-mm head is ~512 dots. The band is scaled to fit this width, so a
+/// larger value makes both logos bigger together (their side-by-side layout
+/// and aspect ratios are preserved). We target 480 dots — nearly the full
+/// head with a small safety margin so it can't clip on a slightly narrower
+/// head. (Bumping HEADER_LOGO_HEIGHT alone does NOT help: it scales the
+/// band's width and height together, which cancels out at this fit step.)
+const HEADER_TARGET_WIDTH: u16 = 480;
+/// Receipt column width in dots (42 cols × 8) — kept for reference; the
+/// header band intentionally prints wider than the text column now.
+const _TEXT_COLUMN_DOTS: u16 = (RECEIPT_WIDTH * 8) as u16;
 
 /// A source SVG plus its parsed intrinsic size (for layout math).
 #[derive(Clone)]
