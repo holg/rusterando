@@ -802,7 +802,7 @@ pub async fn build_order_for_kitchen(
                 voucher_code, voucher_discount_cents,
                 strftime('%s', created_at) AS created_at_unix,
                 strftime('%s', updated_at) AS updated_at_unix,
-                strftime('%s', scheduled_for) AS scheduled_for_unix
+                scheduled_for AS scheduled_for_raw
          FROM orders
          WHERE id = ?1",
     )
@@ -836,13 +836,19 @@ pub async fn build_order_for_kitchen(
     // SQLite returns strftime('%s', ...) as text. Parse to i64.
     let created_at_unix: i64 = row.get::<String, _>("created_at_unix").parse().unwrap_or(0);
     let updated_at_unix: i64 = row.get::<String, _>("updated_at_unix").parse().unwrap_or(0);
-    // Scheduled fulfillment time. NULL (= ASAP) → None. strftime returns
-    // NULL as a SQL NULL, so try_get gives Option<String>.
-    let scheduled_for_unix: Option<i64> = row
-        .try_get::<Option<String>, _>("scheduled_for_unix")
+    // Scheduled fulfillment time. NULL (= ASAP) → None. Stored as a naive
+    // LOCAL wall-clock string ("YYYY-MM-DD HH:MM:SS", Europe/Berlin) at
+    // place_order time — NOT UTC like created_at. So we must read it raw and
+    // NEVER round-trip it through strftime('%s')→Local: that treats the
+    // string as UTC and re-localizes, adding the +2h offset (the bug that
+    // printed "18:30" pre-orders as "20:30"). Every other reader (confirm
+    // page, admin history/orders, kitchen/driver boards) also splits this
+    // string directly; we match them.
+    let scheduled_for_raw: Option<String> = row
+        .try_get::<Option<String>, _>("scheduled_for_raw")
         .ok()
         .flatten()
-        .and_then(|s| s.parse().ok());
+        .filter(|s| !s.trim().is_empty());
 
     // Order is "accepted" once it advances past the initial state.
     // pending_payment → waiting for Stripe; received → kitchen has it.
@@ -1042,18 +1048,39 @@ pub async fn build_order_for_kitchen(
     let created_at_label = fmt_local(created_at_unix);
     let accepted_at_label = accepted_at_unix.map(fmt_local);
 
-    // Effective "due" unixtime for the receipt's scheduled-time line:
-    //   * scheduled_for set (pre-order)  → use it exactly.
+    // Scheduled-time line for the receipt:
+    //   * scheduled_for set (pre-order)  → use the stored LOCAL wall-clock
+    //     directly. It's already Europe/Berlin, so we format from the naive
+    //     string WITHOUT any epoch/timezone round-trip.
     //   * ASAP DELIVERY                  → created_at + the zone's ETA, so
     //     the kitchen still sees a target ("Lieferung 20:15") instead of
     //     a blank. The zone id is snapshotted in delivery_address_json;
-    //     its eta_minutes lives on delivery_zones.
+    //     its eta_minutes lives on delivery_zones. This IS a real epoch
+    //     (created_at is UTC), so epoch→Local is correct here.
     //   * ASAP pickup                    → None (no meaningful ETA; the
     //     Eingang line implies "now").
-    let due_unix: Option<i64> = if let Some(s) = scheduled_for_unix {
-        Some(s)
+    //
+    // Same day → "HH:MM"; another day → "DD.MM. HH:MM" — for both branches.
+    let created_naive = {
+        use chrono::{Local, TimeZone};
+        Local.timestamp_opt(created_at_unix, 0).single()
+    };
+    let pickup_time_label: Option<String> = if let Some(raw) = scheduled_for_raw {
+        // Parse the stored naive local string "YYYY-MM-DD HH:MM:SS".
+        chrono::NaiveDateTime::parse_from_str(raw.trim(), "%Y-%m-%d %H:%M:%S")
+            .ok()
+            .map(|due| {
+                let same_day = created_naive
+                    .map(|c| c.date_naive() == due.date())
+                    .unwrap_or(false);
+                if same_day {
+                    due.format("%H:%M").to_string()
+                } else {
+                    due.format("%d.%m. %H:%M").to_string()
+                }
+            })
     } else if order_type == "delivery" {
-        // Zone id from the snapshot JSON → eta_minutes.
+        // Zone id from the snapshot JSON → eta_minutes → an ASAP-delivery ETA.
         let zone_id = delivery_address_json
             .as_deref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -1073,25 +1100,21 @@ pub async fn build_order_for_kitchen(
         } else {
             None
         };
-        eta_minutes.map(|eta| created_at_unix + eta * 60)
+        eta_minutes.and_then(|eta| {
+            use chrono::{Local, TimeZone};
+            let due = Local.timestamp_opt(created_at_unix + eta * 60, 0).single()?;
+            let same_day = created_naive
+                .map(|c| c.date_naive() == due.date_naive())
+                .unwrap_or(false);
+            Some(if same_day {
+                due.format("%H:%M").to_string()
+            } else {
+                due.format("%d.%m. %H:%M").to_string()
+            })
+        })
     } else {
         None
     };
-
-    // Format the due time the same way for both pre-orders and ETA:
-    // same calendar day → "HH:MM"; another day → "DD.MM. HH:MM".
-    let pickup_time_label: Option<String> = due_unix.and_then(|due| {
-        use chrono::{Local, TimeZone};
-        let due_dt = Local.timestamp_opt(due, 0).single();
-        let created = Local.timestamp_opt(created_at_unix, 0).single();
-        match (due_dt, created) {
-            (Some(d), Some(c)) if d.date_naive() == c.date_naive() => {
-                Some(d.format("%H:%M").to_string())
-            }
-            (Some(d), _) => Some(d.format("%d.%m. %H:%M").to_string()),
-            (None, _) => None,
-        }
-    });
 
     // Receipt layout theme (app_settings.printer_theme). Empty / missing
     // → the Pi renders the default layout. Read live so an admin change
