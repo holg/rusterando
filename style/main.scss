@@ -1719,6 +1719,32 @@ main { display: block; width: 100%; }
   @media (min-width: 60rem) { grid-template-columns: repeat(3, 1fr); }
 }
 
+// Printer-offline warning above the board. Loud (red) but not blocking —
+// staff can still work the board; it just makes a dropped Pi impossible to miss.
+.printer-offline-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  padding: 0.7rem 1rem;
+  background: #fdecea;
+  border: 1px solid #f5c2bd;
+  border-left: 5px solid #c0261a;
+  border-radius: 8px;
+  color: #7a1710;
+  animation: pob-pulse 2s ease-in-out infinite;
+
+  .pob-icon { font-size: 1.4rem; line-height: 1; }
+  .pob-text { display: flex; flex-direction: column; gap: 0.1rem; }
+  .pob-text strong { font-size: 0.98rem; }
+  .pob-text span { font-size: 0.85rem; color: #8a2a20; }
+  .btn { margin-left: auto; white-space: nowrap; }
+}
+@keyframes pob-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(192, 38, 26, 0); }
+  50%      { box-shadow: 0 0 0 4px rgba(192, 38, 26, 0.12); }
+}
+
 .orders-column {
   background: #fdfaf6;
   border: 1px solid var(--border);

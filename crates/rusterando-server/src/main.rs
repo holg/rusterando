@@ -599,6 +599,18 @@ async fn main() {
         shared_pool: shared_pool.clone(),
     };
 
+    // Printer-offline monitor: watches the kitchen printer's heartbeat and
+    // pushes + emails the admins on an online→offline edge (and on recovery),
+    // so a silently dropped Pi — which stops all ticket printing — is noticed
+    // immediately instead of by SSHing in. The admin board renders its own
+    // banner directly from last_seen_at; this task owns only the push/email
+    // side. Spawned here (before `state` is consumed by `.with_state`).
+    rusterando_server::printer_monitor::spawn(
+        db.clone(),
+        state.apns.clone(),
+        state.branding.clone(),
+    );
+
     let routes = generate_route_list(App);
 
     // When the frontend was built with `--features i18n`, also register

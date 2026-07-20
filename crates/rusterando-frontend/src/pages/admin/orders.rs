@@ -49,6 +49,19 @@ pub struct AdminOrders {
     pub received: Vec<AdminOrderRow>,
     pub preparing: Vec<AdminOrderRow>,
     pub ready: Vec<AdminOrderRow>,
+    /// `Some` when the kitchen printer's last heartbeat is stale (offline) —
+    /// drives the red warning banner on the board. `None` = printer healthy or
+    /// none ever connected. Computed live from `kitchen_clients.last_seen_at`
+    /// so it's correct between the background monitor's ticks.
+    #[serde(default)]
+    pub printer_alert: Option<PrinterAlert>,
+}
+
+/// Details for the printer-offline banner on the admin overview.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrinterAlert {
+    /// Whole minutes since the printer last checked in.
+    pub minutes_offline: i64,
 }
 
 #[server(
@@ -257,12 +270,49 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
         }
     }
 
+    // Printer health for the board banner. Offline = a printer has connected
+    // before (last_seen_at > 0) but its newest heartbeat is older than the
+    // monitor's threshold. We take the FRESHEST printer (MAX last_seen_at) so a
+    // stale duplicate row can't mask a working one. Computed live here so the
+    // banner is right between the background monitor's ticks. Best-effort — a
+    // query error just means no banner, never a failed board.
+    let printer_alert = {
+        let freshest: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(last_seen_at) FROM kitchen_clients")
+                .fetch_optional(&db)
+                .await
+                .ok()
+                .flatten();
+        match freshest {
+            Some(last) if last > 0 => {
+                let now = chrono::Utc::now().timestamp();
+                let stale = (now - last).max(0);
+                if stale > PRINTER_OFFLINE_SECS {
+                    Some(PrinterAlert {
+                        minutes_offline: stale / 60,
+                    })
+                } else {
+                    None
+                }
+            }
+            // No printer ever connected → nothing to warn about.
+            _ => None,
+        }
+    };
+
     Ok(AdminOrders {
         received,
         preparing,
         ready,
+        printer_alert,
     })
 }
+
+/// Offline threshold (seconds) for the board banner — mirrors the server-side
+/// monitor's `printer_monitor::OFFLINE_AFTER_SECS`. The frontend crate can't
+/// depend on the server crate, so the value (300s / 5 min) is duplicated here.
+#[cfg(feature = "ssr")]
+const PRINTER_OFFLINE_SECS: i64 = 300;
 
 #[server(
     name = GetAdminOrder,
@@ -441,7 +491,25 @@ pub fn AdminOrdersPage() -> impl IntoView {
 
 #[component]
 fn Board(data: AdminOrders, updater: ServerAction<UpdateOrderStatus>) -> impl IntoView {
+    let printer_banner = data.printer_alert.clone().map(|a| {
+        let mins = a.minutes_offline;
+        view! {
+            <div class="printer-offline-banner" role="alert">
+                <span class="pob-icon">"🖨️"</span>
+                <div class="pob-text">
+                    <strong>"Drucker offline"</strong>
+                    <span>
+                        {format!("Der Küchendrucker meldet sich seit {mins} Min. nicht mehr — \
+                                  Bestellungen werden evtl. nicht gedruckt.")}
+                    </span>
+                </div>
+                <a class="btn ghost small" href="/admin/drucker">"Druckerstatus"</a>
+            </div>
+        }
+    });
+
     view! {
+        {printer_banner}
         <div class="orders-board">
             <Column title="Eingegangen" rows=data.received.clone() updater
                 next_status="preparing" next_label="Zubereitung starten"/>

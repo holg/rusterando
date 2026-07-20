@@ -554,6 +554,74 @@ pub mod notify {
         }
         s
     }
+
+    /// Send a standalone plain-text alert email (not an order confirmation) to
+    /// a staff/ops address. Reuses the same `SMTP_*` / `EMAIL_FROM` env as the
+    /// order mailer. Recipient precedence: `PRINTER_ALERT_EMAIL` →
+    /// `KITCHEN_EMAIL` → `SMTP_USER`. Best-effort: returns `Ok(())` and logs a
+    /// warning when SMTP isn't configured (dev boxes) so callers can fire it
+    /// unconditionally. Used by the printer-offline monitor.
+    pub async fn send_alert_email(subject: &str, body: &str) -> anyhow::Result<()> {
+        use lettre::message::{header::ContentType, Mailbox};
+        use lettre::transport::smtp::authentication::Credentials;
+        use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+        let (Ok(host), Ok(username), Ok(password)) = (
+            std::env::var("SMTP_HOST"),
+            std::env::var("SMTP_USER"),
+            std::env::var("SMTP_PASS"),
+        ) else {
+            log::warn!("send_alert_email: SMTP not configured — skipping ({subject})");
+            return Ok(());
+        };
+        let port: u16 = std::env::var("SMTP_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(465);
+        let from = std::env::var("EMAIL_FROM").unwrap_or_else(|_| username.clone());
+        let to = std::env::var("PRINTER_ALERT_EMAIL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                std::env::var("KITCHEN_EMAIL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .unwrap_or_else(|| username.clone());
+
+        let email = Message::builder()
+            .from(
+                from.parse::<Mailbox>()
+                    .map_err(|e| anyhow::anyhow!("EMAIL_FROM invalid: {e}"))?,
+            )
+            .to(to
+                .parse::<Mailbox>()
+                .map_err(|e| anyhow::anyhow!("alert recipient invalid: {e}"))?)
+            .subject(subject)
+            .header(ContentType::TEXT_PLAIN)
+            .body(body.to_string())
+            .map_err(|e| anyhow::anyhow!("build alert email: {e}"))?;
+
+        let creds = Credentials::new(username, password);
+        let transport: AsyncSmtpTransport<Tokio1Executor> = if port == 587 {
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
+                .map_err(|e| anyhow::anyhow!("smtp init: {e}"))?
+                .port(port)
+                .credentials(creds)
+                .build()
+        } else {
+            AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
+                .map_err(|e| anyhow::anyhow!("smtp init: {e}"))?
+                .port(port)
+                .credentials(creds)
+                .build()
+        };
+        transport
+            .send(email)
+            .await
+            .map_err(|e| anyhow::anyhow!("smtp send: {e}"))?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
