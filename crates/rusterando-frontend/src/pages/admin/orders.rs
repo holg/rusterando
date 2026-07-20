@@ -709,6 +709,10 @@ fn DetailCard(
             <a href="/admin/orders" class="link">"← zurück zur Übersicht"</a>
             <h1>"Bestellung " {order_number.clone()}</h1>
             <span class="status-pill" data-status=status_attr.clone()>{status_label.clone()}</span>
+            <a class="btn ghost" href=format!("/admin/orders/{}/beleg.pdf", id)
+               target="_blank" rel="noopener" title="Formaler Beleg für die Buchhaltung">
+                "📄 Beleg (PDF)"
+            </a>
             <button class="btn primary" on:click=print>"🖨 Drucken"</button>
         </header>
 

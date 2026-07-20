@@ -852,6 +852,18 @@ async fn main() {
             "/admin/history.csv",
             axum::routing::get(history_csv_handler),
         )
+        // Single-order Beleg (invoice-style A4 PDF) — the tax clerk wants a
+        // per-order document with the ordered items. Cookie-auth like the CSV.
+        .route(
+            "/admin/orders/{id}/beleg.pdf",
+            axum::routing::get(order_beleg_pdf_handler),
+        )
+        // Combined Beleg export — one PDF (summary cover + one Beleg per order)
+        // for the whole filtered range. Same filters as the CSV.
+        .route(
+            "/admin/belege.pdf",
+            axum::routing::get(order_belege_pdf_handler),
+        )
         // Apple Universal Links / Keychain webcredentials manifest. iOS
         // fetches this once after install, caches it for ~24h. Apple is
         // strict: must return 200 with `Content-Type: application/json`,
@@ -1891,11 +1903,14 @@ async fn history_csv_handler(
         " AND stripe_mode = 'live'"
     };
 
+    // Storno gehört NIE in den Steuerberater-Export — unabhängig vom
+    // Bildschirm-Toggle immer ausschließen.
     let sql = format!(
         "SELECT order_number, created_at, status, contact_name, contact_phone,
                 contact_email, scheduled_for, total_cents
          FROM orders
          WHERE created_at BETWEEN ?1 AND ?2{mode_clause}
+           AND status != 'cancelled'
          ORDER BY created_at ASC",
     );
     let rows = match sqlx::query_as::<
@@ -1962,6 +1977,166 @@ async fn history_csv_handler(
         body,
     )
         .into_response()
+}
+
+/// `/admin/orders/{id}/beleg.pdf` — render one order as a formal Beleg PDF.
+/// Cookie-auth (admin) like the CSV export. Resolves the per-request tenant so
+/// a multi-tenant shop's order + branding come from its own DB, not the apex.
+async fn order_beleg_pdf_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(order_id): axum::extract::Path<String>,
+    cookies: tower_cookies::Cookies,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::header;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    // Same admin cookie gate as history_csv_handler.
+    let authed = cookies
+        .get("dp_session")
+        .map(|c| c.value() == "admin")
+        .unwrap_or(false)
+        || cookies
+            .get("admin_session")
+            .map(|c| c.value() == "ok")
+            .unwrap_or(false);
+    if !authed {
+        return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
+    }
+
+    // Per-request tenant pool + branding, else the global (apex) ones.
+    let (pool, branding) = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => (t.pool.clone(), t.handles.branding.get()),
+        None => (state.db.clone(), state.branding.get()),
+    };
+
+    match rusterando_server::pdf::build_order_pdf(&pool, &order_id, &branding).await {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/pdf".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    // `inline` so a click opens it in the browser's PDF viewer;
+                    // the tax clerk can then save/print. Filename carries the
+                    // order number for easy filing.
+                    format!("inline; filename=\"beleg-{}.pdf\"", sanitize_filename(&order_id)),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            // "order not found" → 404; anything else → 500.
+            let msg = e.to_string();
+            if msg.contains("not found") {
+                (StatusCode::NOT_FOUND, "Bestellung nicht gefunden").into_response()
+            } else {
+                tracing::error!("beleg pdf {order_id}: {e}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "PDF-Fehler").into_response()
+            }
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct BelegeParams {
+    from: Option<String>,
+    to: Option<String>,
+    #[serde(default)]
+    include_test: Option<String>,
+    /// "true" / "1" / "yes" → Storno mit aufführen (zählt trotzdem nie zum
+    /// Umsatz). Default aus, wie in der Buchhaltung.
+    #[serde(default)]
+    include_cancelled: Option<String>,
+}
+
+/// `/admin/belege.pdf` — combined Beleg export for a filtered range: a summary
+/// cover page then one full-page Beleg per order. Cookie-auth + tenant-aware,
+/// same filter semantics as the CSV/history.
+async fn order_belege_pdf_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(p): axum::extract::Query<BelegeParams>,
+    cookies: tower_cookies::Cookies,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::header;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let authed = cookies
+        .get("dp_session")
+        .map(|c| c.value() == "admin")
+        .unwrap_or(false)
+        || cookies
+            .get("admin_session")
+            .map(|c| c.value() == "ok")
+            .unwrap_or(false);
+    if !authed {
+        return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
+    }
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let week_ago = (chrono::Local::now() - chrono::Duration::days(7))
+        .format("%Y-%m-%d")
+        .to_string();
+    let from = p.from.unwrap_or(week_ago);
+    let to = p.to.unwrap_or(today);
+    if from.len() != 10 || to.len() != 10 {
+        return (StatusCode::BAD_REQUEST, "from/to must be YYYY-MM-DD").into_response();
+    }
+    let truthy = |o: &Option<String>| {
+        o.as_deref()
+            .map(|s| matches!(s, "true" | "1" | "yes"))
+            .unwrap_or(false)
+    };
+    let include_test = truthy(&p.include_test);
+    let include_cancelled = truthy(&p.include_cancelled);
+
+    let (pool, branding) = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => (t.pool.clone(), t.handles.branding.get()),
+        None => (state.db.clone(), state.branding.get()),
+    };
+
+    match rusterando_server::pdf::build_orders_pdf(
+        &pool,
+        &from,
+        &to,
+        include_test,
+        include_cancelled,
+        &branding,
+    )
+    .await
+    {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/pdf".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("inline; filename=\"belege_{from}_{to}.pdf\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("belege pdf {from}..{to}: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "PDF-Fehler").into_response()
+        }
+    }
+}
+
+/// Keep only filename-safe chars for a Content-Disposition filename.
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn csv_escape(s: &str) -> String {

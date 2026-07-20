@@ -145,9 +145,10 @@ pub struct HistoryReport {
     endpoint = "list_admin_history"
 )]
 pub async fn list_admin_history(
-    from: String,       // YYYY-MM-DD inclusive
-    to: String,         // YYYY-MM-DD inclusive
-    include_test: bool, // false = nur stripe_mode='live' (Buchhaltung-Default)
+    from: String,            // YYYY-MM-DD inclusive
+    to: String,              // YYYY-MM-DD inclusive
+    include_test: bool,      // false = nur stripe_mode='live' (Buchhaltung-Default)
+    include_cancelled: bool, // false = Storno aus der Liste raus (Default)
 ) -> Result<HistoryReport, ServerFnError> {
     use sqlx::SqlitePool;
 
@@ -173,12 +174,21 @@ pub async fn list_admin_history(
     } else {
         " AND stripe_mode = 'live'"
     };
+    // Storno per Default aus der Liste raus (Buchhaltung-Vorgabe: storniert
+    // zählt nicht). Der Toggle zeigt sie zur Kontrolle wieder an — sie bleiben
+    // aber in JEDEM Fall aus Umsatz/Artikel/Simulation ausgeschlossen (die
+    // Aggregate filtern `status != 'cancelled'` unabhängig davon).
+    let cancelled_clause = if include_cancelled {
+        ""
+    } else {
+        " AND status != 'cancelled'"
+    };
 
     let order_sql = format!(
         "SELECT id, order_number, status, contact_name, created_at, scheduled_for,
                 total_cents, payment_status, stripe_mode
          FROM orders
-         WHERE created_at BETWEEN ?1 AND ?2{mode_clause}
+         WHERE created_at BETWEEN ?1 AND ?2{mode_clause}{cancelled_clause}
          ORDER BY created_at DESC",
     );
     let order_rows = sqlx::query_as::<
@@ -206,7 +216,6 @@ pub async fn list_admin_history(
     let mut days: std::collections::BTreeMap<String, DayTotal> = std::collections::BTreeMap::new();
     let mut grand_revenue = 0_i64;
     let mut grand_orders = 0_i64;
-    let mut cancelled = 0_i64;
 
     // Spar-Simulation accumulators (nur nicht-stornierte Bestellungen).
     let mut sim_orders = 0_i64;
@@ -244,13 +253,17 @@ pub async fn list_admin_history(
             revenue_cents: 0,
             cancelled: 0,
         });
-        entry.orders += 1;
         if status == "cancelled" {
+            // Only reached when include_cancelled is on (else they're not
+            // fetched). Shown in the day's Storno column but never counted as
+            // an order or revenue. The authoritative range-wide Storno count
+            // comes from its own query below (accurate even when hidden).
             entry.cancelled += 1;
-            cancelled += 1;
         } else {
+            entry.orders += 1;
             entry.revenue_cents += total_cents;
             grand_revenue += total_cents;
+            grand_orders += 1;
 
             // Spar-Simulation: nur nicht-stornierte Bestellungen zählen.
             // "card" = Stripe-/Online-Pfad (zieht Lieferando-Verwaltungs-
@@ -264,7 +277,6 @@ pub async fn list_admin_history(
                 sim_cash_orders += 1;
             }
         }
-        grand_orders += 1;
 
         // Per-order items summary (compact text). Same shape as the kitchen board.
         let items: Vec<ItemSummaryRow> = sqlx::query_as(
@@ -401,6 +413,26 @@ pub async fn list_admin_history(
         .fetch_one(&db)
         .await
         .map_err(|e| ServerFnError::new(format!("voucher total query: {e}")))?;
+
+    // Authoritative Storno count for the range — independent of the
+    // include_cancelled toggle, so the "X storniert" tile is always correct
+    // even when the rows themselves are hidden from the list.
+    let cancelled_count_sql = format!(
+        "SELECT COUNT(*) FROM orders
+         WHERE created_at BETWEEN ?1 AND ?2
+           AND status = 'cancelled'{mode_clause_c}",
+        mode_clause_c = if include_test {
+            ""
+        } else {
+            " AND stripe_mode = 'live'"
+        }
+    );
+    let (cancelled,): (i64,) = sqlx::query_as(&cancelled_count_sql)
+        .bind(&from_ts)
+        .bind(&to_ts)
+        .fetch_one(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("cancelled count query: {e}")))?;
 
     // --- Spar-Simulation -------------------------------------------------
     // Konfigurierbarer Stripe-Satz aus app_settings; Defaults entsprechen
@@ -551,18 +583,46 @@ pub fn AdminHistoryPage() -> impl IntoView {
     // Default = nur Live-Bestellungen. Steuerberater-relevant — Sandbox
     // darf hier nie unbeabsichtigt in Umsatz-Tabellen landen.
     let include_test = RwSignal::new(false);
+    // Default = Storno ausblenden. Storniert zählt nie für die Buchhaltung;
+    // der Toggle zeigt sie nur zur Kontrolle an (nie im Umsatz, nie im CSV).
+    let include_cancelled = RwSignal::new(false);
 
     let report = Resource::new(
-        move || (from.get(), to.get(), include_test.get()),
-        |(from, to, include_test)| async move { list_admin_history(from, to, include_test).await },
+        move || {
+            (
+                from.get(),
+                to.get(),
+                include_test.get(),
+                include_cancelled.get(),
+            )
+        },
+        |(from, to, include_test, include_cancelled)| async move {
+            list_admin_history(from, to, include_test, include_cancelled).await
+        },
     );
 
+    // The CSV is always Steuerberater-facing: never include Storno, regardless
+    // of the on-screen toggle. (The handler also hard-excludes cancelled.)
     let csv_href = move || {
         format!(
             "/admin/history.csv?from={}&to={}&include_test={}",
             from.get(),
             to.get(),
             include_test.get(),
+        )
+    };
+
+    // Combined Beleg export — one PDF (summary cover + one Beleg per order) for
+    // the current filter. Respects the Storno toggle: with it on, cancelled
+    // orders get their own (marked) Beleg pages, but they never count in the
+    // summary's Umsatz.
+    let belege_href = move || {
+        format!(
+            "/admin/belege.pdf?from={}&to={}&include_test={}&include_cancelled={}",
+            from.get(),
+            to.get(),
+            include_test.get(),
+            include_cancelled.get(),
         )
     };
 
@@ -597,7 +657,17 @@ pub fn AdminHistoryPage() -> impl IntoView {
                         on:change=move |ev| include_test.set(event_target_checked(&ev))/>
                     <span>"Sandbox-Bestellungen einbeziehen"</span>
                 </label>
+                <label class="include-test">
+                    <input type="checkbox"
+                        prop:checked=move || include_cancelled.get()
+                        on:change=move |ev| include_cancelled.set(event_target_checked(&ev))/>
+                    <span>"Stornierte anzeigen"</span>
+                </label>
                 <a class="btn ghost" href=csv_href download="bestellungen.csv">"⬇ CSV exportieren"</a>
+                <a class="btn ghost" href=belege_href target="_blank" rel="noopener"
+                   title="Alle gefilterten Bestellungen als ein PDF (Übersicht + je ein Beleg)">
+                    "⬇ Belege (PDF)"
+                </a>
             </form>
             <p class="hint muted">
                 {move || if include_test.get() {
@@ -744,6 +814,7 @@ fn Report(r: HistoryReport) -> impl IntoView {
                             <th>"Artikel"</th>
                             <th>"Zahlung"</th>
                             <th>"Summe"</th>
+                            <th>"Beleg"</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -771,6 +842,12 @@ fn Report(r: HistoryReport) -> impl IntoView {
                                         <span class=format!("payment-pill {pay_cls}")>{pay_label}</span>
                                     </td>
                                     <td class="amt"><strong>{format_eur(o.total_cents)}</strong></td>
+                                    <td class="beleg-cell">
+                                        <a class="beleg-link"
+                                           href=format!("/admin/orders/{}/beleg.pdf", o.id)
+                                           target="_blank" rel="noopener"
+                                           title="Beleg als PDF">"⬇ PDF"</a>
+                                    </td>
                                 </tr>
                             }
                         }).collect_view()}

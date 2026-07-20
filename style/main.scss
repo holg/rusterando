@@ -4147,6 +4147,20 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   color: #777;
 }
 
+// Per-order Beleg (PDF) link in the Bestellungen table.
+.hist-table .beleg-cell { white-space: nowrap; }
+.hist-table .beleg-link {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: #7a4a00;
+  border: 1px solid #e0c9a0;
+  border-radius: 5px;
+  text-decoration: none;
+  &:hover { background: #fbf3e6; }
+}
+
 // Payment pill on /admin/history. Color encodes the settlement state
 // so the admin can scan a long list for unpaid card orders or refunds.
 .payment-pill {

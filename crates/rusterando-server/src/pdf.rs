@@ -1046,3 +1046,641 @@ mod cover_tests {
         );
     }
 }
+
+// ===========================================================================
+// Order-Beleg (single-order receipt / Rechnung) — a formal A4 PDF a tax clerk
+// can file. Self-contained: it needs only the bundled fonts, no images. The
+// server computes every money value so the PDF matches the confirmation page,
+// admin detail, and CSV exactly — the template only lays it out.
+// ===========================================================================
+
+/// Beleg Typst source, embedded at compile time (see templates/beleg.typ).
+const BELEG_SRC: &str = include_str!("../../../templates/beleg.typ");
+const BELEG_VPATH: &str = "/beleg.typ";
+
+#[derive(Debug, Serialize)]
+pub struct OrderPdfPayload {
+    pub shop: OrderPdfShop,
+    /// Present only for a batch (range) export — drives the cover page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<OrderPdfSummary>,
+    /// One entry for a single-order Beleg; many for a batch.
+    pub orders: Vec<OrderPdfOrder>,
+}
+
+/// Cover-page figures for a batch export.
+#[derive(Debug, Serialize)]
+pub struct OrderPdfSummary {
+    pub from: String,
+    pub to: String,
+    /// Non-cancelled orders in the export (each gets a Beleg page).
+    pub count: i64,
+    /// Sum of non-cancelled totals (cents) — matches the Buchhaltung "Umsatz".
+    pub total_cents: i64,
+    /// How many cancelled orders are in the range (shown for reconciliation).
+    pub cancelled_count: i64,
+    pub include_test: bool,
+    pub include_cancelled: bool,
+    /// Non-empty → a red "large export" note on the cover.
+    pub truncated_note: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderPdfShop {
+    pub name: String,
+    pub address: String,
+    pub phone: String,
+    pub email: String,
+    /// USt-IdNr., shown in the footer + payment area when set.
+    pub vat_id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderPdfOrder {
+    pub number: String,
+    /// Human date/time the order was placed ("02.07.2026 18:12").
+    pub date: String,
+    /// "Abholung" / "Lieferung" / "Tisch" — the fulfillment noun.
+    pub channel_label: String,
+    /// Scheduled/ETA time label ("18:30"), or "" when ASAP/none.
+    pub fulfillment: String,
+    pub customer_name: String,
+    pub customer_phone: String,
+    pub customer_email: String,
+    /// One-line delivery address, "" for pickup.
+    pub address: String,
+    pub items: Vec<OrderPdfItem>,
+    pub subtotal_cents: i64,
+    pub delivery_fee_cents: i64,
+    pub voucher_code: String,
+    pub voucher_discount_cents: i64,
+    pub total_cents: i64,
+    /// "inkl. 7% MwSt. 1,08 €" or the Kleinunternehmer note. "" hides the line.
+    pub tax_note: String,
+    /// "Bar", "Karte (Visa)", "Gutschein", … — human payment label.
+    pub payment_label: String,
+    /// Non-empty (e.g. a Storno banner) draws a red note under the payment line.
+    pub status_note: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrderPdfItem {
+    pub menu_number: String,
+    pub name: String,
+    pub variant: String,
+    pub quantity: i64,
+    pub unit_price_cents: i64,
+    pub line_total_cents: i64,
+    /// Human-readable extra labels ("Extra Käse").
+    pub extras: Vec<String>,
+    /// Removed ingredients ("Zwiebeln").
+    pub removals: Vec<String>,
+}
+
+/// A minimal Typst `World` for the order Beleg: one source file + the
+/// bundled fonts. No image/QR resolution, so `file()` always 404s.
+struct OrderWorld {
+    library: LazyHash<Library>,
+    main_id: FileId,
+    main_source: Source,
+}
+
+impl OrderWorld {
+    fn new(payload: &OrderPdfPayload) -> anyhow::Result<Self> {
+        let json = serde_json::to_string(payload)?;
+        let mut inputs = Dict::new();
+        inputs.insert("data".into(), typst::foundations::Value::Str(json.into()));
+        let library = Library::builder().with_inputs(inputs).build();
+        let main_id = FileId::new(None, VirtualPath::new(BELEG_VPATH));
+        let main_source = Source::new(main_id, BELEG_SRC.to_string());
+        Ok(Self {
+            library: LazyHash::new(library),
+            main_id,
+            main_source,
+        })
+    }
+}
+
+impl World for OrderWorld {
+    fn library(&self) -> &LazyHash<Library> {
+        &self.library
+    }
+    fn book(&self) -> &LazyHash<FontBook> {
+        &resources().book
+    }
+    fn main(&self) -> FileId {
+        self.main_id
+    }
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        if id == self.main_id {
+            Ok(self.main_source.clone())
+        } else {
+            Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+        }
+    }
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+    }
+    fn font(&self, index: usize) -> Option<Font> {
+        resources().fonts.get(index)?.get()
+    }
+    fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
+        None
+    }
+}
+
+/// Render a single-order Beleg to PDF bytes. Human-readable error on failure.
+pub fn render_order_pdf(payload: &OrderPdfPayload) -> anyhow::Result<Vec<u8>> {
+    let world = OrderWorld::new(payload)?;
+    let warned = typst::compile::<PagedDocument>(&world);
+    for w in &warned.warnings {
+        tracing::warn!("typst warn (beleg): {}", w.message);
+    }
+    let document = warned.output.map_err(|errs| {
+        for e in &errs {
+            tracing::error!("typst (beleg): {} (span={:?})", e.message, e.span);
+        }
+        let msgs: Vec<_> = errs.iter().map(|e| eco_format!("{}", e.message)).collect();
+        anyhow::anyhow!("Typst compile failed: {}", msgs.join("; "))
+    })?;
+    let opts = typst_pdf::PdfOptions::default();
+    typst_pdf::pdf(&document, &opts).map_err(|errs| {
+        let msgs: Vec<_> = errs.iter().map(|e| eco_format!("{}", e.message)).collect();
+        anyhow::anyhow!("Typst PDF export failed: {}", msgs.join("; "))
+    })
+}
+
+/// Build the Beleg payload for one order from the live DB, then render it on a
+/// blocking thread. `branding` supplies the shop header + VAT config.
+pub async fn build_order_pdf(
+    db: &SqlitePool,
+    order_id: &str,
+    branding: &rusterando_frontend::branding::Branding,
+) -> anyhow::Result<Vec<u8>> {
+    let payload = load_order_pdf_payload(db, order_id, branding).await?;
+    tokio::task::spawn_blocking(move || render_order_pdf(&payload)).await?
+}
+
+/// The shop-header block, built once per payload from branding.
+fn order_pdf_shop(branding: &rusterando_frontend::branding::Branding) -> OrderPdfShop {
+    OrderPdfShop {
+        name: branding.display_name(),
+        address: branding.full_address(),
+        phone: if branding.shop_phone.trim().is_empty() {
+            String::new()
+        } else {
+            format!("Tel. {}", branding.shop_phone)
+        },
+        email: branding.shop_email.clone(),
+        vat_id: branding.shop_vat_id.clone(),
+    }
+}
+
+/// Single-order Beleg payload: one order, no summary cover.
+pub async fn load_order_pdf_payload(
+    db: &SqlitePool,
+    order_id: &str,
+    branding: &rusterando_frontend::branding::Branding,
+) -> anyhow::Result<OrderPdfPayload> {
+    let order = load_one_order(db, order_id, branding).await?;
+    Ok(OrderPdfPayload {
+        shop: order_pdf_shop(branding),
+        summary: None,
+        orders: vec![order],
+    })
+}
+
+/// Assemble one [`OrderPdfOrder`] from the `orders` + `order_items` rows.
+/// Errors if the order id is unknown.
+pub async fn load_one_order(
+    db: &SqlitePool,
+    order_id: &str,
+    branding: &rusterando_frontend::branding::Branding,
+) -> anyhow::Result<OrderPdfOrder> {
+    use anyhow::Context;
+
+    let row = sqlx::query(
+        "SELECT order_number, order_type, status, contact_name, contact_phone,
+                contact_email, delivery_address_json, scheduled_for,
+                subtotal_cents, delivery_fee_cents, total_cents,
+                voucher_code, voucher_discount_cents,
+                payment_status, payment_method_detail, created_at
+         FROM orders WHERE id = ?1",
+    )
+    .bind(order_id)
+    .fetch_optional(db)
+    .await?
+    .context("order not found")?;
+
+    use sqlx::Row;
+    let order_number: String = row.get("order_number");
+    let order_type: String = row.get("order_type");
+    let status: String = row.get("status");
+    let contact_name: String = row.get("contact_name");
+    let contact_phone: String = row.get("contact_phone");
+    let contact_email: String = row.get("contact_email");
+    let delivery_address_json: Option<String> = row.get("delivery_address_json");
+    let scheduled_for: Option<String> = row.try_get("scheduled_for").ok().flatten();
+    let subtotal_cents: i64 = row.get("subtotal_cents");
+    let delivery_fee_cents: i64 = row.get("delivery_fee_cents");
+    let total_cents: i64 = row.get("total_cents");
+    let voucher_code: String = row
+        .try_get::<Option<String>, _>("voucher_code")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let voucher_discount_cents: i64 = row.try_get("voucher_discount_cents").unwrap_or(0);
+    let payment_status: String = row.get("payment_status");
+    let payment_method_detail: Option<String> = row.try_get("payment_method_detail").ok().flatten();
+    let created_at: String = row.get("created_at");
+
+    // Items with their snapshotted extras/removals.
+    let item_rows = sqlx::query(
+        "SELECT menu_number_snapshot, name_snapshot, quantity, options_json,
+                unit_price_cents, line_total_cents, extras_json, removals_json
+         FROM order_items WHERE order_id = ?1 ORDER BY id",
+    )
+    .bind(order_id)
+    .fetch_all(db)
+    .await?;
+
+    let items: Vec<OrderPdfItem> = item_rows
+        .into_iter()
+        .map(|r| {
+            let menu_number: Option<String> = r.get("menu_number_snapshot");
+            let name: String = r.get("name_snapshot");
+            let quantity: i64 = r.get("quantity");
+            let options_json: String = r.get("options_json");
+            let unit_price_cents: i64 = r.get("unit_price_cents");
+            let line_total_cents: i64 = r.get("line_total_cents");
+            let extras_json: Option<String> = r.get("extras_json");
+            let removals_json: Option<String> = r.get("removals_json");
+
+            let variant = serde_json::from_str::<serde_json::Value>(&options_json)
+                .ok()
+                .and_then(|v| {
+                    v.get("size_label")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+            let extras: Vec<String> = extras_json
+                .as_deref()
+                .and_then(|j| {
+                    serde_json::from_str::<Vec<rusterando_shared::models::CartExtra>>(j).ok()
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| e.label)
+                .collect();
+            let removals: Vec<String> = removals_json
+                .as_deref()
+                .and_then(|j| {
+                    serde_json::from_str::<Vec<rusterando_shared::models::CartRemoval>>(j).ok()
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.label)
+                .collect();
+
+            OrderPdfItem {
+                menu_number: menu_number.filter(|s| !s.trim().is_empty()).unwrap_or_default(),
+                name,
+                variant,
+                quantity,
+                unit_price_cents,
+                line_total_cents,
+                extras,
+                removals,
+            }
+        })
+        .collect();
+
+    // One-line delivery address (pickup → empty).
+    let address = delivery_address_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .map(|v| {
+            let get = |k: &str| {
+                v.get(k)
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let street = get("street");
+            let house = get("house_number");
+            let postcode = get("postcode");
+            let city = get("city");
+            let line1 = format!("{street} {house}").trim().to_string();
+            let line2 = format!("{postcode} {city}").trim().to_string();
+            [line1, line2]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+
+    let channel_label = if order_type == "delivery" {
+        "Lieferung".to_string()
+    } else {
+        "Abholung".to_string()
+    };
+    // scheduled_for is a naive LOCAL wall-clock string — split the time,
+    // NEVER epoch-round-trip it (see kitchen.rs for the +2h trap).
+    let fulfillment = scheduled_for
+        .as_deref()
+        .and_then(|s| s.split_whitespace().nth(1))
+        .map(|t| t.rsplitn(2, ':').nth(1).map(str::to_string).unwrap_or_else(|| t.to_string()))
+        .unwrap_or_default();
+    let date = created_at
+        .split_once(' ')
+        .map(|(d, t)| {
+            // "YYYY-MM-DD" → "DD.MM.YYYY", keep HH:MM.
+            let ymd: Vec<&str> = d.split('-').collect();
+            let dmy = if ymd.len() == 3 {
+                format!("{}.{}.{}", ymd[2], ymd[1], ymd[0])
+            } else {
+                d.to_string()
+            };
+            let hm = t.rsplitn(2, ':').nth(1).unwrap_or(t);
+            format!("{dmy} {hm}")
+        })
+        .unwrap_or(created_at.clone());
+
+    // Included VAT from the shop's configured rate. German gastronomy
+    // pickup/delivery is the reduced rate; the value is INCLUDED in the gross
+    // total (Brutto), so included_tax = gross · rate / (100 + rate). A rate of
+    // 0 means Kleinunternehmer (§19 UStG) → the legally required note instead.
+    let net_total = total_cents; // gross; voucher/fee already folded in
+    let tax_note = if branding.shop_tax_rate > 0.0 {
+        let rate = branding.shop_tax_rate;
+        let included = ((net_total as f64) * rate / (100.0 + rate)).round() as i64;
+        let euros = included / 100;
+        let rest = (included % 100).abs();
+        // rate as a trimmed number ("7" or "19", or "10,5").
+        let rate_str = {
+            let s = format!("{rate}");
+            s.replace('.', ",")
+        };
+        format!("inkl. {rate_str}% MwSt. {euros},{rest:02} €")
+    } else {
+        "Kleinunternehmer gem. §19 UStG — kein Umsatzsteuerausweis.".to_string()
+    };
+
+    // Payment label: prefer the instrument detail, else derive from status.
+    let payment_label = match payment_status.as_str() {
+        "cash_on_pickup" => "Bar bei Abholung/Lieferung".to_string(),
+        "voucher_paid" => "Gutschein".to_string(),
+        _ => payment_method_detail
+            .filter(|s| !s.trim().is_empty())
+            .map(|d| format!("Karte ({d})"))
+            .unwrap_or_else(|| match payment_status.as_str() {
+                "paid" => "Karte".to_string(),
+                "pending" => "Karte (ausstehend)".to_string(),
+                "refunded" => "Erstattet".to_string(),
+                other => other.to_string(),
+            }),
+    };
+
+    let status_note = if status == "cancelled" {
+        "STORNIERT — diese Bestellung wurde storniert.".to_string()
+    } else {
+        String::new()
+    };
+
+    Ok(OrderPdfOrder {
+        number: order_number,
+        date,
+        channel_label,
+        fulfillment,
+        customer_name: contact_name,
+        customer_phone: contact_phone,
+        customer_email: contact_email,
+        address,
+        items,
+        subtotal_cents,
+        delivery_fee_cents,
+        voucher_code,
+        voucher_discount_cents,
+        total_cents,
+        tax_note,
+        payment_label,
+        status_note,
+    })
+}
+
+/// Load all filtered orders in a range and build a batch payload with a
+/// summary cover page. Mirrors the Buchhaltung filters (date range, Sandbox,
+/// Storno). Renders every matched order — no silent cap — but sets a
+/// `truncated_note` warning when the count is large so the user can narrow.
+pub async fn build_orders_pdf(
+    db: &SqlitePool,
+    from: &str,
+    to: &str,
+    include_test: bool,
+    include_cancelled: bool,
+    branding: &rusterando_frontend::branding::Branding,
+) -> anyhow::Result<Vec<u8>> {
+    use sqlx::Row;
+
+    // Same date-range + mode semantics as list_admin_history / the CSV.
+    let from_ts = format!("{from} 00:00:00");
+    let to_ts = format!("{to} 23:59:59");
+    let mode_clause = if include_test {
+        ""
+    } else {
+        " AND stripe_mode = 'live'"
+    };
+    let cancelled_clause = if include_cancelled {
+        ""
+    } else {
+        " AND status != 'cancelled'"
+    };
+
+    // Ids in the same order the list shows (newest first). We rebuild each
+    // order via the shared single-order loader so the batch pages are
+    // byte-for-byte the same layout as a single Beleg.
+    let id_sql = format!(
+        "SELECT id FROM orders
+         WHERE created_at BETWEEN ?1 AND ?2{mode_clause}{cancelled_clause}
+         ORDER BY created_at ASC",
+    );
+    let id_rows = sqlx::query(&id_sql)
+        .bind(&from_ts)
+        .bind(&to_ts)
+        .fetch_all(db)
+        .await?;
+    let ids: Vec<String> = id_rows.iter().map(|r| r.get::<String, _>("id")).collect();
+
+    // Summary figures: non-cancelled count + revenue, and the Storno count,
+    // computed with the same filters — one aggregate query.
+    let agg_sql = format!(
+        "SELECT
+            COALESCE(SUM(CASE WHEN status != 'cancelled' THEN 1 ELSE 0 END), 0) AS cnt,
+            COALESCE(SUM(CASE WHEN status != 'cancelled' THEN total_cents ELSE 0 END), 0) AS rev,
+            COALESCE(SUM(CASE WHEN status  = 'cancelled' THEN 1 ELSE 0 END), 0) AS canc
+         FROM orders
+         WHERE created_at BETWEEN ?1 AND ?2{mode_clause}",
+    );
+    let agg = sqlx::query(&agg_sql)
+        .bind(&from_ts)
+        .bind(&to_ts)
+        .fetch_one(db)
+        .await?;
+    let count: i64 = agg.get("cnt");
+    let total_cents: i64 = agg.get("rev");
+    let cancelled_count: i64 = agg.get("canc");
+
+    // Warn (don't drop) above this many — a big export is slow + heavy.
+    const LARGE_EXPORT: usize = 500;
+    let truncated_note = if ids.len() > LARGE_EXPORT {
+        format!(
+            "Großer Export: {} Belege. Bei Performance-Problemen den Zeitraum eingrenzen.",
+            ids.len()
+        )
+    } else {
+        String::new()
+    };
+
+    let mut orders = Vec::with_capacity(ids.len());
+    for id in &ids {
+        match load_one_order(db, id, branding).await {
+            Ok(o) => orders.push(o),
+            // Skip a row that vanished mid-export rather than failing the whole PDF.
+            Err(e) => tracing::warn!("belege batch: skipping {id}: {e}"),
+        }
+    }
+
+    let payload = OrderPdfPayload {
+        shop: order_pdf_shop(branding),
+        summary: Some(OrderPdfSummary {
+            from: from.to_string(),
+            to: to.to_string(),
+            count,
+            total_cents,
+            cancelled_count,
+            include_test,
+            include_cancelled,
+            truncated_note,
+        }),
+        orders,
+    };
+    tokio::task::spawn_blocking(move || render_order_pdf(&payload)).await?
+}
+
+#[cfg(test)]
+mod beleg_tests {
+    use super::*;
+
+    fn sample_shop() -> OrderPdfShop {
+        OrderPdfShop {
+            name: "Davids Pizzeria".into(),
+            address: "Musterstr. 1, 12345 Musterstadt".into(),
+            phone: "Tel. 01234-56789".into(),
+            email: "hallo@example.com".into(),
+            vat_id: "DE123456789".into(),
+        }
+    }
+
+    fn sample_order() -> OrderPdfOrder {
+        OrderPdfOrder {
+            number: "DP-0207-0002".into(),
+            date: "02.07.2026 18:12".into(),
+            channel_label: "Abholung".into(),
+            fulfillment: "18:30".into(),
+            customer_name: "Max Mustermann".into(),
+            customer_phone: "0170 1234567".into(),
+            customer_email: "".into(),
+            address: "".into(),
+            items: vec![
+                OrderPdfItem {
+                    menu_number: "1".into(),
+                    name: "Pizza Margherita".into(),
+                    variant: "30cm".into(),
+                    quantity: 1,
+                    unit_price_cents: 800,
+                    line_total_cents: 800,
+                    extras: vec!["Extra Käse".into()],
+                    removals: vec!["Zwiebeln".into()],
+                },
+                OrderPdfItem {
+                    menu_number: "400".into(),
+                    name: "Pizzabrötchen".into(),
+                    variant: "".into(),
+                    quantity: 2,
+                    unit_price_cents: 300,
+                    line_total_cents: 600,
+                    extras: vec![],
+                    removals: vec![],
+                },
+            ],
+            subtotal_cents: 1400,
+            delivery_fee_cents: 0,
+            voucher_code: "".into(),
+            voucher_discount_cents: 0,
+            total_cents: 1400,
+            tax_note: "inkl. 7% MwSt. 92 €".into(),
+            payment_label: "Karte (Visa)".into(),
+            status_note: "".into(),
+        }
+    }
+
+    fn single(order: OrderPdfOrder) -> OrderPdfPayload {
+        OrderPdfPayload {
+            shop: sample_shop(),
+            summary: None,
+            orders: vec![order],
+        }
+    }
+
+    #[test]
+    fn beleg_renders() {
+        let bytes = render_order_pdf(&single(sample_order())).expect("beleg should render");
+        assert!(bytes.len() > 1000, "PDF suspiciously small: {}", bytes.len());
+        // PDF magic.
+        assert_eq!(&bytes[..5], b"%PDF-");
+    }
+
+    #[test]
+    fn beleg_with_voucher_and_delivery_renders() {
+        let mut o = sample_order();
+        o.address = "Beispielweg 3, 12345 Musterstadt".into();
+        o.channel_label = "Lieferung".into();
+        o.delivery_fee_cents = 250;
+        o.voucher_code = "WILLKOMMEN10".into();
+        o.voucher_discount_cents = 500;
+        o.total_cents = 1150;
+        o.status_note = "STORNIERT — diese Bestellung wurde storniert.".into();
+        let bytes = render_order_pdf(&single(o)).expect("beleg should render");
+        assert!(bytes.len() > 1000);
+    }
+
+    #[test]
+    fn batch_with_summary_renders() {
+        // Two orders + a summary cover page.
+        let o1 = sample_order();
+        let mut o2 = sample_order();
+        o2.number = "DP-0207-0003".into();
+        o2.total_cents = 2300;
+        let payload = OrderPdfPayload {
+            shop: sample_shop(),
+            summary: Some(OrderPdfSummary {
+                from: "2026-07-01".into(),
+                to: "2026-07-08".into(),
+                count: 2,
+                total_cents: 3700,
+                cancelled_count: 1,
+                include_test: false,
+                include_cancelled: false,
+                truncated_note: "".into(),
+            }),
+            orders: vec![o1, o2],
+        };
+        let bytes = render_order_pdf(&payload).expect("batch beleg should render");
+        assert!(bytes.len() > 1000);
+        assert_eq!(&bytes[..5], b"%PDF-");
+    }
+}
