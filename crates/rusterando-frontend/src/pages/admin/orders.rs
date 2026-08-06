@@ -17,6 +17,7 @@ type ItemSummaryRow = (
     String,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,7 +156,7 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
         // Items summary in one query per order — fine for a kitchen with <100 active orders.
         let items: Vec<ItemSummaryRow> = sqlx::query_as(
             "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
-                    removals_json
+                    removals_json, selected_options_json
              FROM order_items WHERE order_id = ?1 ORDER BY id",
         )
         .bind(&id)
@@ -167,7 +168,7 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
         // the admin board mirrors what kitchen + driver see.
         let items_summary = items
             .into_iter()
-            .map(|(num, n, q, opts, extras_json, removals_json)| {
+            .map(|(num, n, q, opts, extras_json, removals_json, selected_json)| {
                 let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
                 let variant = v.get("size_label").and_then(|x| x.as_str()).unwrap_or("");
                 let prefix = num
@@ -175,6 +176,24 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
                     .map(|x| x.trim())
                     .filter(|x| !x.is_empty())
                     .map(|x| format!("{x}. "))
+                    .unwrap_or_default();
+                let options_label = selected_json
+                    .as_deref()
+                    .and_then(|j| {
+                        serde_json::from_str::<
+                            Vec<rusterando_shared::models::CartSelectedOption>,
+                        >(j)
+                        .ok()
+                    })
+                    .filter(|v| !v.is_empty())
+                    .map(|v| {
+                        let labels = v
+                            .into_iter()
+                            .map(|o| o.option_label)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(" [{labels}]")
+                    })
                     .unwrap_or_default();
                 let extras_label = extras_json
                     .as_deref()
@@ -207,9 +226,9 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
                     })
                     .unwrap_or_default();
                 if variant.is_empty() {
-                    format!("{q}× {prefix}{n}{extras_label}{removals_label}")
+                    format!("{q}× {prefix}{n}{options_label}{extras_label}{removals_label}")
                 } else {
-                    format!("{q}× {prefix}{n} ({variant}){extras_label}{removals_label}")
+                    format!("{q}× {prefix}{n} ({variant}){options_label}{extras_label}{removals_label}")
                 }
             })
             .collect::<Vec<_>>()
@@ -845,6 +864,7 @@ fn DetailCard(
                     {items.into_iter().map(|it| {
                         let extras = it.extras.clone();
                         let removals = it.removals.clone();
+                        let selected_options = it.selected_options.clone();
                         view! {
                             <tr>
                                 <td class="qty">{it.quantity} "×"</td>
@@ -854,6 +874,13 @@ fn DetailCard(
                                 <td class="name">
                                     <strong>{it.name}</strong>
                                     {it.variant.map(|v| view! { <span class="variant">" — " {v}</span> })}
+                                    {(!selected_options.is_empty()).then(|| view! {
+                                        <ul class="extras selected-options">
+                                            {selected_options.into_iter().map(|o| {
+                                                view! { <li>{o.group_label} ": " <strong>{o.option_label}</strong></li> }
+                                            }).collect_view()}
+                                        </ul>
+                                    })}
                                     {(!extras.is_empty()).then(|| view! {
                                         <ul class="extras">
                                             {extras.into_iter().map(|e| {

@@ -9,13 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::pages::order::status_label_de;
 
 /// (menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
-///  removals_json)
+///  removals_json, selected_options_json)
 #[cfg(feature = "ssr")]
 type ItemSummaryRow = (
     Option<String>,
     String,
     i64,
     String,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -91,7 +92,7 @@ pub async fn list_kitchen_orders() -> Result<KitchenOrders, ServerFnError> {
     for (id, num, status, order_type, name, phone, scheduled, created, total, addr_json) in rows {
         let items: Vec<ItemSummaryRow> = sqlx::query_as(
             "SELECT menu_number_snapshot, name_snapshot, quantity, options_json, extras_json,
-                    removals_json
+                    removals_json, selected_options_json
              FROM order_items
              WHERE order_id = ?1 ORDER BY id",
         )
@@ -108,7 +109,7 @@ pub async fn list_kitchen_orders() -> Result<KitchenOrders, ServerFnError> {
         // off — both are must-have for getting the pizza right.
         let items_summary = items
             .into_iter()
-            .map(|(num, n, q, opts, extras_json, removals_json)| {
+            .map(|(num, n, q, opts, extras_json, removals_json, selected_json)| {
                 let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
                 let variant = v.get("size_label").and_then(|x| x.as_str()).unwrap_or("");
                 let prefix = num
@@ -116,6 +117,24 @@ pub async fn list_kitchen_orders() -> Result<KitchenOrders, ServerFnError> {
                     .map(|x| x.trim())
                     .filter(|x| !x.is_empty())
                     .map(|x| format!("{x}. "))
+                    .unwrap_or_default();
+                let options_label = selected_json
+                    .as_deref()
+                    .and_then(|j| {
+                        serde_json::from_str::<
+                            Vec<rusterando_shared::models::CartSelectedOption>,
+                        >(j)
+                        .ok()
+                    })
+                    .filter(|v| !v.is_empty())
+                    .map(|v| {
+                        let labels = v
+                            .into_iter()
+                            .map(|o| o.option_label)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!(" [{labels}]")
+                    })
                     .unwrap_or_default();
                 let extras_label = extras_json
                     .as_deref()
@@ -148,9 +167,9 @@ pub async fn list_kitchen_orders() -> Result<KitchenOrders, ServerFnError> {
                     })
                     .unwrap_or_default();
                 if variant.is_empty() {
-                    format!("{q}× {prefix}{n}{extras_label}{removals_label}")
+                    format!("{q}× {prefix}{n}{options_label}{extras_label}{removals_label}")
                 } else {
-                    format!("{q}× {prefix}{n} ({variant}){extras_label}{removals_label}")
+                    format!("{q}× {prefix}{n} ({variant}){options_label}{extras_label}{removals_label}")
                 }
             })
             .collect::<Vec<_>>()

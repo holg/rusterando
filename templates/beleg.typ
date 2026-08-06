@@ -125,7 +125,8 @@
         let prefix = if it.menu_number != "" { it.menu_number + ". " } else { "" }
         let variant = if it.variant != "" { " (" + it.variant + ")" } else { "" }
         [#prefix#it.name#variant]
-        let mods = it.extras.map(e => "+ " + e) + it.removals.map(r => "ohne " + r)
+        let picks = if "selected_options" in it { it.selected_options } else { () }
+        let mods = picks + it.extras.map(e => "+ " + e) + it.removals.map(r => "ohne " + r)
         if mods.len() > 0 {
           set text(size: 8.5pt, fill: rgb("#666"))
           set par(leading: 0.4em)

@@ -1135,6 +1135,9 @@ pub struct OrderPdfItem {
     pub extras: Vec<String>,
     /// Removed ingredients ("Zwiebeln").
     pub removals: Vec<String>,
+    /// Required-choice picks as "Dressing: Cocktail" / "Sauce: Kräuterbutter".
+    #[serde(default)]
+    pub selected_options: Vec<String>,
 }
 
 /// A minimal Typst `World` for the order Beleg: one source file + the
@@ -1297,7 +1300,8 @@ pub async fn load_one_order(
     // Items with their snapshotted extras/removals.
     let item_rows = sqlx::query(
         "SELECT menu_number_snapshot, name_snapshot, quantity, options_json,
-                unit_price_cents, line_total_cents, extras_json, removals_json
+                unit_price_cents, line_total_cents, extras_json, removals_json,
+                selected_options_json
          FROM order_items WHERE order_id = ?1 ORDER BY id",
     )
     .bind(order_id)
@@ -1315,6 +1319,7 @@ pub async fn load_one_order(
             let line_total_cents: i64 = r.get("line_total_cents");
             let extras_json: Option<String> = r.get("extras_json");
             let removals_json: Option<String> = r.get("removals_json");
+            let selected_options_json: Option<String> = r.get("selected_options_json");
 
             let variant = serde_json::from_str::<serde_json::Value>(&options_json)
                 .ok()
@@ -1342,9 +1347,30 @@ pub async fn load_one_order(
                 .into_iter()
                 .map(|r| r.label)
                 .collect();
+            let selected_options: Vec<String> = selected_options_json
+                .as_deref()
+                .and_then(|j| {
+                    serde_json::from_str::<Vec<rusterando_shared::models::CartSelectedOption>>(j)
+                        .ok()
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .map(|o| {
+                    // Admin-authored, translatable DB labels — rendered verbatim.
+                    let group = o.group_label.trim();
+                    let choice = o.option_label.trim();
+                    if group.is_empty() {
+                        choice.to_string()
+                    } else {
+                        format!("{group}: {choice}")
+                    }
+                })
+                .collect();
 
             OrderPdfItem {
-                menu_number: menu_number.filter(|s| !s.trim().is_empty()).unwrap_or_default(),
+                menu_number: menu_number
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_default(),
                 name,
                 variant,
                 quantity,
@@ -1352,6 +1378,7 @@ pub async fn load_one_order(
                 line_total_cents,
                 extras,
                 removals,
+                selected_options,
             }
         })
         .collect();
@@ -1393,7 +1420,12 @@ pub async fn load_one_order(
     let fulfillment = scheduled_for
         .as_deref()
         .and_then(|s| s.split_whitespace().nth(1))
-        .map(|t| t.rsplitn(2, ':').nth(1).map(str::to_string).unwrap_or_else(|| t.to_string()))
+        .map(|t| {
+            t.rsplitn(2, ':')
+                .nth(1)
+                .map(str::to_string)
+                .unwrap_or_else(|| t.to_string())
+        })
         .unwrap_or_default();
     let date = created_at
         .split_once(' ')
@@ -1605,6 +1637,7 @@ mod beleg_tests {
                     line_total_cents: 800,
                     extras: vec!["Extra Käse".into()],
                     removals: vec!["Zwiebeln".into()],
+                    selected_options: vec![],
                 },
                 OrderPdfItem {
                     menu_number: "400".into(),
@@ -1615,6 +1648,7 @@ mod beleg_tests {
                     line_total_cents: 600,
                     extras: vec![],
                     removals: vec![],
+                    selected_options: vec!["Sauce: Kräuterbutter".into()],
                 },
             ],
             subtotal_cents: 1400,
@@ -1639,7 +1673,11 @@ mod beleg_tests {
     #[test]
     fn beleg_renders() {
         let bytes = render_order_pdf(&single(sample_order())).expect("beleg should render");
-        assert!(bytes.len() > 1000, "PDF suspiciously small: {}", bytes.len());
+        assert!(
+            bytes.len() > 1000,
+            "PDF suspiciously small: {}",
+            bytes.len()
+        );
         // PDF magic.
         assert_eq!(&bytes[..5], b"%PDF-");
     }

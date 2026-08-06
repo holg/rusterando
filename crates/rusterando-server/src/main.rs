@@ -2032,7 +2032,10 @@ async fn order_beleg_pdf_handler(
                     // `inline` so a click opens it in the browser's PDF viewer;
                     // the tax clerk can then save/print. Filename carries the
                     // order number for easy filing.
-                    format!("inline; filename=\"beleg-{}.pdf\"", sanitize_filename(&order_id)),
+                    format!(
+                        "inline; filename=\"beleg-{}.pdf\"",
+                        sanitize_filename(&order_id)
+                    ),
                 ),
             ],
             bytes,
@@ -2387,15 +2390,22 @@ async fn mark_order_paid(
     .fetch_one(&state.db)
     .await?;
 
-    let item_rows: Vec<(Option<String>, String, i64, String, i64, Option<String>)> =
-        sqlx::query_as(
-            "SELECT menu_number_snapshot, name_snapshot, quantity, options_json,
-                line_total_cents, extras_json
+    let item_rows: Vec<(
+        Option<String>,
+        String,
+        i64,
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT menu_number_snapshot, name_snapshot, quantity, options_json,
+                line_total_cents, extras_json, selected_options_json
          FROM order_items WHERE order_id = ?1 ORDER BY id",
-        )
-        .bind(order_id)
-        .fetch_all(&state.db)
-        .await?;
+    )
+    .bind(order_id)
+    .fetch_all(&state.db)
+    .await?;
 
     let is_delivery = row.6 == "delivery";
     let pickup_label = match row.4.as_deref() {
@@ -2444,25 +2454,32 @@ async fn mark_order_paid(
         total_cents: row.5,
         items: item_rows
             .into_iter()
-            .map(|(menu_number, name, qty, opts, line_total, extras_json)| {
-                let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
-                let variant = v
-                    .get("size_label")
-                    .and_then(|x| x.as_str())
-                    .map(String::from);
-                let extras = extras_json
-                    .as_deref()
-                    .and_then(|j| serde_json::from_str(j).ok())
-                    .unwrap_or_default();
-                OrderItemSummary {
-                    quantity: qty,
-                    menu_number: menu_number.filter(|s| !s.is_empty()),
-                    name,
-                    variant,
-                    line_total_cents: line_total,
-                    extras,
-                }
-            })
+            .map(
+                |(menu_number, name, qty, opts, line_total, extras_json, selected_json)| {
+                    let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
+                    let variant = v
+                        .get("size_label")
+                        .and_then(|x| x.as_str())
+                        .map(String::from);
+                    let extras = extras_json
+                        .as_deref()
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    let selected_options = selected_json
+                        .as_deref()
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
+                    OrderItemSummary {
+                        quantity: qty,
+                        menu_number: menu_number.filter(|s| !s.is_empty()),
+                        name,
+                        variant,
+                        line_total_cents: line_total,
+                        extras,
+                        selected_options,
+                    }
+                },
+            )
             .collect(),
         public_url: format!("{public_url}/orders/{order_id}"),
         payment_method: "card".into(),

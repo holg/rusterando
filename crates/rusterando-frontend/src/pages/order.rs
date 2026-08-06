@@ -180,6 +180,11 @@ pub struct OrderDetailItem {
     /// Ingredients left off ("ohne X"), snapshotted at order time. Free.
     #[serde(default)]
     pub removals: Vec<rusterando_shared::models::CartRemoval>,
+    /// Picks from required-choice groups (Dressing, Sauce, Beilage…),
+    /// snapshotted at order time. Shown under the line on the invoice and
+    /// the kitchen ticket so the kitchen knows which dressing/sauce to use.
+    #[serde(default)]
+    pub selected_options: Vec<rusterando_shared::models::CartSelectedOption>,
 }
 
 /// What the phone-recall lookup returns when a known number is typed at
@@ -286,6 +291,9 @@ pub mod notify {
         /// Picked extras snapshotted at order time. Listed under the item
         /// line in the email body.
         pub extras: Vec<rusterando_shared::models::CartExtra>,
+        /// Picks from required-choice groups (Dressing, Sauce…), listed
+        /// under the item line so the customer sees which dressing/sauce.
+        pub selected_options: Vec<rusterando_shared::models::CartSelectedOption>,
     }
 
     #[derive(Debug, Clone)]
@@ -508,6 +516,12 @@ pub mod notify {
                 variant,
                 format_eur(it.line_total_cents)
             ));
+            for opt in &it.selected_options {
+                s.push_str(&format!(
+                    "        {}: {}\n",
+                    opt.group_label, opt.option_label
+                ));
+            }
             for ex in &it.extras {
                 let p = if ex.price_cents == 0 {
                     "gratis".to_string()
@@ -2740,6 +2754,7 @@ pub async fn place_order(
                 variant: l.size_label.clone(),
                 line_total_cents: l.line_total_cents,
                 extras: l.extras.clone(),
+                selected_options: l.selected_options.clone(),
             })
             .collect(),
         public_url: detail_url,
@@ -2899,10 +2914,12 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
             i64,
             Option<String>,
             Option<String>,
+            Option<String>,
         ),
     >(
         "SELECT menu_number_snapshot, name_snapshot, options_json,
-                quantity, unit_price_cents, line_total_cents, extras_json, removals_json
+                quantity, unit_price_cents, line_total_cents, extras_json, removals_json,
+                selected_options_json
          FROM order_items WHERE order_id = ?1
          ORDER BY id",
     )
@@ -2914,7 +2931,7 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
     let items = item_rows
         .into_iter()
         .map(
-            |(num, name, opts, qty, unit, total, extras_json, removals_json)| {
+            |(num, name, opts, qty, unit, total, extras_json, removals_json, selected_json)| {
                 let v: serde_json::Value = serde_json::from_str(&opts).unwrap_or_default();
                 let variant = v
                     .get("size_label")
@@ -2928,6 +2945,11 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
                     .as_deref()
                     .and_then(|j| serde_json::from_str(j).ok())
                     .unwrap_or_default();
+                let selected_options: Vec<rusterando_shared::models::CartSelectedOption> =
+                    selected_json
+                        .as_deref()
+                        .and_then(|j| serde_json::from_str(j).ok())
+                        .unwrap_or_default();
                 OrderDetailItem {
                     menu_number: num.filter(|s| !s.is_empty()),
                     name,
@@ -2937,6 +2959,7 @@ pub async fn get_order(id: String) -> Result<OrderDetail, ServerFnError> {
                     line_total_cents: total,
                     extras,
                     removals,
+                    selected_options,
                 }
             },
         )
@@ -4788,6 +4811,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                 {o.items.into_iter().map(|it| {
                     let extras = it.extras.clone();
                     let removals = it.removals.clone();
+                    let selected_options = it.selected_options.clone();
                     view! {
                         <li>
                             <span class="qty">{it.quantity} "×"</span>
@@ -4797,6 +4821,13 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                                 })}
                                 {it.name.clone()}
                                 {it.variant.clone().map(|v| view! { " (" {v} ")" })}
+                                {(!selected_options.is_empty()).then(|| view! {
+                                    <ul class="extras selected-options">
+                                        {selected_options.into_iter().map(|o| {
+                                            view! { <li>{o.group_label} ": " <strong>{o.option_label}</strong></li> }
+                                        }).collect_view()}
+                                    </ul>
+                                })}
                                 {(!extras.is_empty()).then(|| view! {
                                     <ul class="extras">
                                         {extras.into_iter().map(|e| {

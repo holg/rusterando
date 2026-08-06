@@ -914,6 +914,7 @@ pub async fn build_order_for_kitchen(
     let item_rows = sqlx::query(
         "SELECT oi.menu_number_snapshot, oi.name_snapshot, oi.quantity,
                 oi.options_json, oi.extras_json, oi.removals_json, oi.unit_price_cents,
+                oi.selected_options_json,
                 mc.name AS category_name
          FROM order_items oi
          LEFT JOIN menu_items mi ON mi.id = oi.menu_item_id
@@ -934,6 +935,7 @@ pub async fn build_order_for_kitchen(
         let options_json: String = r.get("options_json");
         let extras_json: Option<String> = r.get("extras_json");
         let removals_json: Option<String> = r.get("removals_json");
+        let selected_options_json: Option<String> = r.get("selected_options_json");
         let unit_price_cents: i64 = r.get("unit_price_cents");
         let category_name: Option<String> = r.get("category_name");
 
@@ -954,6 +956,31 @@ pub async fn build_order_for_kitchen(
         // prices in a parallel vec so the Pi can right-align the price.
         let mut modifications: Vec<String> = Vec::new();
         let mut modification_prices: Vec<u32> = Vec::new();
+        // Required-choice picks (Dressing, Sauce, Beilage…) come first so
+        // the kitchen reads "Dressing: Cocktail" / "Sauce: Kräuterbutter"
+        // right under the item name. Stored in selected_options_json; each
+        // pick carries its own price (usually 0 for a bundled choice).
+        if let Some(j) = selected_options_json.as_deref() {
+            if let Ok(selected) =
+                serde_json::from_str::<Vec<rusterando_shared::models::CartSelectedOption>>(j)
+            {
+                for opt in selected {
+                    // group_label / option_label are admin-authored DB values
+                    // (translatable via the i18n overlay) — snapshotted at order
+                    // time. Print them verbatim; the wording is the admin's to
+                    // edit, not ours to rewrite here.
+                    let group = opt.group_label.trim();
+                    let choice = opt.option_label.trim();
+                    let line = if group.is_empty() {
+                        choice.to_string()
+                    } else {
+                        format!("{group}: {choice}")
+                    };
+                    modifications.push(line);
+                    modification_prices.push(opt.price_cents.max(0) as u32);
+                }
+            }
+        }
         if let Ok(opts) = serde_json::from_str::<serde_json::Value>(&options_json) {
             if let Some(label) = opts.get("size_label").and_then(|v| v.as_str()) {
                 if !label.is_empty() {
@@ -1102,7 +1129,9 @@ pub async fn build_order_for_kitchen(
         };
         eta_minutes.and_then(|eta| {
             use chrono::{Local, TimeZone};
-            let due = Local.timestamp_opt(created_at_unix + eta * 60, 0).single()?;
+            let due = Local
+                .timestamp_opt(created_at_unix + eta * 60, 0)
+                .single()?;
             let same_day = created_naive
                 .map(|c| c.date_naive() == due.date_naive())
                 .unwrap_or(false);
