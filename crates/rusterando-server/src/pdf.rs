@@ -1058,6 +1058,10 @@ mod cover_tests {
 const BELEG_SRC: &str = include_str!("../../../templates/beleg.typ");
 const BELEG_VPATH: &str = "/beleg.typ";
 
+/// Kurzliste / Einzelauflistung Typst source (see templates/kurzliste.typ).
+const KURZLISTE_SRC: &str = include_str!("../../../templates/kurzliste.typ");
+const KURZLISTE_VPATH: &str = "/kurzliste.typ";
+
 #[derive(Debug, Serialize)]
 pub struct OrderPdfPayload {
     pub shop: OrderPdfShop,
@@ -1222,6 +1226,281 @@ pub async fn build_order_pdf(
 ) -> anyhow::Result<Vec<u8>> {
     let payload = load_order_pdf_payload(db, order_id, branding).await?;
     tokio::task::spawn_blocking(move || render_order_pdf(&payload)).await?
+}
+
+// ===================================================================
+// Kurzliste / Einzelauflistung — compact one-line-per-order statement
+// ===================================================================
+
+/// Full payload for the Kurzliste (see templates/kurzliste.typ).
+#[derive(Debug, Serialize)]
+pub struct KurzlistePayload {
+    pub shop: OrderPdfShop,
+    pub period: KurzlistePeriod,
+    pub rows: Vec<KurzlisteRow>,
+}
+
+/// Summary header figures. Split by how the order was settled:
+/// cash-at-handover, online (card/Apple Pay/…), or fully by voucher.
+#[derive(Debug, Serialize)]
+pub struct KurzlistePeriod {
+    pub from: String,
+    pub to: String,
+    /// Completed orders (cash + online + voucher), count and summed cents.
+    pub count_total: i64,
+    pub sum_total_cents: i64,
+    /// "Bei Auslieferung bezahlt" — payment_status = cash_on_pickup.
+    pub count_cash: i64,
+    pub sum_cash_cents: i64,
+    /// "Online bezahlt" — real online settlement (payment_status = paid).
+    /// Vouchers are NOT counted here — a Gutschein is a redemption, not money in.
+    pub count_online: i64,
+    pub sum_online_cents: i64,
+    /// "Per Gutschein bezahlt" — payment_status = voucher_paid. These are fully
+    /// covered by a Gutschein (total 0 €); no money changed hands.
+    pub count_voucher: i64,
+    pub sum_voucher_cents: i64,
+    /// Storno in the range (shown only when include_cancelled). Never counted.
+    pub count_cancelled: i64,
+    pub include_test: bool,
+    pub include_cancelled: bool,
+    /// Non-empty → a red note (e.g. large-export warning).
+    pub note: String,
+}
+
+/// One order row: date/time, the order number, its total, and a marker for how
+/// it was paid — "" (cash), "*" (online), or "†" (voucher).
+#[derive(Debug, Serialize)]
+pub struct KurzlisteRow {
+    pub date: String,
+    pub number: String,
+    pub total_cents: i64,
+    /// "" = cash, "*" = online (paid), "†" = Gutschein (voucher_paid).
+    pub marker: String,
+}
+
+/// A minimal Typst `World` for the Kurzliste: one source file + bundled fonts.
+struct KurzlisteWorld {
+    library: LazyHash<Library>,
+    main_id: FileId,
+    main_source: Source,
+}
+
+impl KurzlisteWorld {
+    fn new(payload: &KurzlistePayload) -> anyhow::Result<Self> {
+        let json = serde_json::to_string(payload)?;
+        let mut inputs = Dict::new();
+        inputs.insert("data".into(), typst::foundations::Value::Str(json.into()));
+        let library = Library::builder().with_inputs(inputs).build();
+        let main_id = FileId::new(None, VirtualPath::new(KURZLISTE_VPATH));
+        let main_source = Source::new(main_id, KURZLISTE_SRC.to_string());
+        Ok(Self {
+            library: LazyHash::new(library),
+            main_id,
+            main_source,
+        })
+    }
+}
+
+impl World for KurzlisteWorld {
+    fn library(&self) -> &LazyHash<Library> {
+        &self.library
+    }
+    fn book(&self) -> &LazyHash<FontBook> {
+        &resources().book
+    }
+    fn main(&self) -> FileId {
+        self.main_id
+    }
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        if id == self.main_id {
+            Ok(self.main_source.clone())
+        } else {
+            Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+        }
+    }
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+    }
+    fn font(&self, index: usize) -> Option<Font> {
+        resources().fonts.get(index)?.get()
+    }
+    fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
+        None
+    }
+}
+
+/// Render a Kurzliste payload to PDF bytes.
+pub fn render_kurzliste_pdf(payload: &KurzlistePayload) -> anyhow::Result<Vec<u8>> {
+    let world = KurzlisteWorld::new(payload)?;
+    let warned = typst::compile::<PagedDocument>(&world);
+    for w in &warned.warnings {
+        tracing::warn!("typst warn (kurzliste): {}", w.message);
+    }
+    let document = warned.output.map_err(|errs| {
+        for e in &errs {
+            tracing::error!("typst (kurzliste): {} (span={:?})", e.message, e.span);
+        }
+        let msgs: Vec<_> = errs.iter().map(|e| eco_format!("{}", e.message)).collect();
+        anyhow::anyhow!("Typst compile failed: {}", msgs.join("; "))
+    })?;
+    let opts = typst_pdf::PdfOptions::default();
+    typst_pdf::pdf(&document, &opts).map_err(|errs| {
+        let msgs: Vec<_> = errs.iter().map(|e| eco_format!("{}", e.message)).collect();
+        anyhow::anyhow!("Typst PDF export failed: {}", msgs.join("; "))
+    })
+}
+
+/// UTC `created_at` string ("YYYY-MM-DD HH:MM:SS") → "DD.MM.YYYY HH:MM" in the
+/// shop's local timezone. `chrono::Local` honours the TZ env of the systemd
+/// unit (Europe/Berlin), matching the kitchen ticket + admin UI. Falls back to
+/// the raw string if it can't be parsed.
+fn kurzliste_local_datetime(created_at_utc: &str) -> String {
+    use chrono::{Local, NaiveDateTime, TimeZone, Utc};
+    NaiveDateTime::parse_from_str(created_at_utc.trim(), "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|naive| {
+            let utc = Utc.from_utc_datetime(&naive);
+            utc.with_timezone(&Local)
+                .format("%d.%m.%Y %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| created_at_utc.to_string())
+}
+
+/// Build the compact Kurzliste for a filtered range. Same date-range + Sandbox
+/// + Storno semantics as the Buchhaltung/Beleg export, but:
+///   * excludes non-completed orders (pending/failed) — they aren't revenue,
+///   * carries no line items (one summary query + one row query),
+///   * splits payment into cash-at-handover vs. online-paid.
+pub async fn build_kurzliste_pdf(
+    db: &SqlitePool,
+    from: &str,
+    to: &str,
+    include_test: bool,
+    include_cancelled: bool,
+    branding: &rusterando_frontend::branding::Branding,
+) -> anyhow::Result<Vec<u8>> {
+    use sqlx::Row;
+
+    let from_ts = format!("{from} 00:00:00");
+    let to_ts = format!("{to} 23:59:59");
+    let mode_clause = if include_test {
+        ""
+    } else {
+        " AND stripe_mode = 'live'"
+    };
+
+    // Only COMPLETED orders count toward the list: paid / voucher_paid (online)
+    // and cash_on_pickup (cash at handover). pending/failed are dropped.
+    // Cancelled is always excluded from the rows + money; it's surfaced only as
+    // a separate reconciliation count when include_cancelled is on.
+    const COMPLETED: &str =
+        " AND payment_status IN ('paid','voucher_paid','cash_on_pickup') AND status != 'cancelled'";
+
+    // Rows — one per completed order, oldest first (like the Lieferando list).
+    let row_sql = format!(
+        "SELECT order_number, created_at, total_cents, payment_status
+         FROM orders
+         WHERE created_at BETWEEN ?1 AND ?2{mode_clause}{COMPLETED}
+         ORDER BY created_at ASC",
+    );
+    let db_rows = sqlx::query(&row_sql)
+        .bind(&from_ts)
+        .bind(&to_ts)
+        .fetch_all(db)
+        .await?;
+
+    let mut rows = Vec::with_capacity(db_rows.len());
+    let mut count_cash = 0i64;
+    let mut sum_cash_cents = 0i64;
+    let mut count_online = 0i64;
+    let mut sum_online_cents = 0i64;
+    let mut count_voucher = 0i64;
+    let mut sum_voucher_cents = 0i64;
+    for r in &db_rows {
+        let number: String = r.get("order_number");
+        let created_at: String = r.get("created_at");
+        let total_cents: i64 = r.get("total_cents");
+        let payment_status: String = r.get("payment_status");
+        // created_at is UTC 'YYYY-MM-DD HH:MM:SS'; convert to the shop's local
+        // timezone (Local honours the TZ env of the systemd unit, same as the
+        // kitchen ticket) and present it as "DD.MM.YYYY HH:MM".
+        let date = kurzliste_local_datetime(&created_at);
+        // Three settlement buckets. A voucher-paid order is fully covered by a
+        // Gutschein (total 0 €) — it is NOT online revenue, so it gets its own
+        // line + "†" marker rather than being folded into "Online bezahlt".
+        let marker = match payment_status.as_str() {
+            "cash_on_pickup" => {
+                count_cash += 1;
+                sum_cash_cents += total_cents;
+                ""
+            }
+            "voucher_paid" => {
+                count_voucher += 1;
+                sum_voucher_cents += total_cents;
+                "†"
+            }
+            // "paid" (card / Apple Pay / …) and any other completed online state.
+            _ => {
+                count_online += 1;
+                sum_online_cents += total_cents;
+                "*"
+            }
+        };
+        rows.push(KurzlisteRow {
+            date,
+            number,
+            total_cents,
+            marker: marker.to_string(),
+        });
+    }
+    let count_total = count_cash + count_online + count_voucher;
+    let sum_total_cents = sum_cash_cents + sum_online_cents + sum_voucher_cents;
+
+    // Storno count in the same range (for reconciliation; never in the money).
+    let canc_sql = format!(
+        "SELECT COUNT(*) AS c FROM orders
+         WHERE created_at BETWEEN ?1 AND ?2{mode_clause} AND status = 'cancelled'",
+    );
+    let count_cancelled: i64 = sqlx::query(&canc_sql)
+        .bind(&from_ts)
+        .bind(&to_ts)
+        .fetch_one(db)
+        .await?
+        .get("c");
+
+    const LARGE_LIST: usize = 1500;
+    let note = if rows.len() > LARGE_LIST {
+        format!(
+            "Großer Zeitraum: {} Bestellungen. Bei Performance-Problemen eingrenzen.",
+            rows.len()
+        )
+    } else {
+        String::new()
+    };
+
+    let payload = KurzlistePayload {
+        shop: order_pdf_shop(branding),
+        period: KurzlistePeriod {
+            from: from.to_string(),
+            to: to.to_string(),
+            count_total,
+            sum_total_cents,
+            count_cash,
+            sum_cash_cents,
+            count_online,
+            sum_online_cents,
+            count_voucher,
+            sum_voucher_cents,
+            count_cancelled,
+            include_test,
+            include_cancelled,
+            note,
+        },
+        rows,
+    };
+    tokio::task::spawn_blocking(move || render_kurzliste_pdf(&payload)).await?
 }
 
 /// The shop-header block, built once per payload from branding.
@@ -1720,5 +1999,110 @@ mod beleg_tests {
         let bytes = render_order_pdf(&payload).expect("batch beleg should render");
         assert!(bytes.len() > 1000);
         assert_eq!(&bytes[..5], b"%PDF-");
+    }
+}
+
+#[cfg(test)]
+mod kurzliste_tests {
+    use super::*;
+
+    fn shop() -> OrderPdfShop {
+        OrderPdfShop {
+            name: "Davids Pizzeria".into(),
+            address: "Musterstr. 1, 12345 Musterstadt".into(),
+            phone: "".into(),
+            email: "".into(),
+            vat_id: "DE123456789".into(),
+        }
+    }
+
+    /// `marker`: "" cash, "*" online, "†" voucher.
+    fn row(date: &str, number: &str, cents: i64, marker: &str) -> KurzlisteRow {
+        KurzlisteRow {
+            date: date.into(),
+            number: number.into(),
+            total_cents: cents,
+            marker: marker.into(),
+        }
+    }
+
+    fn payload(rows: Vec<KurzlisteRow>, include_cancelled: bool) -> KurzlistePayload {
+        let mut cash = (0i64, 0i64);
+        let mut online = (0i64, 0i64);
+        let mut voucher = (0i64, 0i64);
+        for r in &rows {
+            let bucket = match r.marker.as_str() {
+                "*" => &mut online,
+                "†" => &mut voucher,
+                _ => &mut cash,
+            };
+            bucket.0 += 1;
+            bucket.1 += r.total_cents;
+        }
+        KurzlistePayload {
+            shop: shop(),
+            period: KurzlistePeriod {
+                from: "2026-07-01".into(),
+                to: "2026-08-31".into(),
+                count_total: cash.0 + online.0 + voucher.0,
+                sum_total_cents: cash.1 + online.1 + voucher.1,
+                count_cash: cash.0,
+                sum_cash_cents: cash.1,
+                count_online: online.0,
+                sum_online_cents: online.1,
+                count_voucher: voucher.0,
+                sum_voucher_cents: voucher.1,
+                count_cancelled: if include_cancelled { 2 } else { 0 },
+                include_test: false,
+                include_cancelled,
+                note: String::new(),
+            },
+            rows,
+        }
+    }
+
+    #[test]
+    fn kurzliste_renders() {
+        // One of each settlement kind so all three summary lines render.
+        let rows = vec![
+            row("02.07.2026 13:54", "DP-0207-0001", 1000, "*"),
+            row("02.07.2026 18:04", "DP-0207-0002", 4374, ""),
+            row("03.07.2026 17:46", "DP-0307-0001", 0, "†"),
+        ];
+        let bytes = render_kurzliste_pdf(&payload(rows, false)).expect("kurzliste should render");
+        assert!(
+            bytes.len() > 1000,
+            "PDF suspiciously small: {}",
+            bytes.len()
+        );
+        assert_eq!(&bytes[..5], b"%PDF-");
+    }
+
+    #[test]
+    fn kurzliste_empty_renders() {
+        // No orders in range → still a valid one-page PDF with the header.
+        let bytes = render_kurzliste_pdf(&payload(vec![], false)).expect("empty should render");
+        assert!(bytes.len() > 500);
+        assert_eq!(&bytes[..5], b"%PDF-");
+    }
+
+    #[test]
+    fn kurzliste_with_storno_renders() {
+        let rows = vec![row("06.08.2026 21:14", "DP-0608-0003", 550, "")];
+        let bytes =
+            render_kurzliste_pdf(&payload(rows, true)).expect("storno variant should render");
+        assert!(bytes.len() > 1000);
+    }
+
+    #[test]
+    fn local_datetime_formats_and_falls_back() {
+        // Parseable UTC → DD.MM.YYYY HH:MM (exact local offset depends on the
+        // test host TZ, so just assert the shape: 16 chars, dots + colon).
+        let out = kurzliste_local_datetime("2026-07-02 16:04:11");
+        assert_eq!(out.len(), 16, "got {out:?}");
+        assert_eq!(&out[2..3], ".");
+        assert_eq!(&out[13..14], ":");
+        // Garbage in → echoed back unchanged.
+        assert_eq!(kurzliste_local_datetime("not-a-date"), "not-a-date");
     }
 }

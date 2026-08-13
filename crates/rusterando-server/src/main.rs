@@ -876,6 +876,12 @@ async fn main() {
             "/admin/belege.pdf",
             axum::routing::get(order_belege_pdf_handler),
         )
+        // Compact Einzelauflistung (Kurzliste) — one-line-per-order overview
+        // for the whole filtered range. Same filters as the CSV.
+        .route(
+            "/admin/kurzliste.pdf",
+            axum::routing::get(order_kurzliste_pdf_handler),
+        )
         // Apple Universal Links / Keychain webcredentials manifest. iOS
         // fetches this once after install, caches it for ~24h. Apple is
         // strict: must return 200 with `Content-Type: application/json`,
@@ -2136,6 +2142,83 @@ async fn order_belege_pdf_handler(
             .into_response(),
         Err(e) => {
             tracing::error!("belege pdf {from}..{to}: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "PDF-Fehler").into_response()
+        }
+    }
+}
+
+/// `/admin/kurzliste.pdf` — compact Einzelauflistung for a filtered range: a
+/// summary header (Gesamt / Bei Auslieferung bezahlt / Online bezahlt) then a
+/// dense two-column table of Datum · # · € per order. Cookie-auth + tenant
+/// aware; same date/Sandbox/Storno filter as the CSV, but drops non-completed
+/// (pending/failed) orders. Reuses BelegeParams (identical query params).
+async fn order_kurzliste_pdf_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(p): axum::extract::Query<BelegeParams>,
+    cookies: tower_cookies::Cookies,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::header;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let authed = cookies
+        .get("dp_session")
+        .map(|c| c.value() == "admin")
+        .unwrap_or(false)
+        || cookies
+            .get("admin_session")
+            .map(|c| c.value() == "ok")
+            .unwrap_or(false);
+    if !authed {
+        return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
+    }
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let week_ago = (chrono::Local::now() - chrono::Duration::days(7))
+        .format("%Y-%m-%d")
+        .to_string();
+    let from = p.from.unwrap_or(week_ago);
+    let to = p.to.unwrap_or(today);
+    if from.len() != 10 || to.len() != 10 {
+        return (StatusCode::BAD_REQUEST, "from/to must be YYYY-MM-DD").into_response();
+    }
+    let truthy = |o: &Option<String>| {
+        o.as_deref()
+            .map(|s| matches!(s, "true" | "1" | "yes"))
+            .unwrap_or(false)
+    };
+    let include_test = truthy(&p.include_test);
+    let include_cancelled = truthy(&p.include_cancelled);
+
+    let (pool, branding) = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => (t.pool.clone(), t.handles.branding.get()),
+        None => (state.db.clone(), state.branding.get()),
+    };
+
+    match rusterando_server::pdf::build_kurzliste_pdf(
+        &pool,
+        &from,
+        &to,
+        include_test,
+        include_cancelled,
+        &branding,
+    )
+    .await
+    {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/pdf".to_string()),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("inline; filename=\"kurzliste_{from}_{to}.pdf\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("kurzliste pdf {from}..{to}: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "PDF-Fehler").into_response()
         }
     }

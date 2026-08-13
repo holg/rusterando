@@ -626,6 +626,18 @@ pub fn AdminHistoryPage() -> impl IntoView {
         )
     };
 
+    // Kurzliste (Einzelauflistung) — compact one-line-per-order overview for the
+    // current filter. Same query params; the server drops non-completed orders.
+    let kurzliste_href = move || {
+        format!(
+            "/admin/kurzliste.pdf?from={}&to={}&include_test={}&include_cancelled={}",
+            from.get(),
+            to.get(),
+            include_test.get(),
+            include_cancelled.get(),
+        )
+    };
+
     view! {
         <AdminShell>
             <section class="admin-history">
@@ -667,6 +679,10 @@ pub fn AdminHistoryPage() -> impl IntoView {
                 <a class="btn ghost" href=belege_href target="_blank" rel="noopener"
                    title="Alle gefilterten Bestellungen als ein PDF (Übersicht + je ein Beleg)">
                     "⬇ Belege (PDF)"
+                </a>
+                <a class="btn ghost" href=kurzliste_href target="_blank" rel="noopener"
+                   title="Kompakte Einzelauflistung: eine Zeile pro Bestellung (Datum · Nr. · Betrag)">
+                    "⬇ Kurzliste (PDF)"
                 </a>
             </form>
             <p class="hint muted">
