@@ -3028,7 +3028,7 @@ async fn rate_limit_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    use axum::http::StatusCode;
+    use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
     let path = req.uri().path();
@@ -3041,7 +3041,27 @@ async fn rate_limit_middleware(
         // the budget by alternating endpoints.
         if !LOOKUP_LIMITER.allow(&ip) {
             tracing::warn!(target: "ratelimit", %ip, %path, "lookup throttled");
-            return (StatusCode::TOO_MANY_REQUESTS, "rate limit").into_response();
+            // These are server-fn endpoints: the Leptos client decodes any
+            // error body as `<Variant>|<message>` and shows the message. A
+            // bare "rate limit" body failed that parse and surfaced as
+            // "error deserializing server function results" in the checkout
+            // form. Mirror server_fn's own error response (header + format)
+            // so the customer reads a sentence instead.
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [
+                    (
+                        leptos::server_fn::error::SERVER_FN_ERROR_HEADER,
+                        path.to_string(),
+                    ),
+                    (
+                        header::CONTENT_TYPE.as_str(),
+                        "text/plain; charset=utf-8".to_string(),
+                    ),
+                ],
+                "ServerError|Zu viele Anfragen – bitte einen Moment warten und erneut tippen.",
+            )
+                .into_response();
         }
     }
     next.run(req).await

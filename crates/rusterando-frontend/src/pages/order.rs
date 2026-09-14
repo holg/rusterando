@@ -3307,6 +3307,11 @@ pub async fn list_order_messages(
 /// the server). Fetches its own messages by `order_id`, subscribes to the
 /// live stream for in-place updates, and posts via `SetOrderMessage` (which
 /// records the caller's role). `compact` trims the chrome for board cards.
+/// Settle time before the checkout form asks the server to look up a phone
+/// number or validate an address. Long enough to swallow a typing burst,
+/// short enough that the result is there when the customer looks up.
+const LOOKUP_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(600);
+
 #[component]
 pub fn StaffOrderChat(order_id: String, #[prop(optional)] compact: bool) -> impl IntoView {
     let history: RwSignal<Vec<rusterando_shared::models::OrderMessage>> = RwSignal::new(Vec::new());
@@ -5178,21 +5183,33 @@ fn Form(
         }
     };
 
-    // Debounced phone lookup: re-runs whenever phone_sig settles for ~700ms
-    // and contains at least 6 digits. Uses `set_timeout` from gloo when on
-    // the client; on the server this is a no-op (we only run from hydrate).
+    // Debounced phone lookup: fires once phone_sig has settled for
+    // LOOKUP_DEBOUNCE and contains at least 6 digits, and only when the
+    // digits actually changed since the last lookup. The server throttles
+    // phone + address lookups in ONE 20/min bucket per IP; firing on every
+    // keystroke burned through it while a customer was still typing and
+    // surfaced as "Adressprüfung fehlgeschlagen … rate limit".
     let lookup = ServerAction::<LookupCustomerByPhone>::new();
+    let lookup_timer = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
+    let lookup_last_digits = StoredValue::new(String::new());
     Effect::new(move |_| {
         let raw = phone_sig.get();
         let digits: String = raw.chars().filter(|c| c.is_ascii_digit()).collect();
-        if digits.len() < 6 {
+        if let Some(h) = lookup_timer.try_update_value(|t| t.take()).flatten() {
+            h.clear();
+        }
+        if digits.len() < 6 || lookup_last_digits.with_value(|d| *d == digits) {
             return;
         }
-        // Fire immediately; the network round-trip + 5/min server-side limit
-        // already gates this. Keystroke storms beyond the limit get a 429
-        // and recover quietly. Adding a debounce on top would mean importing
-        // gloo-timers; not worth the dep for the same UX.
-        lookup.dispatch(LookupCustomerByPhone { phone: raw });
+        let handle = leptos::leptos_dom::helpers::set_timeout_with_handle(
+            move || {
+                lookup_last_digits.set_value(digits);
+                lookup.dispatch(LookupCustomerByPhone { phone: raw });
+            },
+            LOOKUP_DEBOUNCE,
+        )
+        .ok();
+        lookup_timer.set_value(handle);
     });
 
     // Apply lookup results when they land.
@@ -5312,6 +5329,7 @@ fn Form(
     });
 
     // Trigger: re-validate when in delivery mode and all four fields are set.
+    let validate_timer = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
     Effect::new(move |_| {
         if !is_delivery.get() {
             validation.set(None);
@@ -5330,14 +5348,27 @@ fn Form(
         // (where the real method + total are known); here we just
         // want the rejection signal + the bypass_hint_min_cents
         // back-channel for the customer-facing nudge.
-        validator.dispatch(ValidateAddress {
-            street: s,
-            house_number: h,
-            postcode: p,
-            city: c,
-            payment_method: None,
-            cart_total_cents: None,
-        });
+        //
+        // Debounced like the phone lookup (same server-side bucket): the
+        // request goes out once the customer stops typing, not per key.
+        if let Some(prev) = validate_timer.try_update_value(|t| t.take()).flatten() {
+            prev.clear();
+        }
+        let handle = leptos::leptos_dom::helpers::set_timeout_with_handle(
+            move || {
+                validator.dispatch(ValidateAddress {
+                    street: s,
+                    house_number: h,
+                    postcode: p,
+                    city: c,
+                    payment_method: None,
+                    cart_total_cents: None,
+                });
+            },
+            LOOKUP_DEBOUNCE,
+        )
+        .ok();
+        validate_timer.set_value(handle);
     });
 
     // Apply validator results. Surface server errors as a failed
