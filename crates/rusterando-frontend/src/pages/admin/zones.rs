@@ -471,7 +471,10 @@ fn ServedMunicipalitiesSection(
         <p class="hint">
             "Name(n), die Nominatim für den Ort zurückgibt. Für jede:n bekannte:n \
              Stadtteil eine Zone festlegen. Der Eintrag mit \"*\" greift für \
-             alle anderen Stadtteile (z. B. Bauerschaften)."
+             alle anderen Stadtteile (z. B. Bauerschaften). Zusätze in Klammern \
+             werden ignoriert: „Lüdinghausen“ trifft auch Nominatims \
+             „Lüdinghausen (Stadt)“ für die Innenstadt; Bauerschaften kommen \
+             als eigener Name (z. B. „Berenbrock“) und können gezielt geroutet werden."
         </p>
         {move || areas.get().served_municipalities.iter().enumerate().map(|(idx, _m)| {
             view! { <MunicipalityRow idx areas zones=zones/> }

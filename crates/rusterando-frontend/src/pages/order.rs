@@ -210,6 +210,11 @@ pub struct AddressValidation {
     pub eta_minutes: Option<i64>,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
+    /// Geocoder's sub-locality (Stadtteil / Bauerschaft), `Some("")` when
+    /// the geocoder returned none. Persisted with the address so the cache
+    /// can re-classify without another geocoder round-trip.
+    #[serde(default)]
+    pub suburb: Option<String>,
     /// Echo of normalised parts — UI can show what we resolved against.
     pub matched_label: Option<String>,
     /// When `ok == false`: if the shop has the paid-bypass configured
@@ -1247,6 +1252,8 @@ pub mod ssr {
         pub zone_id: String,
         pub latitude: Option<f64>,
         pub longitude: Option<f64>,
+        /// Resolved sub-locality, `Some("")` for "geocoder said none".
+        pub suburb: Option<String>,
     }
 
     /// Borrowed address parts — passed as one struct so callers (and clippy)
@@ -1289,9 +1296,14 @@ pub mod ssr {
         .await
         .map_err(|e| ServerFnError::new(format!("lookup address: {e}")))?;
 
-        let (zone, lat, lon) = match &geo {
-            Some(g) => (Some(g.zone_id.as_str()), g.latitude, g.longitude),
-            None => (None, None, None),
+        let (zone, lat, lon, suburb) = match &geo {
+            Some(g) => (
+                Some(g.zone_id.as_str()),
+                g.latitude,
+                g.longitude,
+                g.suburb.as_deref(),
+            ),
+            None => (None, None, None, None),
         };
         let geocoded_now = if geo.is_some() {
             Some("CURRENT_TIMESTAMP")
@@ -1308,6 +1320,7 @@ pub mod ssr {
                      delivery_zone_id = COALESCE(?4, delivery_zone_id),
                      latitude = COALESCE(?5, latitude),
                      longitude = COALESCE(?6, longitude),
+                     suburb = COALESCE(?7, suburb),
                      geocoded_at = CASE WHEN ?5 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE geocoded_at END,
                      geocode_provider = CASE WHEN ?5 IS NOT NULL THEN 'nominatim' ELSE geocode_provider END,
                      last_used_at = CURRENT_TIMESTAMP
@@ -1319,6 +1332,7 @@ pub mod ssr {
             .bind(zone)
             .bind(lat)
             .bind(lon)
+            .bind(suburb)
             .execute(&mut **tx)
             .await
             .map_err(|e| ServerFnError::new(format!("update address: {e}")))?;
@@ -1329,10 +1343,12 @@ pub mod ssr {
         sqlx::query(
             "INSERT INTO customer_addresses
                 (id, customer_id, street, house_number, postcode, city, notes,
-                 delivery_zone_id, latitude, longitude, geocoded_at, geocode_provider)
+                 delivery_zone_id, latitude, longitude, geocoded_at, geocode_provider,
+                 suburb)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                      CASE WHEN ?9 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END,
-                     CASE WHEN ?9 IS NOT NULL THEN 'nominatim' ELSE NULL END)",
+                     CASE WHEN ?9 IS NOT NULL THEN 'nominatim' ELSE NULL END,
+                     ?11)",
         )
         .bind(&id)
         .bind(customer_id)
@@ -1344,6 +1360,7 @@ pub mod ssr {
         .bind(zone)
         .bind(lat)
         .bind(lon)
+        .bind(suburb)
         .execute(&mut **tx)
         .await
         .map_err(|e| ServerFnError::new(format!("insert address: {e}")))?;
@@ -1722,6 +1739,9 @@ pub mod ssr {
         pub village: Option<String>,
         pub suburb: Option<String>,
         pub city_district: Option<String>,
+        /// Rural sub-locality — this is what OSM uses for the Münsterland
+        /// Bauerschaften (e.g. `hamlet = "Berenbrock"`).
+        pub hamlet: Option<String>,
         #[allow(dead_code)]
         pub postcode: Option<String>,
     }
@@ -1742,6 +1762,9 @@ pub mod ssr {
                 .as_deref()
                 .or(self.city_district.as_deref())
                 .or(self.village.as_deref())
+                // A Bauerschaft: routed by name when the admin lists it,
+                // else by the "*" wildcard like before.
+                .or(self.hamlet.as_deref())
         }
     }
 
@@ -2382,6 +2405,7 @@ pub async fn place_order(
             zone_id: zone_id_resolved,
             latitude: v.latitude,
             longitude: v.longitude,
+            suburb: v.suburb.clone(),
         };
         (fee_cents, Some(address), zname, Some(geo))
     } else {
@@ -3573,6 +3597,7 @@ pub async fn validate_address(
              WHERE street = ?1 AND house_number = ?2 AND postcode = ?3
                    AND latitude IS NOT NULL AND longitude IS NOT NULL
                    AND delivery_zone_id IS NOT NULL
+                   AND suburb IS NOT NULL
              ORDER BY geocoded_at DESC LIMIT 1",
     )
     .bind(&street)
@@ -3582,8 +3607,28 @@ pub async fn validate_address(
     .await
     .map_err(|e| ServerFnError::new(format!("address cache: {e}")))?;
 
-    let (lat, lon, _suburb, zone_id) = match cached {
-        Some((Some(lat), Some(lon), suburb, Some(zid))) => (lat, lon, suburb, zid),
+    let (lat, lon, suburb_out, zone_id) = match cached {
+        // Cache hit: coordinates + sub-locality are stable facts about the
+        // address; the ZONE is not — it follows the admin's routing config,
+        // which changes. Re-classify every time (pure in-memory work) so a
+        // routing fix reaches returning customers too. Rows without a
+        // stored suburb (written before it was persisted) miss the cache,
+        // get geocoded once more below, and are stored complete.
+        Some((Some(lat), Some(lon), Some(suburb), Some(cached_zid))) => {
+            match ssr::classify_zone(
+                lat,
+                lon,
+                Some(suburb.as_str()),
+                Some(city_eff.as_str()),
+                &areas,
+                &bypass,
+            ) {
+                Ok(zid) => (lat, lon, Some(suburb), zid),
+                // Config no longer routes it: keep serving what we served
+                // before rather than rejecting a known-good address.
+                Err(_) => (lat, lon, Some(suburb), cached_zid),
+            }
+        }
         _ => {
             // Cache miss — call Nominatim. An error here means the geocoder
             // itself is unreachable / 5xx; log it as `http_error` and tell
@@ -3702,6 +3747,7 @@ pub async fn validate_address(
                             "village": found.address.village,
                             "suburb": found.address.suburb,
                             "city_district": found.address.city_district,
+                            "hamlet": found.address.hamlet,
                             "postcode": found.address.postcode,
                         }
                     }))
@@ -3753,7 +3799,7 @@ pub async fn validate_address(
                     });
                 }
             };
-            (lat, lon, effective_suburb, zid)
+            (lat, lon, Some(effective_suburb.unwrap_or_default()), zid)
         }
     };
 
@@ -3792,6 +3838,7 @@ pub async fn validate_address(
         eta_minutes: Some(eta),
         latitude: Some(lat),
         longitude: Some(lon),
+        suburb: suburb_out,
         matched_label: zname,
         bypass_hint_min_cents: None,
     })

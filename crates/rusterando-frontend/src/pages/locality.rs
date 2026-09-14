@@ -37,17 +37,31 @@ use serde::{Deserialize, Serialize};
 /// stripped. Both sides of every match call get folded so the
 /// comparison is independent of spelling/casing/decoration.
 pub fn normalize(s: &str) -> String {
-    s.trim()
+    let folded = s
+        .trim()
         .to_lowercase()
         .replace('ä', "ae")
         .replace('ö', "oe")
         .replace('ü', "ue")
-        .replace('ß', "ss")
-        .split(',')
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_string()
+        .replace('ß', "ss");
+    let first = folded.split(',').next().unwrap_or("");
+    // Drop parenthesised qualifiers: Nominatim labels a town centre as
+    // `city_district = "Lüdinghausen (Stadt)"`, while admins (reasonably)
+    // configure the route as "Lüdinghausen". Without this the centre never
+    // matched and every town address fell through to the "*" wildcard —
+    // on Davids' config that was the Bauerschaften zone with the higher
+    // fee (81 of 95 cached addresses had landed there).
+    let mut out = String::with_capacity(first.len());
+    let mut depth = 0usize;
+    for c in first.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Sentinel value for "any suburb not specifically routed elsewhere".
@@ -428,6 +442,39 @@ mod tests {
         assert_eq!(normalize("Ünterstadt"), "uenterstadt");
         assert_eq!(normalize("  ÜNTERSTADT, Bundesland "), "uenterstadt");
         assert_eq!(normalize("Uenterstadt"), "uenterstadt");
+    }
+
+    #[test]
+    fn normalize_drops_parenthesised_qualifiers() {
+        assert_eq!(normalize("Lüdinghausen (Stadt)"), "luedinghausen");
+        assert_eq!(normalize("Lüdinghausen"), "luedinghausen");
+        assert_eq!(normalize("Bork (Selm)"), "bork");
+        assert_eq!(normalize("Nord (Ost) West"), "nord west");
+    }
+
+    #[test]
+    fn town_centre_routes_to_its_own_zone_not_wildcard() {
+        let m = ServedMunicipality {
+            match_names: vec!["Lüdinghausen".into()],
+            zone_routing: vec![
+                SuburbRoute {
+                    match_suburb: "Seppenrade".into(),
+                    zone_id: "dz-seppenrade".into(),
+                },
+                SuburbRoute {
+                    match_suburb: "Lüdinghausen".into(),
+                    zone_id: "dz-luedinghausen".into(),
+                },
+                SuburbRoute {
+                    match_suburb: "*".into(),
+                    zone_id: "dz-bauerschaften".into(),
+                },
+            ],
+        };
+        let r = route_suburb(&m.zone_routing, "Lüdinghausen (Stadt)").unwrap();
+        assert_eq!(r.zone_id, "dz-luedinghausen");
+        let r = route_suburb(&m.zone_routing, "Berenbrock").unwrap();
+        assert_eq!(r.zone_id, "dz-bauerschaften");
     }
 
     #[test]
