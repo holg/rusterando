@@ -4,7 +4,14 @@ name = "kitchen-protocol"
 # Pi-side raster caching; Hello carries cached_rasters. Breaking wire
 # change — server + Pi must deploy together (OTA-able from 1.0).
 version = "2.0.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Shared DTOs for the rusterando kitchen channel"
 
 # Near-pure-data crate. Consumers (the server + the Pi binary) bring their

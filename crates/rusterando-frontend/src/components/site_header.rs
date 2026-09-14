@@ -29,6 +29,8 @@ fn shop_name_sync() -> String {
         // sets it is the first thing in <body>, so it has already
         // executed by the time hydrate runs.
         use leptos::wasm_bindgen::JsValue;
+        // Via leptos so the crate also builds with no feature (crates.io verify).
+        use leptos::web_sys::{self, js_sys};
         let window = match web_sys::window() {
             Some(w) => w,
             None => return "Mein Restaurant".to_string(),
@@ -55,6 +57,8 @@ fn i18n_enabled_sync() -> bool {
     #[cfg(not(feature = "ssr"))]
     {
         use leptos::wasm_bindgen::JsValue;
+        // Via leptos so the crate also builds with no feature (crates.io verify).
+        use leptos::web_sys::{self, js_sys};
         let Some(window) = web_sys::window() else {
             return false;
         };

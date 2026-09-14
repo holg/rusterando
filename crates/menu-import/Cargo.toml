@@ -1,7 +1,15 @@
 [package]
 name = "menu-import"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "CLI to provision a Rusterando shop (.env + SQLite + migrations) and import a scraped menu.json; plus asset-manifest for WASM bundle checksums"
 
 # One-shot CLI: provision a new shop's .env + sqlite, run the workspace
 # migrations against it, and import a scraped/parsed menu.json into the

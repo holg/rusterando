@@ -1,7 +1,14 @@
 [package]
 name = "rusterando-wasm-split"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Reusable hand-split wasm machinery: build-time JSON→static-slice codegen + a browser interop for calling a window-registered split wasm. Shared by the i18n pack/mgmt wasms and any future split-wasm tool."
 
 [lib]

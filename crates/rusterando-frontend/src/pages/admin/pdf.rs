@@ -347,7 +347,7 @@ pub struct PdfDefaults {
 )]
 pub async fn get_pdf_defaults() -> Result<PdfDefaults, ServerFnError> {
     crate::pages::admin::require_admin().await?;
-    let src = include_str!("../../../../../templates/menu.typ");
+    let src = include_str!("../../../templates/menu.typ");
     Ok(PdfDefaults {
         template_source: src.to_string(),
         tagline: String::new(),

@@ -6,6 +6,15 @@ name = "rusterando-printer"
 # The startup log's `version=` proves which build is running on the Pi.
 version = "0.3.0"
 edition = "2021"
+# Not a workspace member, so metadata is spelled out instead of inherited.
+license = "AGPL-3.0-or-later"
+authors = ["Holger Trahe <trahe@mac.com>"]
+repository = "https://github.com/holg/rusterando"
+homepage = "https://github.com/holg/rusterando"
+readme = "../../README.md"
+keywords = ["restaurant", "printer", "escpos", "raspberry-pi"]
+categories = ["hardware-support"]
+description = "Kitchen receipt printer client for Rusterando (Raspberry Pi / ESC-POS), speaking kitchen-protocol over TCP"
 
 # Pi binary. Cross-compiles to aarch64-unknown-linux-gnu using the
 # brew toolchain + the C23 shim from scripts/cross-shims/. Excluded
@@ -30,7 +39,7 @@ path = "src/main.rs"
 [dependencies]
 # Protocol crate. Relative path because this crate isn't a workspace
 # member — `{ workspace = true }` is unavailable here.
-kitchen-protocol = { path = "../kitchen-protocol" }
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.0.0" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 tokio-util = { version = "0.7", features = ["codec"] }

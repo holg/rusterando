@@ -304,7 +304,7 @@ async fn main() {
     // overlay's versions must NOT clash with baseline versions. Use a
     // distinct timestamp prefix (e.g. 99999999000001) in overlay files
     // so they sort after every baseline migration.
-    sqlx::migrate!("../../migrations")
+    sqlx::migrate!()
         .run(&db)
         .await
         .expect("run baseline migrations");
@@ -1108,8 +1108,7 @@ struct QrParams {
 /// Bytes of the AASA manifest, baked into the binary at compile time so
 /// deploys can never accidentally serve a redirected or empty response.
 /// Edit `public/.well-known/apple-app-site-association` to change.
-const APPLE_APP_SITE_ASSOCIATION: &[u8] =
-    include_bytes!("../../../public/.well-known/apple-app-site-association");
+const APPLE_APP_SITE_ASSOCIATION: &[u8] = include_bytes!("../assets/apple-app-site-association");
 
 /// Process-health check for external uptime monitors. Returns the
 /// current file-descriptor count + soft limit + percentage so a

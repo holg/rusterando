@@ -22,6 +22,8 @@ fn stripe_sandbox_sync() -> bool {
     #[cfg(not(feature = "ssr"))]
     {
         use leptos::wasm_bindgen::JsValue;
+        // Via leptos so the crate also builds with no feature (crates.io verify).
+        use leptos::web_sys::{self, js_sys};
         let Some(window) = web_sys::window() else {
             return false;
         };

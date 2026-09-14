@@ -1,7 +1,15 @@
 [package]
 name = "rusterando-frontend"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Leptos 0.8 SSR + hydrate frontend of Rusterando, the self-hostable restaurant + delivery platform"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -15,7 +23,7 @@ kitchen-protocol = { workspace = true }
 # Shared hand-split-wasm interop (call a window-registered split wasm). Only
 # the browser/hydrate build needs it (it pulls the wasm-bindgen stack), so it's
 # optional + enabled by the `hydrate` feature below.
-rusterando-wasm-split = { path = "../rusterando-wasm-split", features = ["interop"], optional = true }
+rusterando-wasm-split = { path = "../rusterando-wasm-split", version = "0.1.0", features = ["interop"], optional = true }
 
 leptos = { workspace = true }
 leptos_meta = { workspace = true }

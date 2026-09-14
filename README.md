@@ -11,6 +11,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Rust](https://img.shields.io/badge/Rust-edition_2021-orange.svg)](https://www.rust-lang.org/)
 [![Leptos](https://img.shields.io/badge/Leptos-0.8_SSR-green.svg)](https://leptos.dev/)
+[![crates.io](https://img.shields.io/crates/v/rusterando-server.svg)](https://crates.io/crates/rusterando-server)
 
 ---
 
@@ -347,6 +348,26 @@ work end-to-end. Same pattern for SMTP and Stripe — the platform fails
 soft so you can run it bare.
 
 ## Building + deploying
+
+### crates.io
+
+Every workspace crate (plus `rusterando-printer`) is published to
+crates.io under the AGPL, so the source of a tagged release is one
+`cargo download` away and the reusable pieces (`rusterando-wasm-split`,
+`rusterando-i18n-core`, `kitchen-protocol`) can be depended on directly.
+
+Note that `cargo install rusterando-server` alone does **not** give you a
+runnable site: the server expects the WASM/JS/CSS bundle that
+`cargo leptos build` produces next to it, plus `.env`. Follow the
+Quickstart / deploy sections below for a working install. Migrations,
+Typst templates and the embedded images are compiled into the binary,
+so those need no extra files.
+
+Publishing is automated: pushing a `v*` tag runs
+`.github/workflows/publish.yml`, which dry-runs every crate and then
+uploads with the `CARGO_REGISTRY_TOKEN` repository secret. Bump the
+crate versions before tagging; crates.io refuses re-uploads of an
+existing version.
 
 ### CI locally
 

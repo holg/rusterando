@@ -367,7 +367,7 @@ pub async fn build_tenant(slug: &str, env_file: &str) -> anyhow::Result<Tenant> 
         .await
         .map_err(|e| anyhow::anyhow!("open pool for {slug}: {e}"))?;
 
-    sqlx::migrate!("../../migrations")
+    sqlx::migrate!()
         .run(&pool)
         .await
         .map_err(|e| anyhow::anyhow!("migrate {slug}: {e}"))?;
@@ -613,7 +613,7 @@ pub async fn load_shared_pool() -> Option<SqlitePool> {
         }
     };
 
-    if let Err(e) = sqlx::migrate!("../../migrations").run(&pool).await {
+    if let Err(e) = sqlx::migrate!().run(&pool).await {
         tracing::warn!(
             "shared tenant: migrate ({database_url}): {e} — falling back to bundled defaults"
         );

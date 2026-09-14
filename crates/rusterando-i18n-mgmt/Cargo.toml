@@ -1,7 +1,14 @@
 [package]
 name = "rusterando-i18n-mgmt"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Management .wasm for per-shop translation gap reporting — given a shop's German menu phrases, reports which are untranslated per locale. Loaded only in admin."
 
 # cdylib → the admin-loadable .wasm (wasm-bindgen --target web).
@@ -16,9 +23,9 @@ crate-type = ["cdylib", "rlib"]
 # in i18n-core so the TUI and this wasm can't drift.
 [dependencies]
 wasm-bindgen = { workspace = true }
-rusterando-i18n-core = { path = "../rusterando-i18n-core" }
+rusterando-i18n-core = { path = "../rusterando-i18n-core", version = "0.1.0" }
 
 # Build-time only: shared wasm-split codegen bakes the pack's menu coverage into
 # a static slice. Never ships in the wasm.
 [build-dependencies]
-rusterando-wasm-split = { path = "../rusterando-wasm-split", features = ["build"] }
+rusterando-wasm-split = { path = "../rusterando-wasm-split", version = "0.1.0", features = ["build"] }

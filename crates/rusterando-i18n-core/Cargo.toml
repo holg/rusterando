@@ -1,7 +1,14 @@
 [package]
 name = "rusterando-i18n-core"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Pure translation gap-computation shared by the i18n management wasm and the i18n TUI — decoupled from the coverage source via the Coverage trait. No wasm, no I/O, no deps."
 
 [lib]

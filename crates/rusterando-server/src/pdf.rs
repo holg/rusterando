@@ -24,23 +24,23 @@ use typst::{Library, LibraryExt, World};
 /// Factory-default STYLING theme (palette + render fns, no page geometry).
 /// Used when the admin hasn't supplied an override via the pdf_themes
 /// library. Kept as the safety net for "Reset auf Werks-Template".
-pub const TEMPLATE_SRC: &str = include_str!("../../../templates/menu.typ");
+pub const TEMPLATE_SRC: &str = include_str!("../templates/menu.typ");
 /// The theme is imported by the geometry layer as `/theme.typ`.
 const THEME_VPATH: &str = "/theme.typ";
 
 /// Geometry layer — the Typst MAIN source. Owns page size + fold layout per
 /// `?format=`, imports the styling theme (`/theme.typ`). Not user-editable.
-const GEOMETRY_SRC: &str = include_str!("../../../templates/geometry.typ");
+const GEOMETRY_SRC: &str = include_str!("../templates/geometry.typ");
 const GEOMETRY_VPATH: &str = "/geometry.typ";
 
 // Image assets the template can `image("/img/...")` for. Bytes are embedded
 // at compile time so the running binary needs no filesystem access.
-const ASSET_LADENFRONT: &[u8] = include_bytes!("../../../public/img/ladenfront.jpg");
+const ASSET_LADENFRONT: &[u8] = include_bytes!("../assets/ladenfront.jpg");
 const ASSET_LADENFRONT_VPATH: &str = "/img/ladenfront.jpg";
 /// Tri-fold cover photo used on the left panel of page 1 (the
 /// outside-front when the leporello is folded shut). Static asset;
 /// to change it, replace public/img/cover.jpg and rebuild.
-const ASSET_COVER: &[u8] = include_bytes!("../../../public/img/cover.jpg");
+const ASSET_COVER: &[u8] = include_bytes!("../assets/cover.jpg");
 const ASSET_COVER_VPATH: &str = "/img/cover.jpg";
 
 /// Virtual paths the template uses for admin-uploaded ad slots. The
@@ -1055,11 +1055,11 @@ mod cover_tests {
 // ===========================================================================
 
 /// Beleg Typst source, embedded at compile time (see templates/beleg.typ).
-const BELEG_SRC: &str = include_str!("../../../templates/beleg.typ");
+const BELEG_SRC: &str = include_str!("../templates/beleg.typ");
 const BELEG_VPATH: &str = "/beleg.typ";
 
 /// Kurzliste / Einzelauflistung Typst source (see templates/kurzliste.typ).
-const KURZLISTE_SRC: &str = include_str!("../../../templates/kurzliste.typ");
+const KURZLISTE_SRC: &str = include_str!("../templates/kurzliste.typ");
 const KURZLISTE_VPATH: &str = "/kurzliste.typ";
 
 #[derive(Debug, Serialize)]

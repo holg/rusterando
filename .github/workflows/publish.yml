@@ -1,0 +1,85 @@
+# Rusterando — publish the workspace crates to crates.io.
+#
+# Fires on a `v*` tag push (same trigger as release.yml) or manually via
+# workflow_dispatch. Requires the repository secret CARGO_REGISTRY_TOKEN
+# (a crates.io API token with the `publish-new` + `publish-update` scopes,
+# created at https://crates.io/settings/tokens).
+#
+# `cargo publish --workspace` (stable since cargo 1.90) resolves the
+# intra-workspace dependency order itself and uploads every member in one
+# go: rusterando-shared / kitchen-protocol / rusterando-wasm-split /
+# rusterando-i18n-core first, then the crates depending on them, then
+# rusterando-server last. rusterando-printer is excluded from the
+# workspace (Pi cross-build dep set), so it is published in a second step
+# once kitchen-protocol is on the registry.
+#
+# Everything is dry-run first so a broken manifest or a version that's
+# already on crates.io fails before anything is uploaded. Re-running the
+# workflow for a version that's already published is a no-op error on
+# the real publish step — bump the crate version and tag again.
+name: Publish to crates.io
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only run `cargo publish --dry-run` (no upload)"
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  publish:
+    name: cargo publish --workspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rusterando-check
+
+      # openssl-sys for the server's apns-h2 dep (same as ci.yml).
+      - name: Install system OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      # Verify every package builds from its packaged tarball before any
+      # upload. rusterando-server's build.rs fetches fonts over the network
+      # on first build; the runner has egress, so that's fine.
+      - name: Dry run (workspace)
+        run: cargo publish --workspace --locked --dry-run
+
+      - name: Dry run (rusterando-printer)
+        run: cargo publish --manifest-path crates/rusterando-printer/Cargo.toml --dry-run
+        # The printer's dry-run needs kitchen-protocol resolvable. Before the
+        # very first real publish it isn't on the registry yet, so allow
+        # this step to fail; the real publish below runs after the
+        # workspace upload has put kitchen-protocol there.
+        continue-on-error: true
+
+      - name: Publish workspace
+        if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace --locked --no-verify
+
+      - name: Publish rusterando-printer
+        if: ${{ github.event_name == 'push' || inputs.dry_run == false }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --manifest-path crates/rusterando-printer/Cargo.toml --no-verify

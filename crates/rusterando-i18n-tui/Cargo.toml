@@ -1,7 +1,14 @@
 [package]
 name = "rusterando-i18n-tui"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Terminal UI to manage translations over SSH (iPhone-optimised): per-locale gap report + edit, writing the tenant DB's _<lang> override cells. Shares gap logic with the i18n management wasm via rusterando-i18n-core."
 
 [[bin]]
@@ -10,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Shared gap computation — same source of truth as the mgmt wasm.
-rusterando-i18n-core = { path = "../rusterando-i18n-core" }
+rusterando-i18n-core = { path = "../rusterando-i18n-core", version = "0.1.0" }
 ratatui = "0.29"
 crossterm = "0.28"
 # Bundled SQLite (no system libsqlite needed on the VPS) for reading/writing the

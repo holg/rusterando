@@ -23,6 +23,19 @@ members = [
 #                      --manifest-path crates/rusterando-printer/Cargo.toml`.
 exclude = ["src-tauri", "crates/rusterando-printer"]
 
+# Shared package metadata, inherited by every crate via `*.workspace = true`.
+# Required by crates.io (`license`, `description` per crate) — see
+# .github/workflows/publish.yml for the tag-driven `cargo publish --workspace`.
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Holger Trahe <trahe@mac.com>"]
+repository = "https://github.com/holg/rusterando"
+homepage = "https://github.com/holg/rusterando"
+readme = "README.md"
+keywords = ["restaurant", "delivery", "ordering", "leptos", "pos"]
+categories = ["web-programming"]
+
 # Default release profile — fast iteration. Thin LTO + multi-unit codegen
 # combined with bin-side `CARGO_INCREMENTAL=1` (set in
 # `scripts/cross_build_on_mac.sh`) turns "edit one server file" cross-build
@@ -115,12 +128,13 @@ http = "1"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
-# Internal crates
-kitchen-protocol = { path = "crates/kitchen-protocol" }
-rusterando-app = { path = "crates/rusterando-app" }
-rusterando-frontend = { path = "crates/rusterando-frontend" }
-rusterando-server = { path = "crates/rusterando-server" }
-rusterando-shared = { path = "crates/rusterando-shared" }
+# Internal crates — `version` is what crates.io consumers resolve; `path`
+# is what the workspace uses locally.
+kitchen-protocol = { path = "crates/kitchen-protocol", version = "2.0.0" }
+rusterando-app = { path = "crates/rusterando-app", version = "0.1.0" }
+rusterando-frontend = { path = "crates/rusterando-frontend", version = "0.1.0" }
+rusterando-server = { path = "crates/rusterando-server", version = "0.1.0" }
+rusterando-shared = { path = "crates/rusterando-shared", version = "0.1.0" }
 
 # See https://github.com/leptos-rs/cargo-leptos for documentation of all the parameters.
 [[workspace.metadata.leptos]]

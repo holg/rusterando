@@ -7,7 +7,10 @@
 use rusterando_wasm_split::build::Codegen;
 
 fn main() {
-    let menu = "../rusterando-i18n-pack/generated/menu.json";
+    // `generated/` is a symlink to ../rusterando-i18n-pack/generated so the file
+    // is inside this crate for `cargo package`.
+    let menu = "generated/menu.json";
+    println!("cargo:rerun-if-changed={menu}");
     let mut g = Codegen::new();
     // COVERAGE: (locale, german) for every non-empty translation in the pack.
     g.key_table("COVERAGE", menu)
