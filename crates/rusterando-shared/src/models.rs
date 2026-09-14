@@ -533,6 +533,69 @@ pub fn format_eur(cents: i64) -> String {
     format!("{euros},{rest:02} €")
 }
 
+/// Parse an admin-typed euro amount into cents. Accepts German and English
+/// decimal separators ("12,50", "12.5", "9"), an optional trailing "€" and
+/// surrounding whitespace. Blank input is `Ok(None)` (= "no value"), so a
+/// cleared field can mean "unset". Negative amounts and more than two
+/// decimals are rejected — a typo like "1250" is taken literally as 1250 €,
+/// which the caller's live-price column makes obvious next to it.
+pub fn parse_eur_cents(input: &str) -> Result<Option<i64>, String> {
+    let t = input.trim().trim_end_matches('€').trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    let t = t.replace(',', ".");
+    let (whole, frac) = match t.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (t.as_str(), ""),
+    };
+    if whole.starts_with('-') {
+        return Err("negativer Betrag".into());
+    }
+    let whole_v: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse()
+            .map_err(|_| format!("ungültiger Betrag „{input}“"))?
+    };
+    let frac_v: i64 = match frac.len() {
+        0 => 0,
+        1 => {
+            frac.parse::<i64>()
+                .map_err(|_| format!("ungültiger Betrag „{input}“"))?
+                * 10
+        }
+        2 => frac
+            .parse()
+            .map_err(|_| format!("ungültiger Betrag „{input}“"))?,
+        _ => return Err(format!("höchstens zwei Nachkommastellen: „{input}“")),
+    };
+    Ok(Some(whole_v * 100 + frac_v))
+}
+
+#[cfg(test)]
+mod eur_parse_tests {
+    use super::parse_eur_cents;
+
+    #[test]
+    fn parses_common_forms() {
+        assert_eq!(parse_eur_cents("12,50"), Ok(Some(1250)));
+        assert_eq!(parse_eur_cents("12.5"), Ok(Some(1250)));
+        assert_eq!(parse_eur_cents(" 9 € "), Ok(Some(900)));
+        assert_eq!(parse_eur_cents(",5"), Ok(Some(50)));
+        assert_eq!(parse_eur_cents(""), Ok(None));
+        assert_eq!(parse_eur_cents("   "), Ok(None));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(parse_eur_cents("-1").is_err());
+        assert!(parse_eur_cents("1,234").is_err());
+        assert!(parse_eur_cents("abc").is_err());
+    }
+}
+
 /// URL slug for SEO pages (category + delivery-area URLs). German-aware:
 /// transliterates umlauts/ß to their ASCII digraphs FIRST (ü→ue, ö→oe,
 /// ä→ae, ß→ss), so "Lüdinghausen" → "luedinghausen" rather than dropping

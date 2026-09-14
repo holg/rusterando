@@ -8,6 +8,7 @@ pub mod home_admin;
 pub mod hours;
 pub mod login;
 pub mod menu_admin;
+pub mod next_prices;
 pub mod options_admin;
 pub mod orders;
 pub mod pdf;

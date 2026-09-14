@@ -2925,6 +2925,72 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   .ok { color: var(--success); font-weight: 600; }
 }
 
+// ---------- Admin next-prices page (staged price list) ----------
+.next-prices-admin {
+  max-width: 70rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+
+  .hint { color: var(--muted); }
+  .status-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.2rem;
+    align-items: center;
+    padding: 0.7rem 0.9rem;
+    margin: 1rem 0;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    .count { font-weight: 700; }
+    .pdf-links { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-left: auto; }
+  }
+  .bulk {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 0.7rem;
+    align-items: end;
+    padding: 0.9rem;
+    margin: 1rem 0 1.5rem;
+    border: 1px dashed var(--border);
+    border-radius: 0.4rem;
+    label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.85rem; }
+    input, select { padding: 0.35rem; }
+    .actions { display: flex; gap: 0.5rem; grid-column: 1 / -1; flex-wrap: wrap; }
+  }
+  .danger-zone {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    align-items: center;
+    margin: 1.5rem 0;
+    padding: 0.9rem;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    .confirm { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  }
+  h2 { margin: 1.4rem 0 0.4rem; font-size: 1.05rem; }
+  .next-prices-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 1rem;
+    th, td { padding: 0.35rem 0.5rem; text-align: left; vertical-align: middle; }
+    th { border-bottom: 2px solid var(--border); font-size: 0.85rem; }
+    tr:nth-child(even) { background: #faf6f2; }
+    tr.unlisted td { color: var(--muted); }
+    td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .cell-input { width: 5.5rem; padding: 0.3rem; text-align: right; }
+    .cell-input.changed { border-color: var(--accent, #c8102e); font-weight: 600; }
+    .diff { font-size: 0.8rem; color: var(--muted); margin-left: 0.3rem; white-space: nowrap; }
+    .diff.up { color: #b35c00; }
+    .diff.down { color: #1d7a3a; }
+    .row-status { font-size: 0.75rem; color: var(--muted); }
+    .row-status.error { color: var(--danger, #b00020); }
+  }
+  .error { color: var(--danger, #b00020); }
+  .ok { color: var(--success); }
+}
+
 // ---------- Admin extras-admin page ----------
 .extras-admin {
   max-width: 60rem;

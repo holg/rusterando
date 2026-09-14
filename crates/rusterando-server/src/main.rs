@@ -1782,8 +1782,10 @@ async fn pdf_test_render_handler(
 
     let site_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
     let branding = state.branding.get();
-    let payload = match rusterando_server::pdf::load_menu_payload(&state.db, site_url, &branding)
-        .await
+    let payload = match rusterando_server::pdf::load_menu_payload(
+        &state.db, site_url, &branding, false,
+    )
+    .await
     {
         Ok(p) => p,
         Err(e) => {
@@ -2689,6 +2691,10 @@ struct MenuPdfParams {
     /// title+price-only in-house menu. Absent / 0 = the full hand-out menu
     /// with ingredients (the default).
     condensed: Option<String>,
+    /// `?prices=next` renders the STAGED prices from /admin/next-prices
+    /// instead of the live ones — the file the admin sends to the print
+    /// shop before activating. Anything else = live prices.
+    prices: Option<String>,
 }
 
 async fn menu_pdf_handler(
@@ -2700,6 +2706,7 @@ async fn menu_pdf_handler(
     // without this it always rendered the global (parent) tenant's menu — e.g.
     // flizza.localhost/menu.pdf returned rusterando's PDF.
     tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+    headers: axum::http::HeaderMap,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
     use axum::http::StatusCode;
@@ -2719,6 +2726,16 @@ async fn menu_pdf_handler(
     );
     let show_ingredients = !condensed;
     let variant = if condensed { "-kompakt" } else { "" };
+    let use_next_prices = matches!(
+        p.prices.as_deref(),
+        Some("next") | Some("neu") | Some("new")
+    );
+    // Staged prices are an internal working state until activated — only the
+    // signed-in admin gets to render them.
+    if use_next_prices && !header_has_admin_session(&headers) {
+        return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
+    }
+    let prices_part = if use_next_prices { "-neue-preise" } else { "" };
 
     let site_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
 
@@ -2751,7 +2768,15 @@ async fn menu_pdf_handler(
     } else {
         ""
     };
-    let filename = format!("{domain}{tenant_part}-speisekarte{fmt_part}{variant}.pdf");
+    let filename = format!("{domain}{tenant_part}-speisekarte{fmt_part}{variant}{prices_part}.pdf");
+    // The staged-price render is an admin working file: never let a shared
+    // cache hand it to a customer, and never cache it while prices are
+    // being edited.
+    let cache_control = if use_next_prices {
+        "no-store".to_string()
+    } else {
+        "public, max-age=300".to_string()
+    };
     match rusterando_server::pdf::build_menu_pdf(
         &pool,
         site_url,
@@ -2760,6 +2785,7 @@ async fn menu_pdf_handler(
         format,
         show_ingredients,
         state.shared_pool.as_ref(),
+        use_next_prices,
     )
     .await
     {
@@ -2770,7 +2796,7 @@ async fn menu_pdf_handler(
                     header::CONTENT_DISPOSITION,
                     format!("inline; filename=\"{filename}\""),
                 ),
-                (header::CACHE_CONTROL, "public, max-age=300".to_string()),
+                (header::CACHE_CONTROL, cache_control),
             ],
             bytes,
         )

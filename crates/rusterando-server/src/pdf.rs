@@ -411,10 +411,15 @@ pub fn render_menu_pdf(
 // Build a payload from the live database
 // ---------------------------------------------------------------------------
 
+/// `use_next_prices`: render the STAGED prices (`next_price_*`, falling back
+/// to the live price where nothing is staged) instead of the live ones. This
+/// is how the admin produces the print-shop PDF before the new prices go
+/// live — see `/admin/next-prices` and migration 20260914000001.
 pub async fn load_menu_payload(
     db: &SqlitePool,
     site_url: String,
     shop_branding: &rusterando_frontend::branding::Branding,
+    use_next_prices: bool,
 ) -> anyhow::Result<MenuPdfPayload> {
     let cat_rows: Vec<(String, String, i64)> = sqlx::query_as(
         "SELECT id, name, sort_order FROM menu_categories WHERE is_active = 1 ORDER BY sort_order",
@@ -437,18 +442,30 @@ pub async fn load_menu_payload(
         i64,            // is_spicy
         i64,            // is_available
         i64,            // sort_order
-    )> = sqlx::query_as(
-        "SELECT id, category_id, menu_number, name, description,
-                price_small_cents, price_large_cents, size_small_label, size_large_label,
-                allergen_codes, additive_codes, is_spicy, is_available, sort_order
-         FROM menu_items
-         WHERE is_listed = 1 AND is_available = 1
-         ORDER BY sort_order,
-                  CAST(COALESCE(menu_number, '') AS INTEGER),
-                  menu_number",
-    )
-    .fetch_all(db)
-    .await?;
+    )> = {
+        // Staged prices overlay the live ones per column; an item without a
+        // large size stays without one even if a stray next_large is set.
+        let (small_col, large_col) = if use_next_prices {
+            (
+                "COALESCE(next_price_small_cents, price_small_cents)",
+                "CASE WHEN price_large_cents IS NULL THEN NULL \
+                      ELSE COALESCE(next_price_large_cents, price_large_cents) END",
+            )
+        } else {
+            ("price_small_cents", "price_large_cents")
+        };
+        let sql = format!(
+            "SELECT id, category_id, menu_number, name, description,
+                    {small_col}, {large_col}, size_small_label, size_large_label,
+                    allergen_codes, additive_codes, is_spicy, is_available, sort_order
+             FROM menu_items
+             WHERE is_listed = 1 AND is_available = 1
+             ORDER BY sort_order,
+                      CAST(COALESCE(menu_number, '') AS INTEGER),
+                      menu_number"
+        );
+        sqlx::query_as(&sql).fetch_all(db).await?
+    };
 
     let mut categories: Vec<PdfCategory> = cat_rows
         .into_iter()
@@ -805,8 +822,9 @@ pub async fn build_menu_pdf(
     format: &str,
     show_ingredients: bool,
     shared: Option<&SqlitePool>,
+    use_next_prices: bool,
 ) -> anyhow::Result<Vec<u8>> {
-    let payload = load_menu_payload(db, site_url, shop_branding).await?;
+    let payload = load_menu_payload(db, site_url, shop_branding, use_next_prices).await?;
     let overrides = load_pdf_overrides(db, uploads_dir, shared).await;
     let format = format.to_string();
     tokio::task::spawn_blocking(move || {
@@ -854,6 +872,8 @@ pub async fn write_menu_pdf_cache(
             "trifold",
             show_ingredients,
             shared,
+            // The offline-fallback cache is always the LIVE menu.
+            false,
         )
         .await?;
         let dst = std::path::Path::new(site_root).join(&file);
