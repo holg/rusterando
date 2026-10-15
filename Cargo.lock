@@ -772,38 +772,15 @@ dependencies = [
 
 [[package]]
 name = "comemo"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df6916408a724339aa77b18214233355f3eb04c42eb895e5f8909215bd8a7a91"
-dependencies = [
- "comemo-macros 0.4.0",
- "once_cell",
- "parking_lot",
- "siphasher",
-]
-
-[[package]]
-name = "comemo"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c963350b2b08aa4b725d7802593245380ab53dacfedcaa971385fc33306c0d4"
 dependencies = [
- "comemo-macros 0.5.1",
+ "comemo-macros",
  "parking_lot",
  "rustc-hash",
  "siphasher",
  "slab",
-]
-
-[[package]]
-name = "comemo-macros"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8936e42f9b4f5bdfaf23700609ac1f11cb03ad4c1ec128a4ee4fd0903e228db"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.118",
 ]
 
 [[package]]
@@ -1345,27 +1322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dirs"
-version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3e8aa94d75141228480295a7d0e7feb620b1a5ad9f12bc40be62411e38cce4e"
-dependencies = [
- "dirs-sys",
-]
-
-[[package]]
-name = "dirs-sys"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
-dependencies = [
- "libc",
- "option-ext",
- "redox_users",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "displaydoc"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1471,16 +1427,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "env_proxy"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a5019be18538406a43b5419a5501461f0c8b49ea7dfda0cfc32f4e51fc44be1"
-dependencies = [
- "log",
- "url",
 ]
 
 [[package]]
@@ -1614,16 +1560,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
-]
-
-[[package]]
-name = "filetime"
-version = "0.2.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
-dependencies = [
- "cfg-if",
- "libc",
 ]
 
 [[package]]
@@ -3034,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "kitchen-protocol"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3064,7 +3000,7 @@ checksum = "a0ddfec86fec13d068075e14f22a7e217c281f3ed69ddcb427bf3f5d504fd674"
 dependencies = [
  "base64 0.22.1",
  "bumpalo",
- "comemo 0.5.1",
+ "comemo",
  "flate2",
  "float-cmp 0.10.0",
  "gif 0.13.3",
@@ -3595,6 +3531,7 @@ name = "menu-import"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "dotenvy",
  "rusterando-shared",
@@ -3604,6 +3541,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "ureq",
 ]
 
 [[package]]
@@ -3881,12 +3819,6 @@ dependencies = [
  "pkg-config",
  "vcpkg",
 ]
-
-[[package]]
-name = "option-ext"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "or_poisoned"
@@ -4686,17 +4618,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "redox_users"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
-dependencies = [
- "getrandom 0.2.17",
- "libredox",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "regalloc2"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4934,7 +4855,9 @@ dependencies = [
  "lettre",
  "log",
  "qrcode",
+ "reactive_graph",
  "reqwest",
+ "rusterando-geo",
  "rusterando-shared",
  "rusterando-wasm-split",
  "send_wrapper",
@@ -4948,6 +4871,25 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "rusterando-geo"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dotenvy",
+ "encoding_rs",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "strsim",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+ "zip",
 ]
 
 [[package]]
@@ -4993,9 +4935,10 @@ dependencies = [
  "async-stripe",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
- "comemo 0.4.0",
+ "comemo",
  "dotenvy",
  "ecow",
  "futures",
@@ -5012,6 +4955,7 @@ dependencies = [
  "qrcode",
  "reqwest",
  "rusterando-frontend",
+ "rusterando-geo",
  "rusterando-shared",
  "serde",
  "serde_json",
@@ -5026,9 +4970,9 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "typst",
- "typst-kit",
  "typst-pdf",
  "ureq",
+ "uuid 1.23.3",
  "zip",
 ]
 
@@ -6179,17 +6123,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tar"
-version = "0.4.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
-dependencies = [
- "filetime",
- "libc",
- "xattr",
-]
-
-[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6768,7 +6701,7 @@ version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f6511ee598476f4f322b4d13891083d96dbacb8f9c2b908604c7094ba390653"
 dependencies = [
- "comemo 0.5.1",
+ "comemo",
  "ecow",
  "rustc-hash",
  "typst-eval",
@@ -6794,7 +6727,7 @@ version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "687757487dfc0c1e941344d5024cf7a28364e70c3e304faad89ac65597f62526"
 dependencies = [
- "comemo 0.5.1",
+ "comemo",
  "ecow",
  "indexmap",
  "rustc-hash",
@@ -6815,7 +6748,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e29f8da4f964d4c90739c3c1e0288b0ba1bccc3cc50623a6d558300b86ca8aad"
 dependencies = [
  "bumpalo",
- "comemo 0.5.1",
+ "comemo",
  "ecow",
  "palette",
  "rustc-hash",
@@ -6830,32 +6763,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "typst-kit"
-version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31476ec753e080ffdd543a0e74b6d319355449ff3eca3f216634f31cfd09a92a"
-dependencies = [
- "dirs",
- "ecow",
- "env_proxy",
- "fastrand 2.4.1",
- "flate2",
- "fontdb",
- "native-tls",
- "once_cell",
- "openssl",
- "serde",
- "serde_json",
- "tar",
- "typst-assets",
- "typst-library",
- "typst-syntax",
- "typst-timing",
- "typst-utils",
- "ureq",
-]
-
-[[package]]
 name = "typst-layout"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6864,7 +6771,7 @@ dependencies = [
  "az",
  "bumpalo",
  "codex",
- "comemo 0.5.1",
+ "comemo",
  "ecow",
  "either",
  "hypher",
@@ -6903,7 +6810,7 @@ dependencies = [
  "chinese-number",
  "ciborium",
  "codex",
- "comemo 0.5.1",
+ "comemo",
  "csv",
  "ecow",
  "flate2",
@@ -6977,7 +6884,7 @@ checksum = "37c8a4630754767cd10d48e8b8186e7dc784631a30a3a93521edf7d77aebd0c0"
 dependencies = [
  "az",
  "bytemuck",
- "comemo 0.5.1",
+ "comemo",
  "ecow",
  "image",
  "indexmap",
@@ -7003,7 +6910,7 @@ checksum = "f7ffe964757fb93d2e98978aa2a74ee85b0f94c8643e8f3550737258b58f39d8"
 dependencies = [
  "arrayvec",
  "bumpalo",
- "comemo 0.5.1",
+ "comemo",
  "ecow",
  "regex",
  "typst-library",
@@ -7020,7 +6927,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e46b811837ade1f0243ef0d8bf3fb06d166443090eac22c28643f374c2ccdc9d"
 dependencies = [
  "base64 0.22.1",
- "comemo 0.5.1",
+ "comemo",
  "ecow",
  "flate2",
  "hayro",
@@ -7251,12 +7158,9 @@ dependencies = [
  "base64 0.22.1",
  "flate2",
  "log",
- "native-tls",
  "once_cell",
  "rustls 0.23.40",
  "rustls-pki-types",
- "serde",
- "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]
@@ -8201,16 +8105,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "xattr"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
-dependencies = [
- "libc",
- "rustix 1.1.4",
-]
 
 [[package]]
 name = "xmlparser"

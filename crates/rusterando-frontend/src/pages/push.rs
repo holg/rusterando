@@ -63,6 +63,12 @@ pub trait BroadcastSink: Send + Sync {
     /// when a new cash/Abholung order lands. Sync from the caller's POV;
     /// the server-side impl spawns the actual HTTP/2 calls.
     fn notify_roles(&self, roles: &[&str], title: &str, body: &str, deep_link: Option<&str>);
+
+    /// Same fan-out for pushes someone has to act on now (new order, kitchen
+    /// alarm, delivery ready): the kitchen gong as sound (bundled in the
+    /// staff app; older app builds fall back to the default sound) and
+    /// time-sensitive, so it breaks through Focus.
+    fn notify_roles_urgent(&self, roles: &[&str], title: &str, body: &str, deep_link: Option<&str>);
 }
 
 /// Convenience alias for the context-injected handle. `None` when the
@@ -108,6 +114,10 @@ pub trait KitchenSink: Send + Sync {
         prepaid: bool,
         theme: String,
     ) -> anyhow::Result<()>;
+
+    /// Alert the connected kitchen displays now (flash + gong) with a
+    /// message. Returns how many displays it reached.
+    async fn display_alert(&self, title: String, text: String) -> usize;
 }
 
 #[cfg(feature = "ssr")]

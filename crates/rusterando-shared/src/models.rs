@@ -412,7 +412,19 @@ pub enum LiveKind {
     /// a snooze expiring). Broadcast to all clients via `/api/live/shop`;
     /// `order_id` is empty/ignored for these. `level` drives the banner
     /// colour (green/amber/red); `reason` is the German caption.
-    ShopStatus { level: ShopLevel, reason: String },
+    /// `delivery_paused` rides along on the SAME event so a customer with a
+    /// page already open learns within a second that delivery stopped —
+    /// before they fill a cart and reach a checkout that refuses them.
+    /// `#[serde(default)]` keeps a page loaded by an older build parsing the
+    /// event instead of dropping the whole status update mid-deploy.
+    ShopStatus {
+        level: ShopLevel,
+        reason: String,
+        #[serde(default)]
+        delivery_paused: bool,
+        #[serde(default)]
+        delivery_reason: String,
+    },
     /// The delivery driver's live position for THIS order, pushed periodically
     /// from the driver's phone (Geolocation API) while a delivery is active.
     /// Order-keyed → only the matching customer's `/api/live/orders/{id}`

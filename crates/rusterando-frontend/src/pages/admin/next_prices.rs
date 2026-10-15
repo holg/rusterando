@@ -62,6 +62,12 @@ pub struct ActivationInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NextPricesView {
     pub categories: Vec<NextPriceCategory>,
+    /// What comparable shops on this platform charge per category. Pure
+    /// decision support: item names never match across shops, but category
+    /// names do, so this answers "is 7,50 € for a pizza in line?" with
+    /// evidence instead of a guess. Empty in single-tenant deployments.
+    #[serde(default)]
+    pub benchmarks: Vec<crate::pages::sysadmin::CategoryBenchmark>,
     pub extras: Vec<NextPriceExtra>,
     /// Items with at least one staged price.
     pub pending_items: i64,
@@ -164,6 +170,9 @@ pub async fn list_next_prices() -> Result<NextPricesView, ServerFnError> {
 
     Ok(NextPricesView {
         categories,
+        // Loaded separately by the page (see `price_benchmarks`) so a slow
+        // sibling tenant can't stall the price list.
+        benchmarks: Vec::new(),
         extras,
         pending_items,
         pending_extras,
@@ -176,6 +185,31 @@ pub async fn list_next_prices() -> Result<NextPricesView, ServerFnError> {
 }
 
 /// Stage (or clear, with both `None`) the new prices of one menu item.
+/// Benchmarks for the categories this shop actually has. Split from
+/// `list_next_prices` so a slow/absent sibling tenant can never delay or
+/// break the price list itself.
+#[server(name = PriceBenchmarks, prefix = "/api", endpoint = "price_benchmarks")]
+pub async fn price_benchmarks() -> Result<Vec<crate::pages::sysadmin::CategoryBenchmark>, ServerFnError>
+{
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+    // Multi-tenant only: without the handle there are no sibling shops.
+    let Some(ops) = use_context::<crate::pages::sysadmin::SysAdminHandle>().flatten() else {
+        return Ok(Vec::new());
+    };
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    let cats: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM menu_categories WHERE is_active = 1 ORDER BY name")
+            .fetch_all(&db)
+            .await
+            .unwrap_or_default();
+    let me = use_context::<crate::pages::settings::ResolvedTenant>()
+        .map(|t| t.slug)
+        .unwrap_or_default();
+    Ok(ops.price_benchmarks(&me, &cats).await)
+}
+
 #[server(name = SetNextItemPrice, prefix = "/api", endpoint = "set_next_item_price")]
 pub async fn set_next_item_price(
     id: String,
@@ -624,6 +658,14 @@ pub fn NextPricesAdminPage() -> impl IntoView {
     // against the per-tenant pool, not re-fetched on hydration. Per-row
     // edits deliberately do NOT bump this (see `ItemRow`) so typing in one
     // field never re-renders the whole table under the cursor.
+    // Benchmarks load in their own (non-blocking) resource: they query every
+    // sibling tenant's DB, so a slow one must never hold up the price list.
+    // `unwrap_or_default` means "no comparison shown", never an error page.
+    let bench = Resource::new(
+        || (),
+        |_| async move { price_benchmarks().await.unwrap_or_default() },
+    );
+
     let data = Resource::new_blocking(
         move || {
             (
@@ -764,8 +806,42 @@ pub fn NextPricesAdminPage() -> impl IntoView {
                                     </div>
                                 </div>
 
-                                {v.categories.into_iter().map(|cat| view! {
+                                {v.categories.into_iter().map(|cat| {
+                                    // Benchmark line: what comparable shops
+                                    // charge in this category. Shown next to
+                                    // the heading so the admin sees it while
+                                    // typing the new price, not on a separate
+                                    // page they'd have to go look up.
+                                    let marks: Vec<_> = bench
+                                        .get()
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .filter(|b| b.category == cat.name)
+                                        .collect();
+                                    let bench_line = (!marks.is_empty()).then(|| {
+                                        let parts: Vec<String> = marks
+                                            .iter()
+                                            .map(|b| {
+                                                format!(
+                                                    "{}: {}–{} ⌀{} (n={})",
+                                                    b.shop,
+                                                    format_eur(b.min_cents),
+                                                    format_eur(b.max_cents),
+                                                    format_eur(b.median_cents),
+                                                    b.item_count
+                                                )
+                                            })
+                                            .collect();
+                                        view! {
+                                            <p class="bench-line">
+                                                <strong>"Vergleich: "</strong>
+                                                {parts.join(" · ")}
+                                            </p>
+                                        }
+                                    });
+                                    view! {
                                     <h2>{cat.name}</h2>
+                                    {bench_line}
                                     <table class="next-prices-table">
                                         <thead>
                                             <tr>
@@ -782,7 +858,7 @@ pub fn NextPricesAdminPage() -> impl IntoView {
                                             {cat.items.into_iter().map(|it| view! { <ItemRow it/> }).collect_view()}
                                         </tbody>
                                     </table>
-                                }).collect_view()}
+                                }}).collect_view()}
 
                                 <h2>"Extras (pro Stück)"</h2>
                                 <table class="next-prices-table">

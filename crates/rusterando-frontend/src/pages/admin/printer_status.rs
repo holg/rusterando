@@ -115,6 +115,59 @@ pub async fn list_pi_status() -> Result<Vec<PiStatus>, ServerFnError> {
 
 /// Arm (or disarm) the in-band self-update for a shop's Pi. When armed,
 /// the server offers the current target binary on the Pi's next Hello.
+/// "Alarm auslösen": the kitchen display's new-order alert (3× white flash +
+/// gong) right now, with an optional message on the flash — and the same
+/// message as an urgent push (gong) to the devices logged in as Küche, so a
+/// kitchen iPad gets it even with the display closed. Admin-only. Returns
+/// the status line for the page.
+#[server(name = KitchenDisplayAlert, prefix = "/api", endpoint = "kitchen_display_alert")]
+pub async fn kitchen_display_alert(message: String) -> Result<String, ServerFnError> {
+    crate::pages::admin::require_admin().await?;
+    #[cfg(feature = "ssr")]
+    {
+        let kitchen = use_context::<crate::pages::push::KitchenSinkHandle>().flatten();
+        let push = use_context::<crate::pages::push::BroadcastSinkHandle>().flatten();
+        if kitchen.is_none() && push.is_none() {
+            return Err(ServerFnError::new(
+                "Weder Küchenkanal (KITCHEN_LISTEN_ADDR) noch Push konfiguriert.",
+            ));
+        }
+        let text: String = message.trim().chars().take(60).collect();
+        let (title, text) = if text.is_empty() {
+            ("TESTALARM".to_string(), "Gruß aus dem Admin".to_string())
+        } else {
+            ("NACHRICHT".to_string(), text)
+        };
+        if let Some(push) = &push {
+            push.notify_roles_urgent(
+                &["kitchen"],
+                &format!("Küche: {title}"),
+                &text,
+                Some("/kitchen"),
+            );
+        }
+        let reached = match &kitchen {
+            Some(k) => k.display_alert(title, text).await,
+            None => 0,
+        };
+        let displays = if reached == 0 {
+            "Kein Küchen-Display verbunden".to_string()
+        } else {
+            format!("Gesendet an {reached} Display(s)")
+        };
+        Ok(if push.is_some() {
+            format!("{displays} · Push an die Küchen-Geräte")
+        } else {
+            displays
+        })
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        let _ = message;
+        Ok(String::new())
+    }
+}
+
 #[server(name = SetPiUpdateArmed, prefix = "/api", endpoint = "set_pi_update_armed")]
 pub async fn set_pi_update_armed(shop_slug: String, armed: bool) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
@@ -134,6 +187,8 @@ pub async fn set_pi_update_armed(shop_slug: String, armed: bool) -> Result<(), S
 #[component]
 pub fn PrinterStatusPage() -> impl IntoView {
     let armer = ServerAction::<SetPiUpdateArmed>::new();
+    let alerter = ServerAction::<KitchenDisplayAlert>::new();
+    let alert_text = RwSignal::new(String::new());
     let rows = Resource::new(
         move || armer.version().get(),
         |_| async move { list_pi_status().await },
@@ -148,6 +203,29 @@ pub fn PrinterStatusPage() -> impl IntoView {
                     "Server-Zielversion — so bleibt ein Versions-Mismatch sichtbar. "
                     "Updates laufen over-the-air über den bestehenden 9001-Kanal."
                 </p>
+
+                <div class="kds-alert">
+                    <h2>"Küchen-Display"</h2>
+                    <p class="hint">
+                        "Dasselbe Display im Browser, live und bedienbar: "
+                        <a href="/kitchen/display" target="_blank" rel="noopener">"Küchen-Display öffnen"</a>
+                    </p>
+                    <p class="hint">
+                        "Löst den Neue-Bestellung-Alarm auf dem Küchen-Display aus: "
+                        "3× weißes Blinken + Gong. Optional mit einer Nachricht auf dem Blinken. "
+                        "Geht zusätzlich als Push (Gong) an alle Geräte, die als Küche angemeldet sind."
+                    </p>
+                    <input type="text" maxlength="60" placeholder="Nachricht (optional)"
+                        prop:value=move || alert_text.get()
+                        on:input=move |ev| alert_text.set(event_target_value(&ev))/>
+                    <button class="btn primary" on:click=move |_| {
+                        alerter.dispatch(KitchenDisplayAlert { message: alert_text.get() });
+                    }>"Alarm auslösen"</button>
+                    {move || alerter.value().get().map(|r| match r {
+                        Ok(line) => view! { <span class="ok">{format!(" {line}.")}</span> }.into_any(),
+                        Err(e) => view! { <span class="error">{format!(" {e}")}</span> }.into_any(),
+                    })}
+                </div>
 
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
                     {move || rows.get().map(|res| match res {

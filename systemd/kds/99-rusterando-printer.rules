@@ -1,0 +1,6 @@
+# ESC/POS receipt printers on the kitchen display board. The OpenSTLinux
+# kernel has no usblp (no /dev/usb/lp0), so rusterando-printer writes to the
+# printer's USB endpoint via /dev/bus/usb/BBB/DDD (PRINTER_PATH=usb). Give
+# group lp (the unit's SupplementaryGroups) write access to any device with
+# a USB printer-class (07) interface.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ENV{ID_USB_INTERFACES}=="*:0701*", MODE="0660", GROUP="lp"

@@ -245,6 +245,57 @@ Visit `https://yourshop.example.com/admin/login`, sign in with
 - `/admin/home` — homepage hero / offers / gallery
 - `/admin/settings` — theme + free-delivery threshold
 
+## 1a. Local address lookup (optional, NRW)
+
+Instead of asking OpenStreetMap's Nominatim for every delivery address,
+a shop in North Rhine-Westphalia can run the address check from a local
+index built from the official cadastre (Gebäudereferenzen NRW, licence
+dl-de/zero). The checkout then offers street and house-number
+suggestions, stores exact coordinates on the order, and no customer
+address leaves the server.
+
+1. Add to the shop's `.env`:
+
+   ```
+   GEO_BACKEND=cadastre_nrw
+   GEO_AGS=05558024                              # municipality key(s)
+   GEO_POSTCODE_MAP=05558024:59348:Lüdinghausen  # AGS:PLZ:City
+   GEO_DATA_DIR=/var/www/<shop>/data/geo
+   ```
+
+2. Get the data — no console needed. In `/admin/zones` → "NRW-Daten"
+   click **NRW-Daten herunterladen & aufbereiten** once per server
+   (~100 MB download, then one file per municipality; a minute or two,
+   progress shown on the page). Then, in "Standort des Shops", enter the
+   shop's street + "PLZ Ort", a delivery radius, and click **Alles aus
+   Adresse einrichten**: municipality, coordinates, neighbouring
+   municipalities within the radius, a radius zone (when no zone has
+   geometry yet) and the import are all derived from the address.
+   `GEO_DATA_DIR` must be writable by the service user (the deploy's
+   permission step takes care of that).
+
+   The same is available from the shell (the deploy uploads `geo-import`
+   next to the server binary):
+
+   ```bash
+   cd /var/www/<shop>/bin && ./geo-import import --env-file .env --download
+   ```
+
+   (Several shops on one server: run `./geo-import split --download
+   --out-dir <dir>` once, then import each shop from its municipality
+   files with `--source <dir>/<AGS>.txt …` — takes under a second.)
+
+   The summary must show rows kept > 0 and a centroid inside your
+   area; the tool refuses to write otherwise.
+
+3. In `/admin/zones` → "Adressprüfung": click **Index neu laden**, give
+   your zones a geometry (radius or GeoJSON polygon) or assign streets
+   to zones, check a few addresses with the preview, then **Lokal
+   verwenden**. **Online verwenden** switches back at any time.
+
+Re-run the import when NRW publishes a new export (about twice a
+year). Details and the zone precedence rules: `docs/geo.md`.
+
 ## 2. Kitchen printer install (optional)
 
 Skip this section if you don't have an ESC/POS receipt printer.

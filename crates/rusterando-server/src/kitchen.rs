@@ -32,7 +32,9 @@ use futures::{SinkExt, StreamExt};
 use kitchen_protocol::{ClientMessage, KitchenEvent, SeqId, ServerMessage, FRAME_MAX_BYTES};
 use sqlx::{Row, SqlitePool};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use std::sync::Arc;
+
+use tokio::sync::{broadcast, mpsc, Notify};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing::{debug, error, info, warn};
 
@@ -42,12 +44,42 @@ const BROADCAST_CAPACITY: usize = 256;
 pub struct KitchenChannel {
     tx: broadcast::Sender<ServerMessage>,
     db: SqlitePool,
+    /// Live order bus, for display terminals (see `kitchen_board`): status
+    /// changes from the web boards trigger a board refresh, and a terminal's
+    /// own moves are published like any other status change. `None` = board
+    /// still works, just without live pushes.
+    live: Option<rusterando_frontend::live::LiveHub>,
+    /// The process's orders-paused cache, so the terminal's open/close
+    /// buttons update it exactly like /admin/hours does.
+    orders_paused: Option<rusterando_frontend::pages::settings::OrdersPausedHandle>,
+    /// Admin alerts for the connected displays: (title, text).
+    alerts: broadcast::Sender<(String, String)>,
 }
 
 impl KitchenChannel {
     pub fn new(db: SqlitePool) -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
-        Self { tx, db }
+        let (alerts, _) = broadcast::channel(8);
+        Self {
+            tx,
+            db,
+            live: None,
+            orders_paused: None,
+            alerts,
+        }
+    }
+
+    pub fn with_live(mut self, live: rusterando_frontend::live::LiveHub) -> Self {
+        self.live = Some(live);
+        self
+    }
+
+    pub fn with_orders_paused(
+        mut self,
+        handle: rusterando_frontend::pages::settings::OrdersPausedHandle,
+    ) -> Self {
+        self.orders_paused = Some(handle);
+        self
     }
 
     /// Persist and broadcast a kitchen event. The returned SeqId is
@@ -79,8 +111,71 @@ impl KitchenChannel {
         Ok(seq_id)
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<ServerMessage> {
+    /// Live kitchen events (new prints = new / paid orders). Used by the
+    /// display feed and by the staff `/api/live/board` stream.
+    pub fn subscribe(&self) -> broadcast::Receiver<ServerMessage> {
         self.tx.subscribe()
+    }
+
+    /// The board feed for a browser mirror of the kitchen display
+    /// (`/api/kds/feed`): exactly what a subscribed terminal gets — board
+    /// snapshots, shop panel, admin alerts. Runs until the receiver is
+    /// dropped.
+    pub fn board_feed(&self) -> mpsc::Receiver<ServerMessage> {
+        let (tx, rx) = mpsc::channel(8);
+        tokio::spawn(crate::kitchen_board::run_feed(
+            self.db.clone(),
+            self.live.clone(),
+            self.subscribe(),
+            self.alerts.subscribe(),
+            // Nobody pokes a browser feed: its taps arrive as HTTP requests
+            // (below), and their effects reach every feed through the
+            // LiveHub (status change, shop status).
+            Arc::new(Notify::new()),
+            Default::default(),
+            tx,
+        ));
+        rx
+    }
+
+    /// A browser mirror's tap (`/api/kds/action`), with the terminal's
+    /// rules. `Err` is the user-facing reason, shown like the terminal's
+    /// notices; a stale move (the order moved on elsewhere) is not an
+    /// error — the feed shows the real state.
+    pub async fn board_action(&self, msg: ClientMessage) -> Result<(), String> {
+        match msg {
+            ClientMessage::BoardAdvance { order_id, from, to } => {
+                match crate::kitchen_board::advance(&self.db, self.live.as_ref(), &order_id, from, to).await {
+                    Ok(true) => {
+                        info!(%order_id, ?from, ?to, "board move applied (browser)");
+                        Ok(())
+                    }
+                    Ok(false) => {
+                        info!(%order_id, ?from, ?to, "board move stale; no-op (browser)");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        warn!(%order_id, error = %e, "board move rejected (browser)");
+                        Err("Nicht möglich".to_string())
+                    }
+                }
+            }
+            ClientMessage::Shop(action) => {
+                let result = crate::kitchen_board::shop_action(
+                    &self.db,
+                    self.live.as_ref(),
+                    self.orders_paused.as_ref(),
+                    action.clone(),
+                )
+                .await;
+                match &result {
+                    Ok(()) => info!(?action, "shop action applied (browser)"),
+                    Err(e) => info!(?action, reason = %e, "shop action refused (browser)"),
+                }
+                result
+            }
+            _ => Err("Keine Display-Aktion".to_string()),
+        }
     }
 
     async fn unacked_since(&self, after: SeqId) -> anyhow::Result<Vec<ServerMessage>> {
@@ -265,10 +360,19 @@ async fn handle_client(
 
     let (mut sink, mut input) = framed.split();
 
-    // Reader: handle client → server messages (acks, heartbeats)
+    // Display terminals (kitchen-protocol 2.1+): board snapshots reach the
+    // writer through `board_rx`. The reader owns the sender and starts the
+    // feed on `BoardSubscribe`; a plain printer never subscribes, so for it
+    // `board_rx` only serves to notice the reader ending (client gone).
+    let (board_tx, mut board_rx) = mpsc::channel::<ServerMessage>(8);
+    let board_poke = Arc::new(Notify::new());
+    let shop_notice: crate::kitchen_board::ShopNotice = Default::default();
+
+    // Reader: handle client → server messages (acks, heartbeats, board)
     let chan_for_acks = channel.clone();
     let shop_for_hb = shop_slug.clone();
     let ack_task = tokio::spawn(async move {
+        let mut board_feed: Option<tokio::task::JoinHandle<()>> = None;
         while let Some(frame) = input.next().await {
             let bytes = match frame {
                 Ok(b) => b,
@@ -323,15 +427,97 @@ async fn handle_client(
                 ClientMessage::FetchArtifact { .. } | ClientMessage::UpdateResult { .. } => {
                     debug!("update-handshake message outside handshake; ignoring");
                 }
+                ClientMessage::BoardSubscribe => {
+                    if board_feed.is_none() {
+                        info!(shop = %shop_for_hb, "kitchen display subscribed to the board");
+                        board_feed = Some(tokio::spawn(crate::kitchen_board::run_feed(
+                            chan_for_acks.db.clone(),
+                            chan_for_acks.live.clone(),
+                            chan_for_acks.subscribe(),
+                            chan_for_acks.alerts.subscribe(),
+                            board_poke.clone(),
+                            shop_notice.clone(),
+                            board_tx.clone(),
+                        )));
+                    }
+                }
+                ClientMessage::BoardAdvance { order_id, from, to } => {
+                    if board_feed.is_none() {
+                        warn!(%order_id, "BoardAdvance without BoardSubscribe; ignoring");
+                        continue;
+                    }
+                    match crate::kitchen_board::advance(
+                        &chan_for_acks.db,
+                        chan_for_acks.live.as_ref(),
+                        &order_id,
+                        from,
+                        to,
+                    )
+                    .await
+                    {
+                        Ok(true) => info!(%order_id, ?from, ?to, "board move applied"),
+                        Ok(false) => info!(%order_id, ?from, ?to, "board move stale; no-op"),
+                        Err(e) => warn!(%order_id, error = %e, "board move rejected"),
+                    }
+                    // The fresh snapshot is the reply, success or not.
+                    board_poke.notify_one();
+                }
+                ClientMessage::Shop(action) => {
+                    if board_feed.is_none() {
+                        warn!(?action, "Shop action without BoardSubscribe; ignoring");
+                        continue;
+                    }
+                    let result = crate::kitchen_board::shop_action(
+                        &chan_for_acks.db,
+                        chan_for_acks.live.as_ref(),
+                        chan_for_acks.orders_paused.as_ref(),
+                        action.clone(),
+                    )
+                    .await;
+                    match &result {
+                        Ok(()) => info!(?action, "shop action applied"),
+                        Err(e) => info!(?action, reason = %e, "shop action refused"),
+                    }
+                    // The feed answers with a fresh panel carrying the result.
+                    if let Ok(mut n) = shop_notice.lock() {
+                        *n = Some(result.err().unwrap_or_default());
+                    }
+                    board_poke.notify_one();
+                }
             }
+        }
+        if let Some(feed) = board_feed {
+            feed.abort();
         }
         debug!("ack reader ended");
     });
 
-    // Writer: live broadcast → client, deduped against already-replayed.
+    // Writer: live broadcast → client, deduped against already-replayed;
+    // plus board snapshots for a subscribed display.
     let mut send_result: anyhow::Result<()> = Ok(());
     loop {
-        match rx.recv().await {
+        let received = tokio::select! {
+            r = rx.recv() => r,
+            board = board_rx.recv() => {
+                // None: the reader and any feed are gone — the client hung
+                // up. End the session now rather than at the next print.
+                let Some(msg) = board else { break };
+                let body = match postcard::to_allocvec(&msg) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        error!(error = %e, "encode board snapshot");
+                        continue;
+                    }
+                };
+                let frame = kitchen_protocol::encode_versioned(&body);
+                if let Err(e) = sink.send(Bytes::from(frame)).await {
+                    send_result = Err(e).context("send board snapshot");
+                    break;
+                }
+                continue;
+            }
+        };
+        match received {
             Ok(msg) => {
                 if msg.seq_id <= max_replayed {
                     debug!(seq_id = %msg.seq_id, "skipping live event already in replay");
@@ -635,6 +821,11 @@ impl rusterando_frontend::pages::push::KitchenSink for KitchenChannel {
         self.broadcast(KitchenEvent::Print(program)).await?;
         Ok(())
     }
+
+    async fn display_alert(&self, title: String, text: String) -> usize {
+        // Err = no display subscribed right now.
+        self.alerts.send((title, text)).unwrap_or(0)
+    }
 }
 
 /// A representative sample `OrderForKitchen` for the Bon-Editor test print.
@@ -763,7 +954,20 @@ async fn resolve_brand_and_url(db: &SqlitePool) -> (String, String) {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_default();
-    let public_url_base = std::env::var("PUBLIC_URL").unwrap_or_default();
+    // The tenant's own PUBLIC_URL, stored in app_settings by the importer (and
+    // editable in the admin). Falling back to the PROCESS env printed the apex
+    // showroom's address on every tenant's receipt QR, the same leak the menu
+    // PDF had.
+    let tenant_url: Option<String> =
+        sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'shop_public_url'")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    let public_url_base = tenant_url
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| std::env::var("PUBLIC_URL").unwrap_or_default());
     (shop_name, public_url_base)
 }
 

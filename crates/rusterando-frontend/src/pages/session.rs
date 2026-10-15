@@ -4,6 +4,8 @@
 //!   - Admin   → ADMIN_PASSWORD,   /admin/login   (full management UI)
 //!   - Kitchen → KITCHEN_PASSWORD, /kitchen/login (cook view only)
 //!   - Driver  → DRIVER_PASSWORD,  /driver/login  (delivery view only)
+//!   - SysAdmin → SYS_ADMIN_PASSWORD, /sysadmin/login (platform operator:
+//!     tenant import/provisioning on the apex host only — see pages/sysadmin)
 //!
 //! Sessions are cookie-bound. The new cookie is `dp_session` whose value is
 //! the role string ("admin" / "kitchen" / "driver"). The existing
@@ -18,6 +20,10 @@ pub enum Role {
     Admin,
     Kitchen,
     Driver,
+    /// Platform operator on the apex host (`rusterando.de/sysadmin`). NOT a
+    /// superset of Admin: `require_admin` / `require_any` don't accept it,
+    /// so the operator cookie never grants shop-admin access anywhere.
+    SysAdmin,
 }
 
 impl Role {
@@ -26,6 +32,7 @@ impl Role {
             Role::Admin => "admin",
             Role::Kitchen => "kitchen",
             Role::Driver => "driver",
+            Role::SysAdmin => "sysadmin",
         }
     }
 
@@ -34,6 +41,7 @@ impl Role {
             Role::Admin => "Admin",
             Role::Kitchen => "Küche",
             Role::Driver => "Fahrer",
+            Role::SysAdmin => "System",
         }
     }
 
@@ -42,6 +50,7 @@ impl Role {
             "admin" => Some(Role::Admin),
             "kitchen" => Some(Role::Kitchen),
             "driver" => Some(Role::Driver),
+            "sysadmin" => Some(Role::SysAdmin),
             _ => None,
         }
     }
@@ -52,6 +61,7 @@ impl Role {
             Role::Admin => "/admin/login",
             Role::Kitchen => "/kitchen/login",
             Role::Driver => "/driver/login",
+            Role::SysAdmin => "/sysadmin/login",
         }
     }
 
@@ -61,6 +71,7 @@ impl Role {
             Role::Admin => "/admin",
             Role::Kitchen => "/kitchen",
             Role::Driver => "/driver",
+            Role::SysAdmin => "/sysadmin",
         }
     }
 }
@@ -400,6 +411,7 @@ pub fn RoleSwitcher(
                     Role::Admin => "🏪",
                     Role::Kitchen => "👨‍🍳",
                     Role::Driver => "🛵",
+                    Role::SysAdmin => "🛠",
                 })}
                 <span class="role-switcher-others" class:hidden=!is_admin>
                     {others}
@@ -459,6 +471,10 @@ pub mod ssr {
                 .and_then(|t| t.driver_password)
                 .or_else(|| std::env::var("DRIVER_PASSWORD").ok())
                 .or_else(|| Some("fahrer".to_string())),
+            // Process env only — never per tenant, never a default.
+            Role::SysAdmin => std::env::var("SYS_ADMIN_PASSWORD")
+                .ok()
+                .filter(|p| !p.trim().is_empty()),
         }
     }
 
@@ -515,6 +531,12 @@ pub mod ssr {
     /// the legacy `admin_session=ok` cookie as well.
     pub async fn current_role() -> Option<Role> {
         let cookies: Cookies = extract().await.ok()?;
+        role_from_cookies(&cookies)
+    }
+
+    /// [`current_role`] for plain axum handlers (the staff SSE stream),
+    /// which have the request's `Cookies` but no leptos context.
+    pub fn role_from_cookies(cookies: &Cookies) -> Option<Role> {
         if let Some(c) = cookies.get(SESSION_COOKIE) {
             if let Some(r) = Role::parse(c.value()) {
                 return Some(r);

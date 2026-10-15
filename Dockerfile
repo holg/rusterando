@@ -3,8 +3,6 @@ FROM rust:latest AS builder
 RUN rustup target add wasm32-unknown-unknown
 RUN cargo install cargo-leptos
 
-# Install tailwindcss CLI
-RUN npm install -g tailwindcss@3 || true
 
 WORKDIR /app
 COPY . .

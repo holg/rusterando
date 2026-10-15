@@ -385,6 +385,8 @@ pub fn App() -> impl IntoView {
                     <Route path=(StaticSegment("kitchen"), StaticSegment("login")) view=KitchenLoginPage/>
                     <Route path=StaticSegment("driver") view=DriverBoardPage/>
                     <Route path=(StaticSegment("driver"), StaticSegment("login")) view=DriverLoginPage/>
+                    <Route path=StaticSegment("sysadmin") view=crate::pages::sysadmin::SysAdminPage/>
+                    <Route path=(StaticSegment("sysadmin"), StaticSegment("login")) view=crate::pages::sysadmin::SysAdminLoginPage/>
                     <Route path=StaticSegment("datenschutz") view=DatenschutzPage/>
                     <Route path=StaticSegment("impressum") view=ImpressumPage/>
                 </Routes>

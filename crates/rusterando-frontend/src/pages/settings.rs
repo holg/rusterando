@@ -162,6 +162,12 @@ pub struct ResolvedTenant {
     pub slug: String,
     pub env_file: String,
     pub database_url: String,
+    /// The tenant's own `PUBLIC_URL`. Empty on the apex / single-tenant,
+    /// where the process env is authoritative. Anything building a public
+    /// link (QR codes, sitemap, canonical URLs) must prefer this — the
+    /// process value is the APEX's and would point every shop at the
+    /// showroom.
+    pub public_url: String,
 }
 
 /// Boot-time deployment snapshot, provided into server-fn context so the
@@ -402,6 +408,16 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
             "Text darf höchstens 200 Zeichen lang sein.",
         ));
     }
+    if key == "delivery_paused" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
+        return Err(ServerFnError::new(
+            "delivery_paused muss 0 oder 1 sein",
+        ));
+    }
+    if key == "delivery_paused_message" && value.trim().chars().count() > 200 {
+        return Err(ServerFnError::new(
+            "Der Lieferhinweis darf höchstens 200 Zeichen haben",
+        ));
+    }
     if key == "orders_paused" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
         return Err(ServerFnError::new(
             "orders_paused muss '0' / '1' (oder 'true' / 'false') sein.",
@@ -571,19 +587,8 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     // and the next page render immediately see the new state.
     if key == "orders_paused" {
         let on = matches!(value.trim(), "1" | "true");
-        if let Some(h) = use_context::<OrdersPausedHandle>() {
-            h.set(on);
-        }
-        // Turning the indefinite switch OFF also cancels any active
-        // timed snooze, so "Wieder öffnen" fully reopens in one click.
-        if !on {
-            let _ = sqlx::query(
-                "UPDATE app_settings SET value = '', updated_at = CURRENT_TIMESTAMP
-                 WHERE key = 'orders_paused_until'",
-            )
-            .execute(&db)
-            .await;
-        }
+        let handle = use_context::<OrdersPausedHandle>();
+        ssr::apply_orders_paused(&db, handle.as_ref(), on).await;
     }
     Ok(())
 }
@@ -591,6 +596,29 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
 #[cfg(feature = "ssr")]
 pub mod ssr {
     use sqlx::SqlitePool;
+
+    /// Side effects of writing `orders_paused` (after the row is updated):
+    /// flip the runtime handle so the next order attempt and page render see
+    /// it, and — turning it OFF — cancel any timed snooze, so "Wieder öffnen"
+    /// fully reopens in one click. Shared by `update_setting` and the
+    /// kitchen terminal's quick controls (`admin::hours::ssr`).
+    pub async fn apply_orders_paused(
+        db: &SqlitePool,
+        handle: Option<&super::OrdersPausedHandle>,
+        on: bool,
+    ) {
+        if let Some(h) = handle {
+            h.set(on);
+        }
+        if !on {
+            let _ = sqlx::query(
+                "UPDATE app_settings SET value = '', updated_at = CURRENT_TIMESTAMP
+                 WHERE key = 'orders_paused_until'",
+            )
+            .execute(db)
+            .await;
+        }
+    }
 
     /// Read a setting as i64. Returns `None` when the key doesn't
     /// exist or the value can't be parsed — callers decide on a
@@ -728,6 +756,33 @@ pub mod ssr {
     /// Whether online orders are manually paused. Defaults to `false`
     /// (normal operation) on missing rows or invalid values — matches
     /// the migration default.
+    /// "Open, but not delivering" — pickup keeps working. Separate from
+    /// `orders_paused` (which stops ALL online ordering) because the shop is
+    /// genuinely open; conflating the two cost real pickup orders.
+    pub async fn delivery_paused(db: &SqlitePool) -> bool {
+        let raw: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = 'delivery_paused'")
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        matches!(
+            raw.map(|r| r.0).unwrap_or_default().trim(),
+            "1" | "true" | "yes" | "on"
+        )
+    }
+
+    /// Optional customer-facing text for the "nur Abholung" badge.
+    pub async fn delivery_paused_message(db: &SqlitePool) -> String {
+        let raw: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = 'delivery_paused_message'")
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        raw.map(|r| r.0.trim().to_string()).unwrap_or_default()
+    }
+
     pub async fn orders_paused(db: &SqlitePool) -> bool {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT value FROM app_settings WHERE key = 'orders_paused'")

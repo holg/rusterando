@@ -327,6 +327,34 @@ pub fn subscribe_shop_status(
     });
 }
 
+/// Live "is delivery suspended?" updates, from the same `/api/live/shop`
+/// socket as the open/closed state. A customer who already had the page open
+/// when the driver went home sees the badge appear within a second, instead
+/// of discovering it at checkout.
+#[cfg(feature = "hydrate")]
+pub fn subscribe_delivery_pause(on_delivery: WriteSignal<Option<(bool, String)>>) {
+    // Ensures the socket exists (and thus that events reach the signal).
+    ensure_shop_status_singleton();
+    let shared = delivery_pause_signal();
+    Effect::new(move |_| {
+        shared.with(|s| {
+            if let Some(v) = s {
+                on_delivery.set(Some(v.clone()));
+            }
+        });
+    });
+}
+
+/// The delivery-pause singleton signal (created alongside the socket).
+#[cfg(feature = "hydrate")]
+fn delivery_pause_signal() -> RwSignal<Option<(bool, String)>> {
+    use std::cell::OnceCell;
+    thread_local! {
+        static HANDLE: OnceCell<RwSignal<Option<(bool, String)>>> = const { OnceCell::new() };
+    }
+    HANDLE.with(|c| *c.get_or_init(|| RwSignal::new(None)))
+}
+
 /// Lazily-initialised tab-singleton for the `/api/live/shop` EventSource.
 /// Idempotent — calling multiple times (each `subscribe_shop_status`
 /// invocation, hot-reloads, re-renders) is safe:
@@ -351,6 +379,9 @@ fn ensure_shop_status_singleton() -> RwSignal<Option<(rusterando_shared::models:
     }
 
     let sig = SIG.with(|c| *c.get_or_init(|| RwSignal::new(None)));
+    // ONE signal, shared with `subscribe_delivery_pause` — two thread-local
+    // cells would drift apart and the badge would never update.
+    let delivery_sig = delivery_pause_signal();
 
     // `connect` is recursive (the onerror handler schedules a delayed
     // re-call), so wrap it in an Rc<RefCell<Option<Rc<dyn Fn()>>>> to break
@@ -394,9 +425,16 @@ fn ensure_shop_status_singleton() -> RwSignal<Option<(rusterando_shared::models:
                 let Ok(event) = serde_json::from_str::<LiveEvent>(&text) else {
                     return;
                 };
-                if let LiveKind::ShopStatus { level, reason } = event.kind {
+                if let LiveKind::ShopStatus {
+                    level,
+                    reason,
+                    delivery_paused,
+                    delivery_reason,
+                } = event.kind
+                {
                     BACKOFF_MS.with(|b| *b.borrow_mut() = 1_000);
                     sig.set(Some((level, reason)));
+                    delivery_sig.set(Some((delivery_paused, delivery_reason)));
                 }
             });
         es.set_onmessage(Some(on_msg.as_ref().unchecked_ref()));
@@ -441,4 +479,113 @@ fn ensure_shop_status_singleton() -> RwSignal<Option<(rusterando_shared::models:
 pub fn subscribe_shop_status(
     _on_status: WriteSignal<Option<(rusterando_shared::models::ShopLevel, String)>>,
 ) {
+}
+
+/// SSR stub — no EventSource on the server; the initial state comes from the
+/// page's own server-resolved props. (`#[cfg]` applies to the NEXT item only,
+/// so this needs its own gate or it collides with the hydrate version.)
+#[cfg(not(feature = "hydrate"))]
+pub fn subscribe_delivery_pause(_on_delivery: WriteSignal<Option<(bool, String)>>) {}
+
+/// Live refresh for the staff boards (/admin/orders, /kitchen, /driver):
+/// calls `refetch` whenever `/api/live/board` pings "changed" — an order's
+/// status changed (also from the kitchen display), a customer wrote, or a
+/// new order arrived — coalesced to one call per 300 ms burst, and once
+/// after every reconnect (to catch up on what was missed). One EventSource
+/// per tab, reconnecting with the same backoff as `/api/live/shop`. Pages
+/// keep their own polling as a fallback.
+#[cfg(feature = "hydrate")]
+pub fn on_board_change(refetch: impl Fn() + Copy + Send + Sync + 'static) {
+    let changes = ensure_board_singleton();
+    let pending = RwSignal::new(false);
+    Effect::new(move |prev: Option<u64>| {
+        let v = changes.get();
+        if prev.is_some() && !pending.get_untracked() {
+            pending.set(true);
+            leptos::leptos_dom::helpers::set_timeout(
+                move || {
+                    pending.set(false);
+                    refetch();
+                },
+                std::time::Duration::from_millis(300),
+            );
+        }
+        v
+    });
+}
+
+/// SSR stub — no EventSource on the server.
+#[cfg(not(feature = "hydrate"))]
+pub fn on_board_change(_refetch: impl Fn() + Copy + Send + Sync + 'static) {}
+
+/// Tab-singleton EventSource on `/api/live/board`; bumps the returned
+/// counter on every ping and on every (re)open.
+#[cfg(feature = "hydrate")]
+fn ensure_board_singleton() -> RwSignal<u64> {
+    use std::cell::{OnceCell, RefCell};
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    thread_local! {
+        static SIG: OnceCell<RwSignal<u64>> = const { OnceCell::new() };
+        static ES: RefCell<Option<web_sys::EventSource>> = const { RefCell::new(None) };
+        static BACKOFF_MS: RefCell<u32> = const { RefCell::new(1_000) };
+    }
+    let sig = SIG.with(|c| *c.get_or_init(|| RwSignal::new(0)));
+
+    // Recursive via onerror → delayed re-call; see ensure_shop_status_singleton.
+    let connect: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    let connect_clone = connect.clone();
+    let connect_fn: Rc<dyn Fn()> = Rc::new(move || {
+        let healthy = ES.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|es| es.ready_state() != web_sys::EventSource::CLOSED)
+        });
+        if healthy {
+            return;
+        }
+        ES.with(|cell| {
+            if let Some(old) = cell.borrow_mut().take() {
+                old.close();
+            }
+        });
+        let Ok(es) = web_sys::EventSource::new("/api/live/board") else {
+            return;
+        };
+        let bump = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            BACKOFF_MS.with(|b| *b.borrow_mut() = 1_000);
+            sig.update(|v| *v += 1);
+        });
+        es.set_onmessage(Some(bump.as_ref().unchecked_ref()));
+        es.set_onopen(Some(bump.as_ref().unchecked_ref()));
+        bump.forget();
+
+        let reconnect = connect_clone.clone();
+        let on_err = Closure::<dyn FnMut(web_sys::Event)>::new(move |_| {
+            ES.with(|cell| {
+                if let Some(old) = cell.borrow_mut().take() {
+                    old.close();
+                }
+            });
+            let delay = BACKOFF_MS.with(|b| {
+                let cur = *b.borrow();
+                *b.borrow_mut() = cur.saturating_mul(2).min(30_000);
+                cur
+            });
+            if let Some(f) = reconnect.borrow().clone() {
+                leptos::leptos_dom::helpers::set_timeout(
+                    move || f(),
+                    std::time::Duration::from_millis(delay as u64),
+                );
+            }
+        });
+        es.set_onerror(Some(on_err.as_ref().unchecked_ref()));
+        on_err.forget();
+
+        ES.with(|cell| *cell.borrow_mut() = Some(es));
+    });
+    *connect.borrow_mut() = Some(connect_fn.clone());
+    connect_fn();
+    sig
 }

@@ -137,56 +137,47 @@ pub struct Legend {
 const INTER_REGULAR: &[u8] = include_bytes!(concat!(env!("FONT_CACHE_DIR"), "/Inter-Regular.ttf"));
 const INTER_BOLD: &[u8] = include_bytes!(concat!(env!("FONT_CACHE_DIR"), "/Inter-Bold.ttf"));
 const INTER_ITALIC: &[u8] = include_bytes!(concat!(env!("FONT_CACHE_DIR"), "/Inter-Italic.ttf"));
-const NOTO_EMOJI: &[u8] = include_bytes!(concat!(env!("FONT_CACHE_DIR"), "/NotoColorEmoji.ttf"));
+/// Noto Color Emoji, subset to the ~50 food/status glyphs a menu uses
+/// (🌶 above all). The full font is 10 MB; the subset is 108 KB. Rebuild
+/// with fonttools' `pyftsubset` — see assets/fonts/README.md.
+const NOTO_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji-subset.ttf");
 
 /// One-time initialised resources shared across PDF requests. Searching the
 /// system + embedded fonts on every request would be wasteful.
 struct PdfResources {
     book: LazyHash<FontBook>,
-    fonts: Vec<typst_kit::fonts::FontSlot>,
+    fonts: Vec<Font>,
 }
 
+/// The four bundled fonts, parsed once from the binary's own bytes.
+///
+/// No temp-dir copies, no font searcher, no embedded Typst default set: the
+/// templates only ever ask for "Inter" and "Noto Color Emoji", so those are
+/// the whole book. `Bytes::new` on a `&'static [u8]` stores the reference —
+/// the font data is never duplicated onto the heap.
 fn resources() -> &'static PdfResources {
     static R: OnceLock<PdfResources> = OnceLock::new();
     R.get_or_init(|| {
-        // Materialise our embedded fonts to a temp dir Typst can scan. We use
-        // /tmp/davidspizzeria-fonts as a stable location so the same process
-        // restarting doesn't pile up new dirs.
-        let dir = std::env::temp_dir().join("davidspizzeria-fonts");
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::warn!("font cache dir {dir:?}: {e} — falling back to system fonts");
-        }
+        let mut fonts = Vec::with_capacity(4);
         for (name, bytes) in [
-            ("Inter-Regular.ttf", INTER_REGULAR),
-            ("Inter-Bold.ttf", INTER_BOLD),
-            ("Inter-Italic.ttf", INTER_ITALIC),
-            ("NotoColorEmoji.ttf", NOTO_EMOJI),
+            ("Inter-Regular", INTER_REGULAR),
+            ("Inter-Bold", INTER_BOLD),
+            ("Inter-Italic", INTER_ITALIC),
+            ("NotoColorEmoji-subset", NOTO_EMOJI),
         ] {
-            let dst = dir.join(name);
-            // Write only if missing or size mismatches (faster than always
-            // rewriting; also avoids racing concurrent builds).
-            let need = match std::fs::metadata(&dst) {
-                Ok(m) => m.len() as usize != bytes.len(),
-                Err(_) => true,
-            };
-            if need {
-                if let Err(e) = std::fs::write(&dst, bytes) {
-                    tracing::warn!("write {name}: {e}");
-                }
+            match Font::new(Bytes::new(bytes), 0) {
+                Some(f) => fonts.push(f),
+                None => tracing::warn!("pdf: bundled font {name} is unparseable — skipped"),
             }
         }
-
-        let fonts = typst_kit::fonts::Fonts::searcher()
-            .include_system_fonts(false)
-            .include_embedded_fonts(true)
-            .search_with([&dir]);
+        let book = FontBook::from_fonts(&fonts);
         tracing::info!(
-            "pdf: registered {} fonts (4 bundled + Typst defaults)",
-            fonts.fonts.len()
+            "pdf: registered {} bundled fonts (Inter + emoji subset)",
+            fonts.len()
         );
         PdfResources {
-            book: LazyHash::new(fonts.book),
-            fonts: fonts.fonts,
+            book: LazyHash::new(book),
+            fonts,
         }
     })
 }
@@ -352,7 +343,7 @@ impl World for MenuWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        resources().fonts.get(index)?.get()
+        resources().fonts.get(index).cloned()
     }
 
     fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
@@ -385,6 +376,9 @@ pub fn render_menu_pdf(
             .sum::<usize>(),
     );
     let warned = typst::compile::<PagedDocument>(&world);
+    // Drop memoised layout results older than a few compilations so the
+    // cache stays bounded over the process lifetime.
+    comemo::evict(4);
 
     for w in &warned.warnings {
         tracing::warn!("typst warn: {}", w.message);
@@ -811,9 +805,10 @@ async fn read_image_setting(db: &SqlitePool, key: &str, uploads_dir: &str) -> Op
 /// the async runtime stays responsive during the ~hundreds-of-ms render.
 /// `format` selects the page geometry / fold layout the Typst template
 /// renders: `"trifold"` (default — the 443×210 three-panel sheet) or
-/// `"a5-zickzack"` (DIN-A5 portrait, 6-panel accordion, 888×210 + 3 mm bleed
-/// + fold marks for the 4c print job). Unknown values fall back to trifold in
-/// the caller.
+/// `"a5-zickzack"` (DIN-A5 portrait, 6-panel accordion, 888×210 with 3 mm
+/// bleed and fold marks for the 4c print job). Unknown values fall back to
+/// trifold in the caller.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_menu_pdf(
     db: &SqlitePool,
     site_url: String,
@@ -1209,7 +1204,7 @@ impl World for OrderWorld {
         Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
     }
     fn font(&self, index: usize) -> Option<Font> {
-        resources().fonts.get(index)?.get()
+        resources().fonts.get(index).cloned()
     }
     fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
         None
@@ -1220,6 +1215,9 @@ impl World for OrderWorld {
 pub fn render_order_pdf(payload: &OrderPdfPayload) -> anyhow::Result<Vec<u8>> {
     let world = OrderWorld::new(payload)?;
     let warned = typst::compile::<PagedDocument>(&world);
+    // Drop memoised layout results older than a few compilations so the
+    // cache stays bounded over the process lifetime.
+    comemo::evict(4);
     for w in &warned.warnings {
         tracing::warn!("typst warn (beleg): {}", w.message);
     }
@@ -1343,7 +1341,7 @@ impl World for KurzlisteWorld {
         Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
     }
     fn font(&self, index: usize) -> Option<Font> {
-        resources().fonts.get(index)?.get()
+        resources().fonts.get(index).cloned()
     }
     fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
         None
@@ -1354,6 +1352,9 @@ impl World for KurzlisteWorld {
 pub fn render_kurzliste_pdf(payload: &KurzlistePayload) -> anyhow::Result<Vec<u8>> {
     let world = KurzlisteWorld::new(payload)?;
     let warned = typst::compile::<PagedDocument>(&world);
+    // Drop memoised layout results older than a few compilations so the
+    // cache stays bounded over the process lifetime.
+    comemo::evict(4);
     for w in &warned.warnings {
         tracing::warn!("typst warn (kurzliste): {}", w.message);
     }

@@ -30,6 +30,10 @@ use crate::pages::locality::{
     SetPostcodeHints, SuburbRoute, SUBURB_WILDCARD,
 };
 
+fn default_priority() -> i64 {
+    100
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ZoneRow {
     pub id: String,
@@ -43,6 +47,15 @@ pub struct ZoneRow {
     /// SEO landing page. Empty → the page renders a generated fallback.
     #[serde(default)]
     pub seo_text: String,
+    /// Geometry zones (local address lookup): lower priority wins on
+    /// overlap; kind = none | polygon | radius | default; geometry =
+    /// GeoJSON Polygon/MultiPolygon or "lat,lon,meter".
+    #[serde(default = "default_priority")]
+    pub priority: i64,
+    #[serde(default)]
+    pub geometry_kind: String,
+    #[serde(default)]
+    pub geometry: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +78,15 @@ pub struct UpdateZoneForm {
     pub is_active: bool,
     #[serde(default)]
     pub seo_text: String,
+    /// Geometry zones (local address lookup): lower priority wins on
+    /// overlap; kind = none | polygon | radius | default; geometry =
+    /// GeoJSON Polygon/MultiPolygon or "lat,lon,meter".
+    #[serde(default = "default_priority")]
+    pub priority: i64,
+    #[serde(default)]
+    pub geometry_kind: String,
+    #[serde(default)]
+    pub geometry: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,9 +109,10 @@ pub async fn list_admin_zones() -> Result<Vec<ZoneRow>, ServerFnError> {
     let rows = sqlx::query(
         "SELECT id, postcode, COALESCE(name, '') AS name,
                 fee_cents, min_order_cents, eta_minutes, is_active,
-                COALESCE(seo_text, '') AS seo_text
+                COALESCE(seo_text, '') AS seo_text,
+                priority, geometry_kind, COALESCE(geometry, '') AS geometry
          FROM delivery_zones
-         ORDER BY is_active DESC, postcode ASC",
+         ORDER BY is_active DESC, priority ASC, postcode ASC",
     )
     .fetch_all(&db)
     .await
@@ -106,6 +129,9 @@ pub async fn list_admin_zones() -> Result<Vec<ZoneRow>, ServerFnError> {
             eta_minutes: r.get("eta_minutes"),
             is_active: r.get::<i64, _>("is_active") != 0,
             seo_text: r.get("seo_text"),
+            priority: r.get("priority"),
+            geometry_kind: r.get("geometry_kind"),
+            geometry: r.get("geometry"),
         });
     }
     Ok(out)
@@ -184,11 +210,38 @@ pub async fn update_zone(form: UpdateZoneForm) -> Result<(), ServerFnError> {
 
     let seo_text = form.seo_text.trim();
     let seo_opt: Option<&str> = (!seo_text.is_empty()).then_some(seo_text);
+    // Geometry: validated before it can reach the checkout. The bounding
+    // box of the imported addresses (when there is an index) catches the
+    // classic GeoJSON [lat, lon] mix-up.
+    let kind = rusterando_geo::GeometryKind::parse(&form.geometry_kind);
+    let geom_text = form.geometry.trim();
+    let bbox = rusterando_geo::store::address_bbox(&db)
+        .await
+        .ok()
+        .flatten();
+    rusterando_geo::zones::parse_geometry(kind, Some(geom_text), bbox)
+        .map_err(|e| ServerFnError::new(format!("Geometrie: {e}")))?;
+    if kind == rusterando_geo::GeometryKind::Default {
+        let other: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM delivery_zones WHERE geometry_kind = 'default' AND id != ?1 AND is_active = 1",
+        )
+        .bind(&form.id)
+        .fetch_optional(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("default check: {e}")))?;
+        if let Some((oid,)) = other {
+            return Err(ServerFnError::new(format!(
+                "Es kann nur eine Standard-Zone geben (aktuell: {oid})."
+            )));
+        }
+    }
+    let geom_opt: Option<&str> = (!geom_text.is_empty()).then_some(geom_text);
     let res = sqlx::query(
         "UPDATE delivery_zones
            SET postcode = ?2, name = ?3,
                fee_cents = ?4, min_order_cents = ?5,
-               eta_minutes = ?6, is_active = ?7, seo_text = ?8
+               eta_minutes = ?6, is_active = ?7, seo_text = ?8,
+               priority = ?9, geometry_kind = ?10, geometry = ?11
          WHERE id = ?1",
     )
     .bind(&form.id)
@@ -199,6 +252,9 @@ pub async fn update_zone(form: UpdateZoneForm) -> Result<(), ServerFnError> {
     .bind(form.eta_minutes.max(0))
     .bind(if form.is_active { 1 } else { 0 })
     .bind(seo_opt)
+    .bind(form.priority)
+    .bind(kind.as_str())
+    .bind(geom_opt)
     .execute(&db)
     .await;
 
@@ -393,6 +449,8 @@ pub fn ZonesAdminPage() -> impl IntoView {
                     <a href="#bypass">"Bezahlte Bestellungen außerhalb"</a>
                     " · "
                     <a href="#plz-hints">"PLZ ↔ Ort Vorschläge"</a>
+                    " · "
+                    <a href="#adresspruefung">"Adressprüfung"</a>
                 </nav>
 
                 // ----- Section 1: Zonen (delivery_zones CRUD) -----
@@ -406,7 +464,14 @@ pub fn ZonesAdminPage() -> impl IntoView {
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
                     {move || zones_list.get().map(|res| match res {
                         Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                        Ok(rows) => view! { <ZoneTable rows updater deleter/> }.into_any(),
+                        Ok(rows) => {
+                            let zone_options: Vec<(String, String)> =
+                                rows.iter().map(|r| (r.id.clone(), r.name.clone())).collect();
+                            view! {
+                                <ZoneTable rows updater deleter/>
+                                <GeoLookupSection zone_options/>
+                            }.into_any()
+                        }
                     })}
                 </Suspense>
 
@@ -987,6 +1052,7 @@ fn ZoneTable(
                     <th class="num">"Gebühr"</th>
                     <th class="num">"Mindest"</th>
                     <th class="num">"ETA"</th>
+                    <th class="num" title="Bei Überlappung gewinnt die kleinere Zahl">"Prio"</th>
                     <th>"Aktiv"</th>
                     <th></th>
                 </tr>
@@ -1012,6 +1078,13 @@ fn ZoneRowView(
     let eta = RwSignal::new(r.eta_minutes.to_string());
     let active = RwSignal::new(r.is_active);
     let seo_text = RwSignal::new(r.seo_text.clone());
+    let priority = RwSignal::new(r.priority.to_string());
+    let kind = RwSignal::new(if r.geometry_kind.is_empty() {
+        "none".to_string()
+    } else {
+        r.geometry_kind.clone()
+    });
+    let geometry = RwSignal::new(r.geometry.clone());
 
     let id_save = r.id.clone();
     let id_delete = r.id.clone();
@@ -1036,6 +1109,9 @@ fn ZoneRowView(
                 eta_minutes: parse_int(eta.get()),
                 is_active: active.get(),
                 seo_text: seo_text.get(),
+                priority: parse_int(priority.get()),
+                geometry_kind: kind.get(),
+                geometry: geometry.get(),
             },
         });
     };
@@ -1075,6 +1151,11 @@ fn ZoneRowView(
                     prop:value=move || eta.get()
                     on:input=move |ev| eta.set(event_target_value(&ev))/>
             </td>
+            <td class="num">
+                <input type="number" class="cell-input small"
+                    prop:value=move || priority.get()
+                    on:input=move |ev| priority.set(event_target_value(&ev))/>
+            </td>
             <td>
                 <input type="checkbox"
                     prop:checked=move || active.get()
@@ -1083,6 +1164,20 @@ fn ZoneRowView(
             <td class="actions">
                 <button class="btn small primary" on:click=on_save>"Speichern"</button>
                 <button class="btn small danger" on:click=on_delete>"Löschen"</button>
+                <details class="zone-geometry">
+                    <summary>{move || format!("Geometrie: {}", match kind.get().as_str() {
+                        "polygon" => "Polygon", "radius" => "Umkreis", "default" => "Standard (Rest des Liefergebiets)", _ => "keine" })}</summary>
+                    <select on:change=move |ev| kind.set(event_target_value(&ev))>
+                        <option value="none" selected=move || kind.get() == "none">"keine (nur Straßen-Zuordnung / Stadtteil-Routing)"</option>
+                        <option value="radius" selected=move || kind.get() == "radius">"Umkreis: lat,lon,meter"</option>
+                        <option value="polygon" selected=move || kind.get() == "polygon">"Polygon: GeoJSON ([lon, lat]-Reihenfolge!)"</option>
+                        <option value="default" selected=move || kind.get() == "default">"Standard: alle übrigen Adressen des Liefergebiets"</option>
+                    </select>
+                    <textarea rows="4"
+                        placeholder="Umkreis z. B. 51.7701,7.4419,2000 — Polygon: GeoJSON Polygon/MultiPolygon, Koordinaten als [lon, lat], Ring geschlossen"
+                        prop:value=move || geometry.get()
+                        on:input=move |ev| geometry.set(event_target_value(&ev))></textarea>
+                </details>
                 <details class="zone-seo">
                     <summary>"SEO-Text (Lieferservice-Seite)"</summary>
                     <textarea rows="3" placeholder="Optionaler Werbetext für /lieferservice/… — leer = automatischer Text."
@@ -1091,5 +1186,633 @@ fn ZoneRowView(
                 </details>
             </td>
         </tr>
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adressprüfung — local cadastre index: mode switch, index status, street →
+// zone assignments, preview. Lives on the zones page because the zones are
+// what the assignments point at.
+// ---------------------------------------------------------------------------
+
+#[component]
+fn GeoLookupSection(zone_options: Vec<(String, String)>) -> impl IntoView {
+    use crate::pages::geo::{
+        geo_lookup_status, geo_municipalities, list_geo_streets_admin, shop_location,
+        GeocodeShopAddress, ImportGeoAddresses, PreviewGeoZone, ReloadGeoIndex,
+        SetAddressLookupMode, SetGeoMunicipalities, SetGeoStreetZone, SetShopLocation,
+        SetupFromAddress,
+    };
+    let mode_setter = ServerAction::<SetAddressLookupMode>::new();
+    let setup = ServerAction::<SetupFromAddress>::new();
+    // Bumped when the NRW download/split job finishes → municipality rows
+    // refresh their "Datei" column.
+    let nrw_done = RwSignal::new(0_u32);
+    let reloader = ServerAction::<ReloadGeoIndex>::new();
+    let assigner = ServerAction::<SetGeoStreetZone>::new();
+    let previewer = ServerAction::<PreviewGeoZone>::new();
+    let importer = ServerAction::<ImportGeoAddresses>::new();
+    let muni_saver = ServerAction::<SetGeoMunicipalities>::new();
+    let loc_saver = ServerAction::<SetShopLocation>::new();
+    let geocoder = ServerAction::<GeocodeShopAddress>::new();
+
+    let status = Resource::new(
+        move || {
+            (
+                mode_setter.version().get(),
+                reloader.version().get(),
+                importer.version().get(),
+                setup.version().get(),
+            )
+        },
+        |_| async move { geo_lookup_status().await },
+    );
+    let streets = Resource::new(
+        move || {
+            (
+                reloader.version().get(),
+                assigner.version().get(),
+                importer.version().get(),
+                setup.version().get(),
+            )
+        },
+        |_| async move { list_geo_streets_admin().await },
+    );
+    let munis = Resource::new(
+        move || {
+            (
+                muni_saver.version().get(),
+                importer.version().get(),
+                setup.version().get(),
+                nrw_done.get(),
+            )
+        },
+        |_| async move { geo_municipalities().await },
+    );
+    let location = Resource::new(
+        move || {
+            (
+                loc_saver.version().get(),
+                geocoder.version().get(),
+                setup.version().get(),
+            )
+        },
+        |_| async move { shop_location().await },
+    );
+    let filter = RwSignal::new(String::new());
+    let preview_street = RwSignal::new(String::new());
+    let preview_number = RwSignal::new(String::new());
+    let zone_options = StoredValue::new(zone_options);
+
+    view! {
+        <h2 id="adresspruefung">"Adressprüfung"</h2>
+        <p class="hint">
+            "Zwei Verfahren: „Online“ fragt OpenStreetMap (Nominatim) und routet nach Stadtteil "
+            "(Abschnitt „Belieferte Orte“). „Lokal“ nutzt den importierten Adressindex des "
+            "Katasters (Straßen- und Hausnummern-Vorschläge im Checkout, exakte Koordinaten, "
+            "keine Anfrage nach außen) und entscheidet die Zone über Straßen-Zuordnung, "
+            "Umkreis/Polygon und Standard-Zone. Import: "
+            <code>"geo-import --tenant <slug> --download"</code>
+            ", danach „Index neu laden“."
+        </p>
+        <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+            {move || status.get().map(|res| match res {
+                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                Ok(st) => {
+                    let loaded = st.index_loaded;
+                    let is_local = st.mode == "local";
+                    view! {
+                        <div class="geo-status">
+                            <p>
+                                "Aktiv: " <strong>{if is_local { "Lokal (Kataster)" } else { "Online (Nominatim)" }}</strong>
+                                " · Index: "
+                                {if loaded { format!("{} Straßen, {} Adressen", st.streets, st.addresses) } else { "nicht geladen".to_string() }}
+                                {(!st.backend_configured).then_some(" · GEO_BACKEND ist in der .env nicht gesetzt")}
+                            </p>
+                            <div class="admin-actions">
+                                <button type="button" class="btn small primary" disabled=move || !loaded || is_local
+                                    on:click=move |_| { mode_setter.dispatch(SetAddressLookupMode { mode: "local".into() }); }>
+                                    "Lokal verwenden"
+                                </button>
+                                <button type="button" class="btn small" disabled=move || !is_local
+                                    on:click=move |_| { mode_setter.dispatch(SetAddressLookupMode { mode: "nominatim".into() }); }>
+                                    "Online verwenden"
+                                </button>
+                                <button type="button" class="btn small ghost"
+                                    on:click=move |_| { reloader.dispatch(ReloadGeoIndex {}); }>
+                                    "Index neu laden"
+                                </button>
+                            </div>
+                            {move || mode_setter.value().get().and_then(|r| r.err()).map(|e| view! { <p class="error">{format!("Fehler: {e}")}</p> })}
+                            {move || reloader.value().get().map(|r| match r {
+                                Ok(n) => view! { <p class="ok">{format!("Index geladen: {n} Straßen")}</p> }.into_any(),
+                                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                            })}
+                        </div>
+                    }.into_any()
+                }
+            })}
+        </Suspense>
+
+        <h3>"Standort des Shops"</h3>
+        <p class="hint">
+            "Adresse und Koordinaten des Shops — Basis für Umkreis-Zonen, die Tour-Startposition und die "
+            "Entfernungsprüfung. Werte aus der .env (PIZZERIA_LAT/LON) gelten nur, solange hier nichts gesetzt ist."
+        </p>
+        <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+            {move || location.get().map(|res| match res {
+                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                Ok(loc) => view! { <ShopLocationCard loc loc_saver geocoder setup/> }.into_any(),
+            })}
+        </Suspense>
+
+        <h3>"NRW-Daten"</h3>
+        <p class="hint">
+            "Der amtliche Adressbestand für ganz NRW (Gebäudereferenzen, ~100 MB) wird einmal pro Server "
+            "heruntergeladen und in eine Datei je Gemeinde zerlegt. Danach lässt sich jeder Shop in NRW "
+            "über „Alles aus Adresse einrichten“ oder die Gemeinden-Liste einrichten — ohne Konsole. "
+            "Erneut ausführen, wenn NRW einen neuen Export veröffentlicht (etwa zweimal im Jahr)."
+        </p>
+        <NrwDataCard nrw_done/>
+
+        <h3>"Gemeinden"</h3>
+        <p class="hint">
+            "Welche Gemeinden (AGS) importiert werden und welche PLZ sie bekommen. Leer = Werte aus der .env. "
+            "Nach Änderungen an Gemeinden oder Zonen-Geometrie: „Adressdaten importieren“."
+        </p>
+        <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+            {move || munis.get().map(|res| match res {
+                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                Ok(m) => view! { <MunicipalitiesCard m muni_saver importer/> }.into_any(),
+            })}
+        </Suspense>
+
+        <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+            {move || streets.get().map(|res| match res {
+                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                Ok(rows) if rows.is_empty() => view! {
+                    <p class="hint">"Kein Adressindex vorhanden — nach dem Import erscheint hier die Straßenliste."</p>
+                }.into_any(),
+                Ok(rows) => {
+                    let rows_for_preview = rows.clone();
+                    let rows_for_table = StoredValue::new(rows);
+                    view! {
+                        <h3>"Vorschau"</h3>
+                        <div class="geo-preview">
+                            <select on:change=move |ev| preview_street.set(event_target_value(&ev))>
+                                <option value="">"– Straße –"</option>
+                                {rows_for_preview.into_iter().map(|r| view! {
+                                    <option value=r.id.to_string()>{format!("{} ({})", r.name, r.postcode)}</option>
+                                }).collect_view()}
+                            </select>
+                            <input type="text" class="cell-input small" placeholder="Nr."
+                                prop:value=move || preview_number.get()
+                                on:input=move |ev| preview_number.set(event_target_value(&ev))/>
+                            <button type="button" class="btn small" on:click=move |_| {
+                                if let Ok(id) = preview_street.get().parse::<u32>() {
+                                    previewer.dispatch(PreviewGeoZone { street_id: id, house_number: preview_number.get() });
+                                }
+                            }>"Prüfen"</button>
+                            {move || previewer.value().get().map(|r| match r {
+                                Ok(Some(p)) => view! {
+                                    <span class="ok">{format!(
+                                        "{} {} → {} ({:.5}, {:.5})",
+                                        p.street, p.house_number,
+                                        match (p.zone_name, p.fee_cents) {
+                                            (Some(z), Some(f)) => format!("{z}, {}", format_eur(f)),
+                                            _ => "außerhalb des Liefergebiets".to_string(),
+                                        },
+                                        p.lat, p.lon
+                                    )}</span>
+                                }.into_any(),
+                                Ok(None) => view! { <span class="error">"Hausnummer nicht im Kataster"</span> }.into_any(),
+                                Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),
+                            })}
+                        </div>
+
+                        <h3>"Straßen → Zone"</h3>
+                        <p class="hint">
+                            "Eine Zuordnung hier schlägt jede Geometrie. Ohne Zuordnung entscheidet Umkreis/Polygon, "
+                            "sonst die Standard-Zone. Für kleine Orte ist das der einfachste Weg, die Innenstadt festzulegen."
+                        </p>
+                        <input type="text" class="geo-filter" placeholder="Straße filtern…"
+                            prop:value=move || filter.get()
+                            on:input=move |ev| filter.set(event_target_value(&ev))/>
+                        <table class="admin-zones-table geo-streets">
+                            <thead>
+                                <tr>
+                                    <th>"Straße"</th>
+                                    <th>"Ort"</th>
+                                    <th class="num">"Nrn."</th>
+                                    <th>"Zone"</th>
+                                    <th class="num">"von"</th>
+                                    <th class="num">"bis"</th>
+                                    <th></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {move || {
+                                    let f = crate::pages::locality::normalize(&filter.get());
+                                    rows_for_table.get_value().into_iter()
+                                        .filter(|r| f.is_empty() || crate::pages::locality::normalize(&r.name).contains(&f))
+                                        .take(400)
+                                        .map(|r| view! { <StreetAssignRow r assigner zone_options/> })
+                                        .collect_view()
+                                }}
+                            </tbody>
+                        </table>
+                    }.into_any()
+                }
+            })}
+        </Suspense>
+    }
+}
+
+#[component]
+fn StreetAssignRow(
+    r: crate::pages::geo::GeoStreetAdminRow,
+    assigner: ServerAction<crate::pages::geo::SetGeoStreetZone>,
+    zone_options: StoredValue<Vec<(String, String)>>,
+) -> impl IntoView {
+    use crate::pages::geo::SetGeoStreetZone;
+    let zone = RwSignal::new(r.zone_id.clone().unwrap_or_default());
+    let from = RwSignal::new(r.number_from.map(|n| n.to_string()).unwrap_or_default());
+    let to = RwSignal::new(r.number_to.map(|n| n.to_string()).unwrap_or_default());
+    let id = r.id;
+    let on_save = move |_| {
+        assigner.dispatch(SetGeoStreetZone {
+            street_id: id,
+            zone_id: zone.get(),
+            number_from: from.get().trim().parse::<u32>().ok(),
+            number_to: to.get().trim().parse::<u32>().ok(),
+        });
+    };
+    let assigned = r.zone_id.is_some();
+    view! {
+        <tr class=if assigned { "assigned" } else { "" }>
+            <td>{r.name.clone()}</td>
+            <td>{format!("{} {}", r.postcode, r.city)}</td>
+            <td class="num">{r.house_count}</td>
+            <td>
+                <select on:change=move |ev| zone.set(event_target_value(&ev))>
+                    <option value="" selected=move || zone.get().is_empty()>"– Geometrie / Standard –"</option>
+                    {zone_options.get_value().into_iter().map(|(zid, zname)| {
+                        let zid_sel = zid.clone();
+                        view! { <option value=zid selected=move || zone.get() == zid_sel>{zname}</option> }
+                    }).collect_view()}
+                </select>
+            </td>
+            <td class="num">
+                <input type="number" class="cell-input small" min="1" placeholder="alle"
+                    prop:value=move || from.get()
+                    on:input=move |ev| from.set(event_target_value(&ev))/>
+            </td>
+            <td class="num">
+                <input type="number" class="cell-input small" min="1" placeholder="alle"
+                    prop:value=move || to.get()
+                    on:input=move |ev| to.set(event_target_value(&ev))/>
+            </td>
+            <td class="actions">
+                <button type="button" class="btn small primary" on:click=on_save>"Speichern"</button>
+            </td>
+        </tr>
+    }
+}
+
+#[component]
+fn ShopLocationCard(
+    loc: crate::pages::geo::ShopLocation,
+    loc_saver: ServerAction<crate::pages::geo::SetShopLocation>,
+    geocoder: ServerAction<crate::pages::geo::GeocodeShopAddress>,
+    setup: ServerAction<crate::pages::geo::SetupFromAddress>,
+) -> impl IntoView {
+    use crate::pages::geo::{GeocodeShopAddress, SetShopLocation, SetupFromAddress};
+    let street = RwSignal::new(loc.street.clone());
+    let plz_city = RwSignal::new(loc.plz_city.clone());
+    let radius = RwSignal::new("5000".to_string());
+    let recenter = RwSignal::new(false);
+    let lat = RwSignal::new(if loc.lat == 0.0 {
+        String::new()
+    } else {
+        format!("{:.6}", loc.lat)
+    });
+    let lon = RwSignal::new(if loc.lon == 0.0 {
+        String::new()
+    } else {
+        format!("{:.6}", loc.lon)
+    });
+    let source = match loc.source.as_str() {
+        "db" => "Koordinaten: aus dem Dashboard",
+        "env" => "Koordinaten: Standard aus der .env (hier überschreibbar)",
+        _ => "Koordinaten: noch nicht gesetzt",
+    };
+    let parse = |s: String| s.trim().replace(',', ".").parse::<f64>().unwrap_or(0.0);
+    let on_save = move |_| {
+        loc_saver.dispatch(SetShopLocation {
+            street: street.get(),
+            plz_city: plz_city.get(),
+            lat: parse(lat.get()),
+            lon: parse(lon.get()),
+        });
+    };
+    let on_geocode = move |_| {
+        // Save the typed address first, then resolve it through the index.
+        loc_saver.dispatch(SetShopLocation {
+            street: street.get(),
+            plz_city: plz_city.get(),
+            lat: parse(lat.get()),
+            lon: parse(lon.get()),
+        });
+        geocoder.dispatch(GeocodeShopAddress {});
+    };
+    let on_setup = move |_| {
+        // The server persists the typed address itself and derives the rest
+        // (municipality, coordinates, neighbours, zone, import).
+        setup.dispatch(SetupFromAddress {
+            street: street.get(),
+            plz_city: plz_city.get(),
+            radius_m: parse(radius.get()),
+            recenter_zones: recenter.get(),
+        });
+    };
+    view! {
+        <div class="geo-status shop-location">
+            <div class="geo-preview">
+                <label>"Straße + Nr."
+                    <input type="text" class="cell-input" placeholder="z. B. Wolfsberger Str. 18"
+                        prop:value=move || street.get()
+                        on:input=move |ev| street.set(event_target_value(&ev))/>
+                </label>
+                <label>"PLZ Ort"
+                    <input type="text" class="cell-input" placeholder="z. B. 59348 Lüdinghausen"
+                        prop:value=move || plz_city.get()
+                        on:input=move |ev| plz_city.set(event_target_value(&ev))/>
+                </label>
+                <label>"Lat"
+                    <input type="text" class="cell-input small" inputmode="decimal"
+                        prop:value=move || lat.get()
+                        on:input=move |ev| lat.set(event_target_value(&ev))/>
+                </label>
+                <label>"Lon"
+                    <input type="text" class="cell-input small" inputmode="decimal"
+                        prop:value=move || lon.get()
+                        on:input=move |ev| lon.set(event_target_value(&ev))/>
+                </label>
+            </div>
+            <p class="muted">{source}</p>
+            <div class="admin-actions">
+                <button type="button" class="btn small primary" on:click=on_save>"Speichern"</button>
+                <button type="button" class="btn small" on:click=on_geocode>"Koordinaten aus Adresse berechnen"</button>
+            </div>
+            {move || loc_saver.value().get().and_then(|r| r.err()).map(|e| view! { <p class="error">{format!("Fehler: {e}")}</p> })}
+            {move || geocoder.value().get().map(|r| match r {
+                Ok(l) => view! { <p class="ok">{format!("Gefunden: {} — {:.6}, {:.6} (gespeichert)", l.street, l.lat, l.lon)}</p> }.into_any(),
+                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+            })}
+            <div class="admin-actions">
+                <label class="inline">"Lieferradius (m)"
+                    <input type="text" class="cell-input small" inputmode="numeric"
+                        prop:value=move || radius.get()
+                        on:input=move |ev| radius.set(event_target_value(&ev))/>
+                </label>
+                <label class="inline">
+                    <input type="checkbox"
+                        prop:checked=move || recenter.get()
+                        on:change=move |ev| recenter.set(event_target_checked(&ev))/>
+                    "Umkreis-Zonen auf den neuen Standort verschieben"
+                </label>
+                <button type="button" class="btn small primary" on:click=on_setup
+                    disabled=move || setup.pending().get()>
+                    {move || if setup.pending().get() { "Richte ein …" } else { "Alles aus Adresse einrichten" }}
+                </button>
+            </div>
+            <p class="muted">
+                "Findet aus „PLZ Ort“ die Heimatgemeinde, berechnet die Koordinaten aus der Straße, "
+                "wählt alle Nachbargemeinden mit Adressen im Radius, legt (falls noch keine Zone "
+                "eine Geometrie hat) einen Radius um den Standort an und importiert den Adressindex. "
+                "Umkreis-Zonen, die noch um einen alten Standort liegen, werden gemeldet — oder mit "
+                "dem Häkchen (bei gleichem Radius) auf den neuen Standort verschoben."
+            </p>
+            {move || setup.value().get().map(|r| match r {
+                Ok(report) => view! { <pre class="import-summary">{report}</pre> }.into_any(),
+                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+            })}
+        </div>
+    }
+}
+
+/// Download + split of the whole-NRW export, run as a background job on
+/// the server; this card starts it and polls its log every 3 s while it
+/// runs. Once it finishes, `nrw_done` is bumped so the municipality card
+/// re-reads which files exist.
+#[component]
+fn NrwDataCard(nrw_done: RwSignal<u32>) -> impl IntoView {
+    use crate::pages::geo::{nrw_data_status, PrepareNrwData};
+    let preparer = ServerAction::<PrepareNrwData>::new();
+    let tick = RwSignal::new(0_u32);
+    let running = RwSignal::new(false);
+    let nrw = Resource::new(
+        move || {
+            (
+                preparer.version().get(),
+                // Only re-fetch on the timer while a job runs.
+                if running.get() { tick.get() } else { 0 },
+            )
+        },
+        |_| async move { nrw_data_status().await },
+    );
+    #[cfg(feature = "hydrate")]
+    {
+        if let Ok(handle) = leptos::leptos_dom::helpers::set_interval_with_handle(
+            move || tick.update(|n| *n = n.wrapping_add(1)),
+            std::time::Duration::from_secs(3),
+        ) {
+            on_cleanup(move || handle.clear());
+        }
+    }
+    Effect::new(move |_| {
+        if let Some(Ok(s)) = nrw.get() {
+            let was = running.get_untracked();
+            running.set(s.running);
+            if was && !s.running {
+                nrw_done.update(|n| *n = n.wrapping_add(1));
+            }
+        }
+    });
+    let start = move |force: bool| {
+        running.set(true);
+        preparer.dispatch(PrepareNrwData { force });
+    };
+    view! {
+        <div class="geo-status nrw-data">
+            <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
+                {move || nrw.get().map(|res| match res {
+                    Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                    Ok(s) => {
+                        let zip = if s.zip_cached {
+                            format!("Export-Zip: vorhanden ({} MB)", s.zip_mb)
+                        } else {
+                            "Export-Zip: nicht heruntergeladen".to_string()
+                        };
+                        let split = if s.split_current {
+                            format!("Gemeindedateien: {} Gemeinden, mit Umrissen (aktuell)", s.municipalities)
+                        } else if s.split_available {
+                            format!("Gemeindedateien: {} Gemeinden, ohne Umrisse — „aufbereiten“ erneut ausführen, damit „Gemeinden im Radius“ funktioniert", s.municipalities)
+                        } else {
+                            "Gemeindedateien: noch nicht aufbereitet".to_string()
+                        };
+                        let state = if s.running {
+                            "läuft …"
+                        } else {
+                            match s.ok { Some(true) => "zuletzt: erfolgreich", Some(false) => "zuletzt: fehlgeschlagen", None => "" }
+                        };
+                        let log = s.log.join("\n");
+                        let progress = s.progress.clone();
+                        let busy = s.running;
+                        view! {
+                            <p>{zip}" · "{split}</p>
+                            <p class="muted">"Verzeichnis: "{s.data_dir.clone()}" "{state}</p>
+                            <div class="admin-actions">
+                                <button type="button" class="btn small primary" disabled=busy
+                                    on:click=move |_| start(false)>
+                                    {if busy { "Aufbereitung läuft …" } else { "NRW-Daten herunterladen & aufbereiten" }}
+                                </button>
+                                <button type="button" class="btn small" disabled=busy
+                                    on:click=move |_| start(true)>"Neu herunterladen (Export erneuert)"</button>
+                            </div>
+                            {(!log.is_empty()).then(|| view! {
+                                <pre class="import-summary">{log}{if progress.is_empty() { String::new() } else { format!("\n{progress}") }}</pre>
+                            })}
+                        }.into_any()
+                    }
+                })}
+            </Suspense>
+            {move || preparer.value().get().and_then(|r| r.err()).map(|e| view! { <p class="error">{format!("Fehler: {e}")}</p> })}
+        </div>
+    }
+}
+
+#[component]
+fn MunicipalitiesCard(
+    m: crate::pages::geo::GeoMunicipalities,
+    muni_saver: ServerAction<crate::pages::geo::SetGeoMunicipalities>,
+    importer: ServerAction<crate::pages::geo::ImportGeoAddresses>,
+) -> impl IntoView {
+    use crate::pages::geo::{
+        search_municipalities, ImportGeoAddresses, Municipality, SetGeoMunicipalities,
+    };
+    let rows = RwSignal::new(m.list.clone());
+    let query = RwSignal::new(String::new());
+    let searcher = Action::new(|q: &String| {
+        let q = q.clone();
+        async move { search_municipalities(q).await }
+    });
+    let source_note = match m.source.as_str() {
+        "db" => "Liste: aus dem Dashboard".to_string(),
+        "env" => "Liste: Standard aus der .env (hier überschreibbar)".to_string(),
+        _ => "Liste: leer — keine Gemeinden konfiguriert".to_string(),
+    };
+    let split_note = if m.split_index_available {
+        format!("Gemeindedateien vorhanden unter {}/nrw", m.data_dir)
+    } else {
+        format!(
+            "Keine Gemeindedateien unter {}/nrw — oben „NRW-Daten herunterladen & aufbereiten“ ausführen; bis dahin importiert der Button aus dem Export-Zip, falls vorhanden.",
+            m.data_dir
+        )
+    };
+    let on_save = move |_| {
+        let list = rows.get();
+        let ags = list
+            .iter()
+            .map(|r| r.ags.clone())
+            .collect::<Vec<_>>()
+            .join(",");
+        let pmap = list
+            .iter()
+            .filter(|r| !r.postcode.trim().is_empty())
+            .map(|r| format!("{}:{}:{}", r.ags, r.postcode.trim(), r.city.trim()))
+            .collect::<Vec<_>>()
+            .join(",");
+        muni_saver.dispatch(SetGeoMunicipalities {
+            ags,
+            postcode_map: pmap,
+        });
+    };
+    view! {
+        <div class="geo-status municipalities">
+            <p class="muted">{source_note}" · "{split_note}</p>
+            <table class="admin-zones-table">
+                <thead><tr><th>"AGS"</th><th>"Ort"</th><th>"PLZ"</th><th>"Daten"</th><th></th></tr></thead>
+                <tbody>
+                    {move || rows.get().into_iter().enumerate().map(|(i, r)| {
+                        let ags = r.ags.clone();
+                        view! {
+                            <tr>
+                                <td>{ags.clone()}</td>
+                                <td>
+                                    <input type="text" class="cell-input"
+                                        prop:value=r.city.clone()
+                                        on:input=move |ev| rows.update(|v| if let Some(x) = v.get_mut(i) { x.city = event_target_value(&ev) })/>
+                                </td>
+                                <td>
+                                    <input type="text" class="cell-input small" inputmode="numeric" placeholder="PLZ"
+                                        prop:value=r.postcode.clone()
+                                        on:input=move |ev| rows.update(|v| if let Some(x) = v.get_mut(i) { x.postcode = event_target_value(&ev) })/>
+                                </td>
+                                <td>{if r.split_available { "✓ Datei" } else { "– (Zip)" }}</td>
+                                <td class="actions">
+                                    <button type="button" class="btn small danger"
+                                        on:click=move |_| rows.update(|v| { v.retain(|x| x.ags != ags); })>"Entfernen"</button>
+                                </td>
+                            </tr>
+                        }
+                    }).collect_view()}
+                </tbody>
+            </table>
+            <div class="geo-preview">
+                <input type="text" class="cell-input" placeholder="Gemeinde suchen (z. B. Dülmen)"
+                    prop:value=move || query.get()
+                    on:input=move |ev| {
+                        let q = event_target_value(&ev);
+                        query.set(q.clone());
+                        if q.trim().len() >= 2 { searcher.dispatch(q); }
+                    }/>
+                {move || searcher.value().get().map(|r| match r {
+                    Ok(hits) if query.get().trim().len() >= 2 => view! {
+                        <ul class="addr-suggest static">
+                            {hits.into_iter().map(|h| {
+                                let (ags, name) = (h.ags.clone(), h.name.clone());
+                                view! {
+                                    <li on:click=move |_| {
+                                        let (ags, name) = (ags.clone(), name.clone());
+                                        rows.update(|v| if !v.iter().any(|x| x.ags == ags) {
+                                            v.push(Municipality { ags, postcode: String::new(), city: name, split_available: true });
+                                        });
+                                        query.set(String::new());
+                                    }>{format!("{} · {} ({} Adressen)", h.name, h.ags, h.rows)}</li>
+                                }
+                            }).collect_view()}
+                        </ul>
+                    }.into_any(),
+                    Ok(_) => ().into_any(),
+                    Err(e) => view! { <p class="error">{format!("{e}")}</p> }.into_any(),
+                })}
+            </div>
+            <div class="admin-actions">
+                <button type="button" class="btn small primary" on:click=on_save>"Gemeinden speichern"</button>
+                <button type="button" class="btn small" disabled=move || importer.pending().get()
+                    on:click=move |_| { importer.dispatch(ImportGeoAddresses {}); }>
+                    {move || if importer.pending().get() { "Importiere…" } else { "Adressdaten importieren" }}
+                </button>
+            </div>
+            {move || muni_saver.value().get().map(|r| match r {
+                Ok(()) => view! { <p class="ok">"Gemeinden gespeichert — jetzt „Adressdaten importieren“."</p> }.into_any(),
+                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+            })}
+            {move || importer.value().get().map(|r| match r {
+                Ok(summary) => view! { <pre class="import-summary">{summary}</pre> }.into_any(),
+                Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+            })}
+        </div>
     }
 }

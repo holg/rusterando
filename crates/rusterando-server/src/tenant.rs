@@ -206,12 +206,22 @@ pub struct Tenant {
     /// `.env.rusterando.flizza`, NOT a reconstructed `.env.<slug>`). For
     /// diagnostics (`/__whoami`, the admin panel).
     pub env_file: String,
+    /// This tenant's own `PUBLIC_URL` (e.g. `https://flizza.rusterando.de`).
+    /// Parsed from its `.env` at load time, exactly like the passwords —
+    /// reading the PROCESS env instead would hand every tenant the apex's
+    /// URL, which is how the printed menu's QR code pointed at the showroom
+    /// (`rusterando.de`) instead of the shop. Empty when unset.
+    pub public_url: String,
     /// Per-tenant cached config handles.
     pub handles: TenantHandles,
     /// Per-tenant auth secrets (admin/kitchen/driver passwords) from its
     /// `.env`. Provided into context so logins check the RIGHT tenant's
     /// password, not the process-global one.
     pub auth: rusterando_frontend::pages::session::TenantAuth,
+    /// Local address index (NRW cadastre) — empty handle when the tenant
+    /// has no `GEO_BACKEND` or hasn't imported yet. Provided into Leptos
+    /// context per request (see main.rs) next to the pool.
+    pub geo: rusterando_frontend::pages::geo::ssr::GeoIndexHandle,
 }
 
 impl Tenant {
@@ -243,9 +253,20 @@ impl Tenant {
             slug,
             pool,
             database_url,
+            // Model A: the process env IS this deployment's config.
+            public_url: std::env::var("PUBLIC_URL")
+                .unwrap_or_default()
+                .trim()
+                .trim_end_matches('/')
+                .to_string(),
             env_file,
             handles,
             auth,
+            // Loaded by main.rs right after construction (async).
+            geo: rusterando_frontend::pages::geo::ssr::GeoIndexHandle::new(
+                None,
+                rusterando_geo::GeoConfig::from_env(),
+            ),
         }
     }
 }
@@ -306,6 +327,21 @@ impl Tenants {
                 )
             })?;
         self.load(slug, &file).await
+    }
+
+    /// Drop a tenant from the live registry (the sys-admin delete path).
+    /// Its pool is closed so the sqlite file can be removed on Windows-like
+    /// filesystems and so no request can keep serving it. Returns whether a
+    /// tenant was actually removed.
+    pub async fn remove(&self, slug: &str) -> bool {
+        let removed = self.0.write().await.remove(slug);
+        match removed {
+            Some(t) => {
+                t.pool.close().await;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Directly insert a pre-built tenant (used for the Model-A passthrough,
@@ -375,7 +411,26 @@ pub async fn build_tenant(slug: &str, env_file: &str) -> anyhow::Result<Tenant> 
     // TODO(model-b follow-up): seed_demo_if_empty(&pool, slug) — idempotent
     // demo menu for an empty showroom tenant. Left out this pass.
 
-    let handles = build_handles(&pool).await;
+    // This tenant's own PUBLIC_URL (parsed above) — so its cached JSON-LD
+    // carries the shop's address, not the apex showroom's.
+    let public_url = vars
+        .get("PUBLIC_URL")
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .unwrap_or_default();
+    let handles = build_handles(&pool, &public_url).await;
+    // Local address index: only tenants with GEO_BACKEND in their env load
+    // one, from their own DB (`geo-import` fills it). Empty tables → handle
+    // without an index; the checkout keeps the geocoder path until the
+    // import ran and the admin reloaded / restarted.
+    let geo_cfg = rusterando_geo::GeoConfig::from_vars(&vars);
+    let geo = rusterando_frontend::pages::geo::ssr::GeoIndexHandle::new(None, geo_cfg.clone());
+    if geo_cfg.is_some() {
+        match geo.reload(&pool).await {
+            Ok(0) => tracing::info!("tenant {slug}: GEO_BACKEND set but no addresses imported yet"),
+            Ok(n) => tracing::info!("tenant {slug}: address index loaded ({n} streets)"),
+            Err(e) => tracing::warn!("tenant {slug}: address index load failed: {e}"),
+        }
+    }
 
     // Auth secrets from THIS tenant's `.env` (parsed into `vars` above) — so
     // logins check the right tenant's password, not the process-global one.
@@ -389,9 +444,11 @@ pub async fn build_tenant(slug: &str, env_file: &str) -> anyhow::Result<Tenant> 
         slug: slug.to_owned(),
         pool,
         database_url,
+        public_url,
         env_file: env_file.to_owned(),
         handles,
         auth,
+        geo,
     })
 }
 
@@ -527,7 +584,7 @@ pub async fn load_all_tenants(registry: &Tenants) -> Vec<TenantLoad> {
 /// main.rs runs for the global handles, in the same order (branding BEFORE
 /// jsonld, which consumes the branding snapshot). Used per-tenant in Model B;
 /// Model A reuses the globals it already built (see `Tenant::passthrough`).
-pub async fn build_handles(pool: &SqlitePool) -> TenantHandles {
+pub async fn build_handles(pool: &SqlitePool, public_url: &str) -> TenantHandles {
     use rusterando_frontend::branding::{ssr::load_branding, BrandingHandle};
     use rusterando_frontend::pages::seo::{build_restaurant_jsonld, JsonLdHandle};
     use rusterando_frontend::pages::settings::{
@@ -538,7 +595,7 @@ pub async fn build_handles(pool: &SqlitePool) -> TenantHandles {
 
     let theme = ThemeHandle::new(theme_ssr(pool).await);
     let branding = BrandingHandle::new(load_branding(pool).await);
-    let jsonld = JsonLdHandle::new(build_restaurant_jsonld(pool, &branding.get()).await);
+    let jsonld = JsonLdHandle::new(build_restaurant_jsonld(pool, &branding.get(), public_url).await);
     let stripe_mode = StripeModeHandle::new(load_mode(pool).await);
     let i18n = I18nHandle::new(i18n_enabled(pool).await);
     let orders_paused = OrdersPausedHandle::new(orders_paused(pool).await);
@@ -722,6 +779,41 @@ pub async fn resolve_tenant(
             next.run(req).await
         }
         None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Hard host gate for the sys-admin area: `/sysadmin*` pages and the
+/// `/api/sysadmin_*` server fns exist ONLY on the apex host of a multi-tenant
+/// deployment (`rusterando.de`). Everywhere else — a tenant subdomain, a
+/// standalone shop like davidspizzeria.de, or an apex without a loaded
+/// parent — they 404 before Leptos ever renders a form. The server fns also
+/// re-check this in-context (defence in depth), but the route must not even
+/// exist off the apex. Register INSIDE `resolve_tenant` so the resolved
+/// Tenant is already in the extensions.
+pub async fn sysadmin_gate(
+    axum::extract::State(router): axum::extract::State<TenantRouter>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let path = req.uri().path();
+    let is_sysadmin = path == "/sysadmin"
+        || path.starts_with("/sysadmin/")
+        || path.starts_with("/api/sysadmin_");
+    if !is_sysadmin {
+        return next.run(req).await;
+    }
+    let on_apex = router.multi_tenant
+        && !router.apex_slug.is_empty()
+        && req
+            .extensions()
+            .get::<Tenant>()
+            .map(|t| t.slug == router.apex_slug)
+            .unwrap_or(false);
+    if on_apex {
+        next.run(req).await
+    } else {
+        StatusCode::NOT_FOUND.into_response()
     }
 }
 

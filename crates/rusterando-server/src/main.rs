@@ -1,3 +1,10 @@
+// The axum router is a deep chain of `.layer(...)` wrappers (tenant routing,
+// sysadmin gate, i18n guard, canonicalisation, rate limit, admin auth, …).
+// rustc bounds the depth of its type-level queries by the crate's
+// recursion_limit; the default 128 intermittently trips
+// "queries overflow the depth limit!" on this router type. Raise it.
+#![recursion_limit = "512"]
+
 use std::sync::Arc;
 
 use axum::Router;
@@ -47,6 +54,9 @@ struct AppState {
     /// payment-method detail lookup.
     #[allow(dead_code)]
     stripe_mode: rusterando_frontend::stripe::StripeModeHandle,
+    /// Single-tenant / apex local address index (per-tenant handles live on
+    /// the Tenant). Provided into context as the fallback.
+    geo: rusterando_frontend::pages::geo::ssr::GeoIndexHandle,
     /// Multilingual UI toggle. `false` = single-locale (German-only)
     /// shop, the locale switcher is hidden, /<lang>/* routes 404.
     /// `true` = the locale switcher appears in the header and
@@ -133,6 +143,7 @@ fn resolved_tenant_ctx(
             slug: t.slug.clone(),
             env_file: t.env_file.clone(),
             database_url: t.database_url.clone(),
+            public_url: t.public_url.clone(),
         })
         .unwrap_or_default()
 }
@@ -387,7 +398,9 @@ async fn main() {
     // Build the cached Restaurant JSON-LD once at boot (after the category
     // slug backfill, so menu data is final). Rebuilt by the admin edit paths.
     let jsonld = rusterando_frontend::pages::seo::JsonLdHandle::new(
-        rusterando_frontend::pages::seo::build_restaurant_jsonld(&db, &branding.get()).await,
+        // Boot-time global handle = the apex / single-tenant deployment, so
+        // the process PUBLIC_URL is the right base here (empty → that value).
+        rusterando_frontend::pages::seo::build_restaurant_jsonld(&db, &branding.get(), "").await,
     );
 
     // Stripe mode — sandbox vs live. Same handle pattern: one boot
@@ -436,6 +449,16 @@ async fn main() {
         deployment_database_url,
         global_handles,
     );
+    // Single-tenant address index (GEO_BACKEND in the process env).
+    if single_tenant.geo.backend_configured {
+        match single_tenant.geo.reload(&db).await {
+            Ok(0) => {
+                tracing::info!("GEO_BACKEND set but no addresses imported yet (run geo-import)")
+            }
+            Ok(n) => tracing::info!("address index loaded ({n} streets)"),
+            Err(e) => tracing::warn!("address index load failed: {e}"),
+        }
+    }
     let tenants = rusterando_server::tenant::Tenants::new();
     if multi_tenant {
         // Load every tenant env file, with a PRECISE per-file report: each
@@ -482,6 +505,15 @@ async fn main() {
     } else {
         String::new()
     };
+    // Sys-admin ops (apex-host tenant import wizard). Multi-tenant only — in
+    // single-tenant mode the handle is None and /sysadmin says "not here".
+    let sysadmin: rusterando_frontend::pages::sysadmin::SysAdminHandle = if multi_tenant {
+        let s = rusterando_server::sysadmin::SysAdmin::new(tenants.clone(), apex_slug.clone());
+        rusterando_server::sysadmin::SysAdmin::register(&s);
+        Some(s)
+    } else {
+        None
+    };
     let tenant_router = rusterando_server::tenant::TenantRouter {
         tenants: tenants.clone(),
         multi_tenant,
@@ -500,7 +532,9 @@ async fn main() {
     let kitchen = match std::env::var("KITCHEN_LISTEN_ADDR") {
         Ok(addr_str) => match addr_str.parse::<std::net::SocketAddr>() {
             Ok(addr) => {
-                let chan = rusterando_server::kitchen::KitchenChannel::new(db.clone());
+                let chan = rusterando_server::kitchen::KitchenChannel::new(db.clone())
+                    .with_live(live.clone())
+                    .with_orders_paused(orders_paused.clone());
                 let listener_chan = chan.clone();
                 // Respawn loop: on 2026-05-30 the listener exited once
                 // with "Too many open files" and stayed dead the rest of
@@ -581,6 +615,7 @@ async fn main() {
     let state = AppState {
         leptos_options: leptos_options.clone(),
         db: db.clone(),
+        geo: single_tenant.geo.clone(),
         admin_password: Arc::new(admin_password),
         notifier: notifier.clone(),
         apns,
@@ -610,6 +645,12 @@ async fn main() {
         state.apns.clone(),
         state.branding.clone(),
     );
+
+    // "Abholbereit" push to the drivers when a delivery reaches the ready
+    // column, whichever board moved it (see driver_ready_push.rs).
+    if let Some(apns) = state.apns.clone() {
+        rusterando_server::driver_ready_push::spawn(db.clone(), state.live.clone(), apns);
+    }
 
     let routes = generate_route_list(App);
 
@@ -686,6 +727,7 @@ async fn main() {
             {
                 let db = db.clone();
                 let pwd = state.admin_password.clone();
+                let geo_global = state.geo.clone();
                 let notifier = notifier.clone();
                 let apns = state.apns.clone();
                 let sink = broadcast_sink.clone();
@@ -702,7 +744,10 @@ async fn main() {
                 let jsonld = state.jsonld.clone();
                 let deployment = state.deployment.clone();
                 let i18n_pack_info = state.i18n_pack_info.clone();
+                let sysadmin = sysadmin.clone();
                 move || {
+                    // SysAdminHandle — apex-only tenant import wizard.
+                    provide_context(sysadmin.clone());
                     // i18n pack filename → shell bakes it into __appBootstrap.
                     provide_context(i18n_pack_info.clone());
                     // Per-request tenant: the `resolve_tenant` middleware
@@ -722,6 +767,13 @@ async fn main() {
                         None => (db.clone(), None),
                     };
                     provide_context(pool);
+                    // Per-tenant local address index (or the global one).
+                    provide_context(
+                        tenant
+                            .as_ref()
+                            .map(|t| t.geo.clone())
+                            .unwrap_or_else(|| geo_global.clone()),
+                    );
                     provide_context(pwd.clone());
                     // Per-tenant auth secrets (admin/kitchen/driver passwords)
                     // so logins check the RIGHT tenant's password. Default
@@ -856,6 +908,12 @@ async fn main() {
         // Global shop open/closed channel — home + cart subscribe so the
         // pause/force-open state flips without a reload.
         .route("/api/live/shop", axum::routing::get(live_shop_sse_handler))
+        .route("/api/live/board", axum::routing::get(live_board_sse_handler))
+        // Browser mirror of the kitchen display (crates/kds-web): the page,
+        // its live feed and its taps. Admin + Küche only.
+        .route("/kitchen/display", axum::routing::get(kds_page_handler))
+        .route("/api/kds/feed", axum::routing::get(kds_feed_handler))
+        .route("/api/kds/action", axum::routing::post(kds_action_handler))
         // Process-health probe — fd usage + uptime. Designed for an
         // external uptime monitor to poll every minute and alert on
         // `status != "ok"`. Unauthenticated, counters only.
@@ -904,6 +962,13 @@ async fn main() {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             i18n_guard_middleware,
+        ))
+        // Sys-admin host gate: /sysadmin* + /api/sysadmin_* only on the apex
+        // of a multi-tenant deployment; 404 on tenant hosts and standalone
+        // shops. Inside resolve_tenant (see above) so it sees the Tenant.
+        .layer(axum::middleware::from_fn_with_state(
+            tenant_router.clone(),
+            rusterando_server::tenant::sysadmin_gate,
         ))
         // Tenant routing: resolve the per-request Tenant from X-Tenant/Host and
         // stash it in extensions BEFORE the Leptos handlers AND the i18n guard
@@ -1225,7 +1290,14 @@ async fn sitemap_handler(
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
 
-    let base = rusterando_frontend::pages::home::site_url();
+    // The tenant's own PUBLIC_URL (raw axum handler — no leptos context here,
+    // so read it off the Tenant directly). Falls back to the process value on
+    // the apex / single-tenant.
+    let base = tenant
+        .as_ref()
+        .map(|axum::extract::Extension(t)| t.public_url.clone())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(rusterando_frontend::pages::home::site_url);
     let base = base.trim_end_matches('/');
     let i18n_on = match tenant.as_ref() {
         Some(axum::extract::Extension(t)) => t.handles.i18n.get(),
@@ -1332,10 +1404,18 @@ async fn sitemap_handler(
 /// `/robots.txt` — allows the public site, blocks the staff and
 /// transactional areas from being crawled or indexed, and points
 /// crawlers at the sitemap (absolute URL, as the spec requires).
-async fn robots_handler() -> impl axum::response::IntoResponse {
+async fn robots_handler(
+    // Per-request tenant, so each shop's robots.txt points at ITS sitemap
+    // rather than the apex showroom's.
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+) -> impl axum::response::IntoResponse {
     use axum::http::header;
 
-    let base = rusterando_frontend::pages::home::site_url();
+    let base = tenant
+        .as_ref()
+        .map(|axum::extract::Extension(t)| t.public_url.clone())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(rusterando_frontend::pages::home::site_url);
     let base = base.trim_end_matches('/');
 
     let body = format!(
@@ -1476,6 +1556,179 @@ async fn live_shop_sse_handler(
         )],
         sse,
     )
+}
+
+/// `/api/live/board` — staff-only SSE: a bare `changed` ping whenever an
+/// order's status changes, a customer writes or reads a message, or a new
+/// order reaches the kitchen. Carries no order data: /admin/orders, /kitchen
+/// and /driver refetch through their own role-checked server fns. This is
+/// what makes a change made elsewhere (e.g. on the kitchen display) appear
+/// on an open board without a reload.
+async fn live_board_sse_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    cookies: tower_cookies::Cookies,
+) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::IntoResponse;
+    use futures::StreamExt;
+    use rusterando_frontend::pages::session::{ssr::role_from_cookies, Role};
+    use rusterando_shared::models::LiveKind;
+
+    if !matches!(
+        role_from_cookies(&cookies),
+        Some(Role::Admin | Role::Kitchen | Role::Driver)
+    ) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+
+    let live = tokio_stream::wrappers::BroadcastStream::new(state.live.subscribe())
+        .filter_map(|res| async move {
+            match res {
+                Ok(ev) => matches!(
+                    ev.kind,
+                    LiveKind::Status(_) | LiveKind::Message(_) | LiveKind::MessageAck { .. }
+                )
+                .then_some(()),
+                // Lagged: we missed some — a refetch catches up.
+                Err(_) => Some(()),
+            }
+        })
+        .boxed();
+    // New cash orders and freshly paid card orders surface as kitchen prints.
+    let new_orders = match state.kitchen.as_ref() {
+        Some(chan) => tokio_stream::wrappers::BroadcastStream::new(chan.subscribe())
+            .map(|_| ())
+            .boxed(),
+        None => futures::stream::pending().boxed(),
+    };
+    let stream = futures::stream::select(live, new_orders)
+        .map(|()| Ok::<_, std::convert::Infallible>(Event::default().data("changed")))
+        // Close on shutdown so this stream never blocks the graceful drain.
+        .take_until(wait_for_shutdown(state.shutdown.clone()));
+
+    // 5s keep-alive + no proxy buffering, as for the other live streams.
+    let sse =
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)));
+    (
+        [(
+            axum::http::header::HeaderName::from_static("x-accel-buffering"),
+            "no",
+        )],
+        sse,
+    )
+        .into_response()
+}
+
+/// Admin or Küche — who may see and work the kitchen display.
+fn kds_allowed(cookies: &tower_cookies::Cookies) -> bool {
+    use rusterando_frontend::pages::session::{ssr::role_from_cookies, Role};
+    matches!(role_from_cookies(cookies), Some(Role::Admin | Role::Kitchen))
+}
+
+/// `/kitchen/display` — the kitchen display's screen in the browser: a bare
+/// full-window page that loads the Slint WASM build (scripts/build_kds_web.sh
+/// → `<site_root>/pkg/kds/`). Versioned by the build's hash so the
+/// immutable `/pkg/` cache never serves an old build.
+async fn kds_page_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    cookies: tower_cookies::Cookies,
+) -> axum::response::Response {
+    use axum::response::{Html, IntoResponse, Redirect};
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    if !kds_allowed(&cookies) {
+        return Redirect::to("/kitchen/login").into_response();
+    }
+    let v = VERSION.get_or_init(|| {
+        let path = format!("{}/pkg/kds/hash.txt", state.leptos_options.site_root);
+        std::fs::read_to_string(&path).map(|s| s.trim().to_string()).unwrap_or_default()
+    });
+    if v.is_empty() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "Küchen-Display (Browser) ist nicht gebaut: scripts/build_kds_web.sh",
+        )
+            .into_response();
+    }
+    Html(format!(
+        r#"<!doctype html>
+<html lang="de"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Küchen-Display</title>
+<style>html,body{{margin:0;height:100%;background:#0d0f12;overflow:hidden}}
+body{{display:flex;align-items:center;justify-content:center}}
+canvas{{display:block;outline:none;touch-action:none}}</style>
+</head><body><canvas id="canvas" tabindex="0"></canvas>
+<script type="module">
+import init from "/pkg/kds/kds_web.js?v={v}";
+init({{ module_or_path: "/pkg/kds/kds_web_bg.wasm?v={v}" }});
+</script></body></html>"#
+    ))
+    .into_response()
+}
+
+/// `/api/kds/feed` — the kitchen display's board feed for the browser:
+/// postcard `KitchenEvent`s (board, shop panel, alert), base64 per message.
+async fn kds_feed_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    cookies: tower_cookies::Cookies,
+) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::IntoResponse;
+    use base64::Engine;
+    use futures::StreamExt;
+
+    if !kds_allowed(&cookies) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(chan) = state.kitchen.as_ref() else {
+        return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let stream = tokio_stream::wrappers::ReceiverStream::new(chan.board_feed())
+        .filter_map(|msg| async move {
+            let bytes = postcard::to_allocvec(&msg.event).ok()?;
+            Some(Ok::<_, std::convert::Infallible>(
+                Event::default().data(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            ))
+        })
+        // Close on shutdown so this stream never blocks the graceful drain.
+        .take_until(wait_for_shutdown(state.shutdown.clone()));
+    let sse =
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)));
+    (
+        [(
+            axum::http::header::HeaderName::from_static("x-accel-buffering"),
+            "no",
+        )],
+        sse,
+    )
+        .into_response()
+}
+
+/// `/api/kds/action` — a tap on the browser kitchen display: a postcard
+/// `ClientMessage` (`BoardAdvance` or `Shop`). 204 = done (the feed shows
+/// the result), 422 + text = refused, with the reason to show.
+async fn kds_action_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    cookies: tower_cookies::Cookies,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if !kds_allowed(&cookies) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(chan) = state.kitchen.as_ref() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok(msg) = postcard::from_bytes::<kitchen_protocol::ClientMessage>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match chan.board_action(msg).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(reason) => (StatusCode::UNPROCESSABLE_ENTITY, reason).into_response(),
+    }
 }
 
 /// Max upload size — keeps decompression bombs out and matches what a
@@ -2591,7 +2844,7 @@ async fn mark_order_paid(
         if summary.order_type == "delivery" {
             roles.push("driver");
         }
-        apns.notify_roles(&roles, &title, &body, Some(&deep_link));
+        apns.notify_roles_urgent(&roles, &title, &body, Some(&deep_link));
     }
 
     // Kitchen printer: now that payment is durable, broadcast the
@@ -2737,15 +2990,32 @@ async fn menu_pdf_handler(
     }
     let prices_part = if use_next_prices { "-neue-preise" } else { "" };
 
-    let site_url = std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into());
-
-    // Per-request tenant's pool + branding + slug, else the global ones (apex /
-    // single-tenant). So each shop's /menu.pdf renders its OWN menu.
-    let (pool, branding, slug) = match tenant.as_ref() {
-        Some(axum::extract::Extension(t)) => {
-            (t.pool.clone(), t.handles.branding.get(), t.slug.clone())
-        }
-        None => (state.db.clone(), state.branding.get(), String::new()),
+    // Per-request tenant's pool + branding + slug + PUBLIC_URL, else the
+    // global ones (apex / single-tenant). So each shop's /menu.pdf renders its
+    // OWN menu — and, crucially, its own QR code: reading the PROCESS
+    // PUBLIC_URL here printed the apex showroom (rusterando.de) on every
+    // tenant's menu, sending customers to the demo shop instead of the one
+    // whose menu they were holding.
+    let (pool, branding, slug, site_url) = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => (
+            t.pool.clone(),
+            t.handles.branding.get(),
+            t.slug.clone(),
+            t.public_url.clone(),
+        ),
+        None => (
+            state.db.clone(),
+            state.branding.get(),
+            String::new(),
+            String::new(),
+        ),
+    };
+    // A tenant with no PUBLIC_URL in its .env (or the apex) falls back to the
+    // process value, then to the local dev address.
+    let site_url = if site_url.is_empty() {
+        std::env::var("PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into())
+    } else {
+        site_url
     };
 
     // Download filename: `<menu-domain>_<tenant>.pdf` — the shop name as the
@@ -2837,6 +3107,7 @@ async fn server_fn_handler(
         {
             let db = state.db.clone();
             let pwd = state.admin_password.clone();
+            let geo_global = state.geo.clone();
             let notifier = state.notifier.clone();
             let apns = state.apns.clone();
             let theme = state.theme.clone();
@@ -2859,6 +3130,12 @@ async fn server_fn_handler(
                     None => (db.clone(), None),
                 };
                 provide_context(pool);
+                provide_context(
+                    tenant
+                        .as_ref()
+                        .map(|t| t.geo.clone())
+                        .unwrap_or_else(|| geo_global.clone()),
+                );
                 provide_context(pwd.clone());
                 // Per-tenant auth (admin/kitchen/driver passwords) — the login
                 // server fns read this so each tenant checks its OWN password.

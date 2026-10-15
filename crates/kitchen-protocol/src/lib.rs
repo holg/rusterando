@@ -67,7 +67,32 @@ pub enum KitchenEvent {
         bytes: Vec<u8>,
         last: bool,
     },
+
+    // ===== Kitchen display board (2.1+) — APPEND ONLY =====
+    /// The complete set of active orders for a kitchen display terminal.
+    /// Only sent to a client that asked via [`ClientMessage::BoardSubscribe`]
+    /// (old Pis never do, so they never see this variant). Sent whole on
+    /// subscribe and again after every change — the board is a handful of
+    /// orders, so a full snapshot is cheaper to reason about than deltas.
+    /// Ephemeral: travels with `seq_id` [`BOARD_SEQ`], never touches the
+    /// outbox, and must NOT be acked or run through the print idempotency
+    /// cache.
+    Board(BoardSnapshot),
+    /// Shop open/closed state + today's hours for the terminal's
+    /// "Öffnungszeiten" page — the quick controls of /admin/hours. Sent to a
+    /// board subscriber on subscribe, on every change, and after each
+    /// [`ClientMessage::Shop`] (carrying its result in `notice`). Ephemeral
+    /// like `Board` ([`BOARD_SEQ`], never acked).
+    Shop(ShopPanel),
+    /// Alert the kitchen display now — the new-order flash + gong — with a
+    /// message from the admin ("Alarm auslösen" on /admin/drucker). Only
+    /// board subscribers get it; ephemeral like `Board`.
+    Alert { title: String, text: String },
 }
+
+/// `seq_id` carried by every ephemeral (non-outbox) frame: update offers and
+/// board snapshots. Real outbox rows start at 1.
+pub const BOARD_SEQ: SeqId = SeqId(0);
 
 /// A server-managed component the Pi can self-update. Only the printer
 /// binary today; the enum leaves room (tunnel unit, init script, …)
@@ -120,6 +145,25 @@ pub enum ClientMessage {
         /// Empty on success; a short reason on failure.
         error: String,
     },
+
+    // ===== Kitchen display board (2.1+) — APPEND ONLY =====
+    /// Opt this connection into [`KitchenEvent::Board`] snapshots. Sent once
+    /// after Hello by a display terminal; a plain printer never sends it.
+    BoardSubscribe,
+    /// Move an order between board columns. `from` is the status the
+    /// terminal was showing — the server applies the change only if the
+    /// order is still in that status (so a stale tap after a web-board
+    /// change is a no-op) and only along [`board_transition_allowed`].
+    /// The fresh snapshot that follows is the reply.
+    BoardAdvance {
+        /// The TEXT `orders.id` (not the hashed [`OrderId`]).
+        order_id: String,
+        from: BoardStatus,
+        to: BoardStatus,
+    },
+    /// A quick control from the terminal's "Öffnungszeiten" page — the same
+    /// actions as the /admin/hours buttons. Answered by a [`ShopPanel`].
+    Shop(ShopAction),
 }
 
 // ===== Domain types =====
@@ -257,6 +301,155 @@ pub enum PaymentStatus {
     Prepaid,
     /// Driver collects cash on delivery. Amount is the full receipt total.
     CollectOnDelivery { amount_cents: u32 },
+}
+
+// ===== Kitchen display board (2.1+) =====
+
+/// One [`KitchenEvent::Board`] payload: every order currently on the board.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardSnapshot {
+    /// Server wall clock at send time. The terminal derives "waiting for N
+    /// minutes" from `created_at_unix`; this lets it correct for its own
+    /// clock being off instead of trusting NTP on the device.
+    pub server_now_unix: i64,
+    /// Oldest first (`created_at`), all three columns mixed.
+    pub orders: Vec<BoardOrder>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BoardOrder {
+    /// The TEXT `orders.id`, echoed back in [`ClientMessage::BoardAdvance`].
+    pub id: String,
+    pub status: BoardStatus,
+    /// Same DTO the receipt is composed from (items, channel, customer,
+    /// note, payment, shop-TZ time labels), so screen and Bon never disagree.
+    pub order: OrderForKitchen,
+}
+
+/// Board-relevant order statuses. The first three are the columns; the last
+/// two are exits the terminal may request (the order then leaves the board).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BoardStatus {
+    /// `received` — column 1, "Neu".
+    Received,
+    /// `preparing` — column 2, "In Arbeit".
+    Preparing,
+    /// `ready_for_pickup` — column 3, ready for the customer or the driver.
+    Ready,
+    /// `picked_up` — pickup order handed over at the counter.
+    PickedUp,
+    /// `out_for_delivery` — driver left with it (no tour; the driver board
+    /// shows it as a loose stop and marks it delivered).
+    OutForDelivery,
+    /// `cancelled` — Storno from the terminal, same as the admin board's
+    /// "Stornieren" (status only; an online payment is NOT refunded).
+    Cancelled,
+}
+
+impl BoardStatus {
+    /// The `orders.status` value.
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::Preparing => "preparing",
+            Self::Ready => "ready_for_pickup",
+            Self::PickedUp => "picked_up",
+            Self::OutForDelivery => "out_for_delivery",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn from_db(s: &str) -> Option<Self> {
+        Some(match s {
+            "received" => Self::Received,
+            "preparing" => Self::Preparing,
+            "ready_for_pickup" => Self::Ready,
+            "picked_up" => Self::PickedUp,
+            "out_for_delivery" => Self::OutForDelivery,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+}
+
+/// The moves a kitchen terminal may make: forward one column, back one
+/// column (mis-tap undo), out of the ready column — handed over for pickup
+/// orders, driver gone for deliveries — and Storno from any column. Refunds
+/// and jumps stay admin territory. The server enforces this; the terminal
+/// uses it to decide which buttons to show.
+pub fn board_transition_allowed(from: BoardStatus, to: BoardStatus, is_delivery: bool) -> bool {
+    use BoardStatus::*;
+    matches!(
+        (from, to, is_delivery),
+        (Received, Preparing, _)
+            | (Preparing, Ready, _)
+            | (Preparing, Received, _)
+            | (Ready, Preparing, _)
+            | (Ready, PickedUp, false)
+            | (Ready, OutForDelivery, true)
+            | (Received | Preparing | Ready, Cancelled, _)
+    )
+}
+
+/// The customer-facing traffic light (mirrors `rusterando_shared::ShopLevel`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShopLight {
+    /// Taking orders now.
+    Open,
+    /// Closed now, opens later today (pre-orders possible).
+    OpensLater,
+    Closed,
+}
+
+/// The status line + quick-control state of /admin/hours.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShopPanel {
+    pub light: ShopLight,
+    /// Customer-facing reason, e.g. "Heute ab 17:00 Uhr geöffnet"; empty
+    /// when plainly open.
+    pub reason: String,
+    /// Can a customer place an order right now (the real `place_order`
+    /// gate)? Can be false while `light` is Open — near closing time —
+    /// which is when "Notbetrieb" is offered.
+    pub gate_open: bool,
+    pub gate_reason: String,
+    /// Indefinite manual pause ("Jetzt schließen").
+    pub orders_paused: bool,
+    /// Timed pause active until this local "HH:MM"; empty when none.
+    pub snooze_until: String,
+    /// Force-open ("Jetzt öffnen" / Notbetrieb) active until this local
+    /// "HH:MM"; empty when none.
+    pub force_open_until: String,
+    /// "Keine Lieferung (nur Abholung)".
+    pub delivery_paused: bool,
+    /// Today's effective window, "HH:MM"; empty when closed all day.
+    pub today_open: String,
+    pub today_close: String,
+    /// Today's hours were adjusted ("Heute angepasst").
+    pub today_extended: bool,
+    /// Result of the terminal's last [`ShopAction`]: empty on success, else
+    /// the server's message (e.g. why an hours change was refused).
+    pub notice: String,
+}
+
+/// The /admin/hours quick controls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShopAction {
+    /// `true`: "Jetzt öffnen" / Notbetrieb (force-open until end of day);
+    /// `false`: "Jetzt schließen" (indefinite pause).
+    SetOpen(bool),
+    /// "Auf Plan zurücksetzen": drop every manual override.
+    ResetToSchedule,
+    /// "Bei Überlastung kurz pausieren" for this many minutes; 0 cancels.
+    Snooze { minutes: u16 },
+    /// "Keine Lieferung (nur Abholung)" on/off.
+    SetDeliveryPaused(bool),
+    /// "Heute früher / länger offen": new open (earlier only) and/or close
+    /// (later only) as "HH:MM".
+    SetTodayHours {
+        open: Option<String>,
+        close: Option<String>,
+    },
 }
 
 // ===== Small helpers for the wire side, optional =====
@@ -589,6 +782,43 @@ mod tests {
                 assert_ne!(got_major, expected_major);
             }
             _ => panic!("expected MajorMismatch, got {err:?}"),
+        }
+    }
+    #[test]
+    fn board_status_db_round_trip() {
+        use BoardStatus::*;
+        for st in [Received, Preparing, Ready, PickedUp, OutForDelivery, Cancelled] {
+            assert_eq!(BoardStatus::from_db(st.as_db()), Some(st));
+        }
+        assert_eq!(BoardStatus::from_db("pending_payment"), None);
+        assert_eq!(BoardStatus::from_db("delivered"), None);
+    }
+
+    #[test]
+    fn board_transitions() {
+        use BoardStatus::*;
+        // forward / back one column, either channel
+        for d in [true, false] {
+            assert!(board_transition_allowed(Received, Preparing, d));
+            assert!(board_transition_allowed(Preparing, Ready, d));
+            assert!(board_transition_allowed(Preparing, Received, d));
+            assert!(board_transition_allowed(Ready, Preparing, d));
+            // no jumps
+            assert!(!board_transition_allowed(Received, Ready, d));
+            assert!(!board_transition_allowed(Received, PickedUp, d));
+        }
+        // the exit depends on the channel
+        assert!(board_transition_allowed(Ready, PickedUp, false));
+        assert!(!board_transition_allowed(Ready, PickedUp, true));
+        assert!(board_transition_allowed(Ready, OutForDelivery, true));
+        assert!(!board_transition_allowed(Ready, OutForDelivery, false));
+        // Storno from every column, but not out of a finished state
+        for d in [true, false] {
+            for from in [Received, Preparing, Ready] {
+                assert!(board_transition_allowed(from, Cancelled, d));
+            }
+            assert!(!board_transition_allowed(PickedUp, Cancelled, d));
+            assert!(!board_transition_allowed(Cancelled, Received, d));
         }
     }
 }

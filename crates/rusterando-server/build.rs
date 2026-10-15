@@ -1,7 +1,7 @@
-//! Download font files into OUT_DIR/fonts so include_bytes! can reference
-//! them. The Inter release ships only as a zip; we extract the four TTFs we
-//! need. Noto Color Emoji is hosted as a single .ttf at a stable Google CDN
-//! path (versioned), so it's a plain GET.
+//! Download the Inter font files into OUT_DIR/fonts so include_bytes! can
+//! reference them. The Inter release ships only as a zip; we extract the
+//! three TTFs we need. The emoji font is a checked-in subset under
+//! assets/fonts — no download.
 //!
 //! Cached per-target via OUT_DIR — network only on first build.
 
@@ -16,11 +16,6 @@ const INTER_FILES: &[(&str, &str)] = &[
     ("Inter-Italic.ttf", "extras/ttf/Inter-Italic.ttf"),
 ];
 
-// jsdelivr mirror is faster + more reliable than github raw for build agents.
-const NOTO_EMOJI_URL: &str =
-    "https://cdn.jsdelivr.net/gh/googlefonts/noto-emoji@v2.038/fonts/NotoColorEmoji.ttf";
-const NOTO_EMOJI_FILE: &str = "NotoColorEmoji.ttf";
-
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
@@ -29,7 +24,6 @@ fn main() {
     std::fs::create_dir_all(&cache).expect("create font cache");
 
     fetch_inter(&cache);
-    fetch_simple(&cache, NOTO_EMOJI_FILE, NOTO_EMOJI_URL);
 
     println!("cargo:rustc-env=FONT_CACHE_DIR={}", cache.display());
 }
@@ -58,17 +52,6 @@ fn http_get(url: &str) -> Vec<u8> {
         .read_to_end(&mut body)
         .unwrap_or_else(|e| panic!("read {url}: {e}"));
     body
-}
-
-fn fetch_simple(cache: &Path, name: &str, url: &str) {
-    let dst = cache.join(name);
-    if !need_download(&dst) {
-        return;
-    }
-    eprintln!("[build.rs] downloading {name}");
-    let bytes = http_get(url);
-    std::fs::write(&dst, &bytes).unwrap_or_else(|e| panic!("write {name}: {e}"));
-    eprintln!("[build.rs] {name}: {} bytes", bytes.len());
 }
 
 fn fetch_inter(cache: &Path) {

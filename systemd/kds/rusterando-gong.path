@@ -1,0 +1,11 @@
+[Unit]
+Description=Rusterando kitchen display: new-order gong trigger
+
+[Path]
+# The display (rusterando-kds, a locked-down dynamic user without access to
+# root's PipeWire session) writes this file on every new order.
+PathModified=/run/rusterando-kds/gong
+Unit=rusterando-gong.service
+
+[Install]
+WantedBy=multi-user.target

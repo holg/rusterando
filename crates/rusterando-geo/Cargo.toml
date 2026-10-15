@@ -1,0 +1,42 @@
+[package]
+name = "rusterando-geo"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Local, in-process address lookup for Rusterando: NRW cadastre (Gebäudereferenzen) import, street/house-number autocomplete index, and delivery-zone evaluation. Pure Rust, no external geocoder at runtime."
+
+# Native only: this crate is consumed by the server binary and the
+# frontend's `ssr` feature. Nothing in here ships to the WASM bundle.
+
+[lib]
+crate-type = ["rlib"]
+
+[[bin]]
+name = "geo-import"
+path = "src/bin/geo-import.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# Fuzzy street ranking (Jaro-Winkler). Pure Rust.
+strsim = "0.11"
+# Cadastre export encoding detection (UTF-8 vs Windows-1252). Pure Rust.
+encoding_rs = "0.8"
+# Reading the ~100 MB gebref zip as a stream.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# `geo-import --download`. Blocking, tiny, rustls.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+# `geo-import` CLI + tenant .env reading.
+clap = { workspace = true }
+dotenvy = { workspace = true }
+tracing-subscriber = { workspace = true }

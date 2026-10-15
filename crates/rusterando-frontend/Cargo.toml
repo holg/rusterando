@@ -16,6 +16,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rusterando-shared = { workspace = true }
+# Local address lookup (NRW cadastre index + zone evaluation). Server side
+# only — the WASM bundle never sees it (ssr feature gates the dep).
+rusterando-geo = { workspace = true, optional = true }
 # Receipt layout model shared with the Pi printer. The admin printer
 # preview renders the SAME `kitchen_protocol::receipt::build_receipt`
 # list the kitchen ticket is emitted from, so the preview can't drift.
@@ -26,6 +29,7 @@ kitchen-protocol = { workspace = true }
 rusterando-wasm-split = { path = "../rusterando-wasm-split", version = "0.1.0", features = ["interop"], optional = true }
 
 leptos = { workspace = true }
+reactive_graph = { workspace = true }
 leptos_meta = { workspace = true }
 leptos_router = { workspace = true }
 leptos_axum = { workspace = true, optional = true }
@@ -135,4 +139,5 @@ ssr = [
     "dep:async-stripe",
     "dep:reqwest",
     "dep:async-trait",
+    "dep:rusterando-geo",
 ]

@@ -21,6 +21,14 @@ pub struct HomeDeliveryInfo {
     /// Customer-facing reason shown in the banner when not plainly open.
     #[serde(default)]
     pub closed_reason: String,
+    /// Delivery suspended while the shop stays open (no driver). Resolved
+    /// SERVER-SIDE and shipped with the page: a client-only resource would
+    /// render nothing on SSR and then pop in, which both hides the badge for
+    /// non-JS visitors and trips the hydration walker.
+    #[serde(default)]
+    pub delivery_paused: bool,
+    #[serde(default)]
+    pub delivery_paused_reason: String,
     /// Weekly opening hours for the public table, Mon-first. Built from
     /// the DB so the displayed hours always match what gates ordering.
     #[serde(default)]
@@ -95,6 +103,17 @@ pub async fn home_delivery_info() -> Result<HomeDeliveryInfo, ServerFnError> {
     // opening hours) so the home page can warn before the customer even
     // opens the menu.
     let (shop_level, closed_reason) = crate::pages::order::ssr::shop_open_state(&db).await;
+    let delivery_paused = crate::pages::settings::ssr::delivery_paused(&db).await;
+    let delivery_paused_reason = if delivery_paused {
+        let msg = crate::pages::settings::ssr::delivery_paused_message(&db).await;
+        if msg.is_empty() {
+            crate::i18n::t("shop_status.delivery_paused_hint")
+        } else {
+            msg
+        }
+    } else {
+        String::new()
+    };
 
     // Weekly hours for the public table — built from the DB so what's
     // shown always matches what gates ordering. Multiple shift rows per
@@ -129,6 +148,8 @@ pub async fn home_delivery_info() -> Result<HomeDeliveryInfo, ServerFnError> {
         free_delivery_threshold_cents: threshold,
         shop_level,
         closed_reason,
+        delivery_paused,
+        delivery_paused_reason,
         hours_rows,
     })
 }
@@ -137,6 +158,14 @@ pub async fn home_delivery_info() -> Result<HomeDeliveryInfo, ServerFnError> {
 /// so dev/staging/prod each get the right link without a rebuild.
 #[cfg(feature = "ssr")]
 pub fn site_url() -> String {
+    // Per-request tenant first: in a multi-tenant deployment the PROCESS
+    // `PUBLIC_URL` is the APEX's (rusterando.de), so using it here printed
+    // the showroom on every shop's QR code and canonical links.
+    if let Some(t) = use_context::<crate::pages::settings::ResolvedTenant>() {
+        if !t.public_url.is_empty() {
+            return t.public_url;
+        }
+    }
     std::env::var("PUBLIC_URL").unwrap_or_else(|_| DEFAULT_SITE_URL.to_string())
 }
 
@@ -206,7 +235,7 @@ pub fn Home() -> impl IntoView {
                 <div class="hero-content"><h1 class="logo">"MEIN RESTAURANT"</h1></div>
             </section>
             <section id="delivery" class="delivery">
-                <h2>{crate::t!("home.delivery_title")}</h2>
+                <h2>{move || crate::t!("home.delivery_title")}</h2>
             </section>
         }>
             {move || combined.get().map(|(home_res, delivery_res)| {
@@ -230,13 +259,18 @@ pub fn Home() -> impl IntoView {
                     Ok(info) => (info.shop_level, info.closed_reason.clone()),
                     Err(_) => (rusterando_shared::models::ShopLevel::Open, String::new()),
                 };
+                let (init_delivery_paused, init_delivery_reason) = match &delivery_res {
+                    Ok(i) => (i.delivery_paused, i.delivery_paused_reason.clone()),
+                    Err(_) => (false, String::new()),
+                };
                 let top_status_bar = view! {
                     <crate::components::shop_status_bar::ShopStatusBar
-                        init_level init_reason/>
+                        init_level init_reason
+                        init_delivery_paused init_delivery_reason/>
                 };
                 let delivery_body = match delivery_res {
                     Err(_) => view! {
-                        <p class="muted">{crate::t!("home.delivery_unavailable")}</p>
+                        <p class="muted">{move || crate::t!("home.delivery_unavailable")}</p>
                     }.into_any(),
                     Ok(info) => {
                         let threshold = info.free_delivery_threshold_cents;
@@ -253,8 +287,8 @@ pub fn Home() -> impl IntoView {
                                 {info.zones.into_iter().map(|z| view! {
                                     <li>
                                         <strong>{z.name}</strong>
-                                        <span>{crate::t!("home.zone_min_order_prefix")} " " {format_eur(z.min_order_cents)} " · "</span>
-                                        <span class="fee">"+ " {format_eur(z.fee_cents)} " " {crate::t!("home.zone_fee_suffix")}</span>
+                                        <span>{move || crate::t!("home.zone_min_order_prefix")} " " {format_eur(z.min_order_cents)} " · "</span>
+                                        <span class="fee">"+ " {format_eur(z.fee_cents)} " " {move || crate::t!("home.zone_fee_suffix")}</span>
                                     </li>
                                 }).collect_view()}
                             </ul>
@@ -265,7 +299,7 @@ pub fn Home() -> impl IntoView {
                     {top_status_bar}
                     {hero}
                     <section id="delivery" class="delivery">
-                        <h2>{crate::t!("home.delivery_title")}</h2>
+                        <h2>{move || crate::t!("home.delivery_title")}</h2>
                         {delivery_body}
                     </section>
                 }
@@ -274,9 +308,9 @@ pub fn Home() -> impl IntoView {
 
         <section class="qr-card">
             <div class="qr-intro">
-                <h2>{crate::t!("home.qr_title")}</h2>
+                <h2>{move || crate::t!("home.qr_title")}</h2>
                 <p>
-                    {crate::t!("home.qr_intro")} " "
+                    {move || crate::t!("home.qr_intro")} " "
                     <strong>{display}</strong>
                 </p>
             </div>
@@ -285,15 +319,15 @@ pub fn Home() -> impl IntoView {
                 <figure class="qr-tile">
                     <div class="qr-svg" inner_html=qr_site></div>
                     <figcaption>
-                        <strong>{crate::t!("home.qr_online_title")}</strong>
-                        <span>{crate::t!("home.qr_online_sub")}</span>
+                        <strong>{move || crate::t!("home.qr_online_title")}</strong>
+                        <span>{move || crate::t!("home.qr_online_sub")}</span>
                     </figcaption>
                 </figure>
                 <figure class="qr-tile">
                     <div class="qr-svg" inner_html=qr_pdf></div>
                     <figcaption>
-                        <strong>{crate::t!("home.qr_pdf_title")}</strong>
-                        <span>{crate::t!("home.qr_pdf_sub")}</span>
+                        <strong>{move || crate::t!("home.qr_pdf_title")}</strong>
+                        <span>{move || crate::t!("home.qr_pdf_sub")}</span>
                     </figcaption>
                 </figure>
             </div>
@@ -313,7 +347,7 @@ pub fn Home() -> impl IntoView {
         </section>
 
         <section id="hours" class="hours">
-            <h2>{crate::t!("header.opening_hours")}</h2>
+            <h2>{move || crate::t!("header.opening_hours")}</h2>
             // Explicit <tbody>: browsers auto-insert one when parsing
             // <table><tr>... HTML, but Leptos's view tree doesn't emit
             // it. The SSR HTML therefore says <table><tr> while the
@@ -337,7 +371,7 @@ pub fn Home() -> impl IntoView {
                                 let label = home_weekday_label(row.weekday);
                                 if row.windows.is_empty() {
                                     view! {
-                                        <tr><th>{label}</th><td class="closed">{crate::t!("home.day_closed")}</td></tr>
+                                        <tr><th>{label}</th><td class="closed">{move || crate::t!("home.day_closed")}</td></tr>
                                     }.into_any()
                                 } else {
                                     view! {
@@ -354,9 +388,9 @@ pub fn Home() -> impl IntoView {
         <footer class="site-footer">
             <a href="/admin">"Admin"</a>
             <span class="sep">"·"</span>
-            <a href="/impressum">{crate::t!("header.imprint")}</a>
+            <a href="/impressum">{move || crate::t!("header.imprint")}</a>
             <span class="sep">"·"</span>
-            <a href="/datenschutz">{crate::t!("header.privacy")}</a>
+            <a href="/datenschutz">{move || crate::t!("header.privacy")}</a>
         </footer>
     }
 }
@@ -393,7 +427,7 @@ fn HomeBody(content: crate::pages::home_content::HomeContent) -> impl IntoView {
                 <p class="tag">{hero.subtitle}</p>
                 {render_meta()}
                 <p class="cta">
-                    <a class="btn pill big" href="/menu">{crate::t!("home.order_now")}</a>
+                    <a class="btn pill big" href="/menu">{move || crate::t!("home.order_now")}</a>
                 </p>
             </div>
             <a class="hero-scroll-cue" href="#offers" aria-label=crate::t!("home.scroll_more")>"↓"</a>

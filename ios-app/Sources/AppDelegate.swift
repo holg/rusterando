@@ -13,6 +13,7 @@
 //  SceneDelegate / WebViewController.
 //
 
+import AVFoundation
 import UIKit
 import UserNotifications
 
@@ -23,6 +24,16 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        // Playback: the kitchen display's gong sounds even with the device
+        // muted (the default category follows the mute switch), and mixes
+        // with whatever else is playing (the kitchen radio) instead of
+        // stopping it.
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, options: [.mixWithOthers])
+        } catch {
+            NSLog("[audio] set playback category failed: \(error)")
+        }
+
         // Push permission prompt the FIRST time the app launches. iOS
         // remembers the answer; we don't re-ask. If the user said "Don't
         // Allow", later calls quietly no-op — that's fine.

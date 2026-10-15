@@ -486,6 +486,9 @@ pub fn AdminOrdersPage() -> impl IntoView {
         move || orders.refetch(),
         std::time::Duration::from_secs(20),
     );
+    // Live: changes made elsewhere (kitchen display, kitchen/driver board,
+    // new orders) show up within a second; the 20s poll stays as fallback.
+    crate::utils::on_board_change(move || orders.refetch());
 
     view! {
         <AdminShell>

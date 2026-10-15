@@ -7,4 +7,5 @@
 -->
 <resources>
     <string name="settings_open_content_description">Einstellungen öffnen</string>
+    <string name="reload_page_content_description">Seite neu laden</string>
 </resources>

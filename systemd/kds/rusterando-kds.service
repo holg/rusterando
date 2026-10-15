@@ -1,0 +1,61 @@
+[Unit]
+Description=Rusterando kitchen display + receipt printer (STM32MP135F-DK)
+# No network-online / tunnel ordering: the screen must come up at once (the
+# client shows "Verbinde …" and reconnects by itself). This board's
+# networkd-wait-online would otherwise hold it ~2 min at every boot,
+# waiting for the unplugged second Ethernet port.
+After=systemd-udevd.service
+# The display drives /dev/dri/card0 directly (DRM master). Weston would
+# hold it; starting this unit stops Weston (weston-launch on OpenSTLinux
+# 4.x, weston-graphical-session on 5.x / scarthgap).
+Conflicts=weston-launch.service weston-graphical-session.service
+
+[Service]
+Type=simple
+# Transient unprivileged user; groups grant exactly the screen (video),
+# touch (input) and printer (lp, via 99-rusterando-printer.rules).
+DynamicUser=yes
+SupplementaryGroups=video input lp
+
+# Same self-update layout as the Pi unit (systemd/rusterando-printer.service):
+# the live binary runs from the writable StateDirectory so the in-band
+# updater can replace it and exit(0); Restart=always relaunches it. A newer
+# bootstrap copy in /usr/local/bin (fresh deploy_kds.sh) always wins.
+# ST's boot splash (psplash) holds the screen until something tells it to
+# quit — normally Weston, which is disabled here. "+" = as root (the service
+# itself runs as a dynamic user), "-" = fine if no splash is running.
+ExecStartPre=+-/bin/sh -c 'psplash-write QUIT 2>/dev/null; sleep 1; pkill psplash; true'
+ExecStartPre=/bin/sh -c 'L=/var/lib/rusterando-printer/bin/rusterando-printer; \
+  B=/usr/local/bin/rusterando-printer; \
+  if [ ! -x "$L" ] || [ "$B" -nt "$L" ]; then \
+    install -D -m 755 "$B" "$L"; \
+  fi; true'
+ExecStart=/var/lib/rusterando-printer/bin/rusterando-printer
+EnvironmentFile=/etc/rusterando-printer/printer.env
+# The board runs UTC; the clock, due times and "seit N min" are shop time.
+Environment=TZ=Europe/Berlin
+
+Restart=always
+RestartSec=3
+
+StateDirectory=rusterando-printer
+StateDirectoryMode=0750
+# /run/rusterando-kds/gong: written on every new order; rusterando-gong.path
+# (root) plays the gong from it.
+RuntimeDirectory=rusterando-kds
+RuntimeDirectoryMode=0755
+# fontconfig (Slint's font lookup) wants a writable cache.
+CacheDirectory=rusterando-printer
+Environment=XDG_CACHE_HOME=/var/cache/rusterando-printer
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+DeviceAllow=/dev/dri/card0 rw
+DeviceAllow=char-input rw
+DeviceAllow=char-usb_device rw
+DevicePolicy=closed
+
+[Install]
+WantedBy=multi-user.target

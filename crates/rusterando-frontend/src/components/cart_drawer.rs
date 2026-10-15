@@ -150,6 +150,12 @@ pub fn CartFab() -> impl IntoView {
 /// Slide-out drawer with line items, qty controls, subtotal, checkout CTA.
 #[component]
 pub fn CartDrawer() -> impl IntoView {
+    // Delivery suspended (no driver) — same socket. The cart is where a
+    // customer is actually committing, so telling them HERE is what stops a
+    // wasted checkout: they can still order for pickup.
+    let (delivery_read, delivery_write) = signal::<Option<(bool, String)>>(None);
+    crate::utils::subscribe_delivery_pause(delivery_write);
+
     let ctx = use_cart_ctx();
     let is_open = move || ctx.open.get();
     let close = move |_| ctx.open.set(false);
@@ -158,7 +164,7 @@ pub fn CartDrawer() -> impl IntoView {
         <div class="cart-overlay" class:open=is_open on:click=close></div>
         <aside class="cart-drawer" class:open=is_open aria-hidden=move || (!is_open()).to_string()>
             <header class="drawer-head">
-                <h2>{crate::t!("cart.title")}</h2>
+                <h2>{move || crate::t!("cart.title")}</h2>
                 <button class="close" aria-label=crate::t!("common.close") on:click=close>"×"</button>
             </header>
 
@@ -172,11 +178,11 @@ pub fn CartDrawer() -> impl IntoView {
             // resolved on the client and tachys is past the initial
             // hydrate walk.
             <div class="drawer-body">
-                <Suspense fallback=|| view! { <p class="loading">{crate::t!("common.loading")}</p> }>
+                <Suspense fallback=|| view! { <p class="loading">{move || crate::t!("common.loading")}</p> }>
                     {move || ctx.cart.get().map(|res| match res {
                         Err(e) => view! { <p class="error">{format!("{}: {e}", crate::t!("common.error"))}</p> }.into_any(),
                         Ok(cart) if cart.lines.is_empty() => {
-                            view! { <p class="empty">{crate::t!("cart.empty")}</p> }.into_any()
+                            view! { <p class="empty">{move || crate::t!("cart.empty")}</p> }.into_any()
                         }
                         Ok(cart) => view! { <Lines cart/> }.into_any(),
                     })}
@@ -192,14 +198,14 @@ pub fn CartDrawer() -> impl IntoView {
                 // trip on element-cast mismatches.
                 <Suspense fallback=|| view! {
                     <div class="row">
-                        <span>{crate::t!("cart.subtotal")}</span>
+                        <span>{move || crate::t!("cart.subtotal")}</span>
                         <strong>"…"</strong>
                     </div>
                     <p class="free-delivery hidden"></p>
                     <p class="order-closed-note hidden"></p>
-                    <p class="hint">{crate::t!("cart.payment_hint")}</p>
-                    <a class="btn primary disabled" href="/checkout">{crate::t!("cart.proceed")}</a>
-                    <button class="btn ghost" disabled=true>{crate::t!("cart.clear")}</button>
+                    <p class="hint">{move || crate::t!("cart.payment_hint")}</p>
+                    <a class="btn primary disabled" href="/checkout">{move || crate::t!("cart.proceed")}</a>
+                    <button class="btn ghost" disabled=true>{move || crate::t!("cart.clear")}</button>
                 }>
                     {move || {
                         let cart = ctx.cart.get().and_then(|r| r.ok()).unwrap_or_default();
@@ -233,6 +239,24 @@ pub fn CartDrawer() -> impl IntoView {
                         } else {
                             ("order-closed-note hidden", "")
                         };
+                        // Delivery paused: shown even while the shop is open,
+                        // because it changes what the customer can order.
+                        let delivery_note = delivery_read
+                            .get()
+                            .filter(|(paused, _)| *paused)
+                            .map(|(_, hint)| {
+                                let text = if hint.is_empty() {
+                                    crate::t!("shop_status.delivery_paused_hint")
+                                } else {
+                                    hint
+                                };
+                                view! {
+                                    <p class="delivery-paused-note" role="status" aria-live="polite">
+                                        <strong>{move || crate::t!("shop_status.delivery_paused_badge")}</strong>
+                                        " "{text}
+                                    </p>
+                                }
+                            });
                         // Giveaway (free Pizzabrötchen). Four states:
                         //   • not qualified yet → nudge "noch X € bis zum …"
                         //   • qualified, unclaimed → "Jetzt sichern" + sauce choice
@@ -272,27 +296,27 @@ pub fn CartDrawer() -> impl IntoView {
                                 view! {
                                     <div class="giveaway-offer">
                                         <p class="giveaway-headline">
-                                            {crate::t!("cart.giveaway_unlocked")}
+                                            {move || crate::t!("cart.giveaway_unlocked")}
                                         </p>
                                         <p class="giveaway-sauce-label">
-                                            {crate::t!("cart.giveaway_sauce_prompt")}
+                                            {move || crate::t!("cart.giveaway_sauce_prompt")}
                                         </p>
                                         <label class="giveaway-sauce">
                                             <input type="radio" name="giveaway-sauce"
                                                 value="opt-sauce-knoblauch"
                                                 on:change=move |_| sauce.set("opt-sauce-knoblauch".to_string())/>
-                                            <span>{crate::t!("cart.sauce_garlic")}</span>
+                                            <span>{move || crate::t!("cart.sauce_garlic")}</span>
                                         </label>
                                         <label class="giveaway-sauce">
                                             <input type="radio" name="giveaway-sauce"
                                                 value="opt-sauce-kraeuter"
                                                 on:change=move |_| sauce.set("opt-sauce-kraeuter".to_string())/>
-                                            <span>{crate::t!("cart.sauce_herb_butter")}</span>
+                                            <span>{move || crate::t!("cart.sauce_herb_butter")}</span>
                                         </label>
                                         <button class="btn primary small giveaway-claim"
                                             disabled=claim_pending
                                             on:click=on_claim>
-                                            {crate::t!("cart.giveaway_claim")}
+                                            {move || crate::t!("cart.giveaway_claim")}
                                         </button>
                                     </div>
                                 }
@@ -312,18 +336,19 @@ pub fn CartDrawer() -> impl IntoView {
 
                         view! {
                             <div class="row">
-                                <span>{crate::t!("cart.subtotal")}</span>
+                                <span>{move || crate::t!("cart.subtotal")}</span>
                                 <strong>{total}</strong>
                             </div>
                             <p class=banner_cls>{banner_text}</p>
                             {give_view}
                             <p class=closed_note_cls>{closed_note_text}</p>
-                            <p class="hint">{crate::t!("cart.payment_hint")}</p>
-                            <a class=cta_cls href="/checkout" on:click=close>{crate::t!("cart.proceed")}</a>
+                            {delivery_note}
+                            <p class="hint">{move || crate::t!("cart.payment_hint")}</p>
+                            <a class=cta_cls href="/checkout" on:click=close>{move || crate::t!("cart.proceed")}</a>
                             <button class="btn ghost"
                                 disabled=!has_items
                                 on:click=move |_| { ctx.clear.dispatch(ClearCart {}); }>
-                                {crate::t!("cart.clear")}
+                                {move || crate::t!("cart.clear")}
                             </button>
                         }
                     }}
@@ -442,7 +467,7 @@ fn Line(line: CartLine) -> impl IntoView {
         view! {
             <ul class="extras removals">
                 {items.into_iter().map(|r| view! {
-                    <li>{crate::t!("menu.removal_prefix")}{r.label}</li>
+                    <li>{move || crate::t!("menu.removal_prefix")}{r.label}</li>
                 }).collect_view()}
             </ul>
         }
@@ -469,7 +494,7 @@ fn Line(line: CartLine) -> impl IntoView {
                     })}
                 </div>
                 <div class="actions">
-                    <strong class="line-total giveaway-free">{crate::t!("common.free")}</strong>
+                    <strong class="line-total giveaway-free">{move || crate::t!("common.free")}</strong>
                     <div class="line-buttons">
                         <button class="remove" on:click=remove aria-label=crate::t!("cart.remove")>"🗑"</button>
                     </div>

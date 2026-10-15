@@ -44,7 +44,7 @@ pub fn ImpressumPage() -> impl IntoView {
     view! {
         <article class="legal-page">
             <header>
-                <h1>{crate::t!("header.imprint")}</h1>
+                <h1>{move || crate::t!("header.imprint")}</h1>
                 <p class="hint">
                     // German law requires this exact German wording on the
                     // Impressum page (§ 5 TMG). It MUST remain German on every
@@ -136,7 +136,7 @@ pub fn ImpressumPage() -> impl IntoView {
             <p class="legal-footer">
                 <a href="/">"← Zurück zur Startseite"</a>
                 " · "
-                <a href="/datenschutz">{crate::t!("header.privacy")}</a>
+                <a href="/datenschutz">{move || crate::t!("header.privacy")}</a>
             </p>
         </article>
     }
@@ -366,7 +366,7 @@ pub fn DatenschutzPage() -> impl IntoView {
             <p class="legal-footer">
                 <a href="/">"← Zurück zur Startseite"</a>
                 " · "
-                <a href="/impressum">{crate::t!("header.imprint")}</a>
+                <a href="/impressum">{move || crate::t!("header.imprint")}</a>
             </p>
         </article>
     }

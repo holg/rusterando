@@ -48,7 +48,7 @@ enum ShopStore {
         let url = info?["SeedShopURL"] as? String
         if let url, let name {
             return [Shop(
-                id: UUID().uuidString,
+                id: seedShopId(for: url),
                 name: name,
                 baseUrl: Shop.normaliseUrl(url),
                 activeRole: .customer,
@@ -56,7 +56,7 @@ enum ShopStore {
         }
         if let url {
             return [Shop(
-                id: UUID().uuidString,
+                id: seedShopId(for: url),
                 name: url,
                 baseUrl: Shop.normaliseUrl(url),
                 activeRole: .customer,
@@ -70,16 +70,45 @@ enum ShopStore {
         return []
     }
 
+    /// Deterministic id for the seeded shop, derived from its URL. MUST be
+    /// stable across launches + app versions: the seed is re-created on a
+    /// genuine first launch, and Keychain passwords are keyed by
+    /// `<shopId>:<role>` — a random UUID would orphan them every time. So the
+    /// same shop always resolves to the same id, and saved logins survive.
+    private static func seedShopId(for url: String) -> String {
+        "seed-" + Shop.normaliseUrl(url)
+    }
+
     // MARK: - Shops list (UserDefaults)
 
+    /// The stored shop list. CRITICAL DATA-SAFETY CONTRACT:
+    ///
+    ///   - Key ABSENT (true first launch) → seed from the flavor + persist.
+    ///   - Key PRESENT but undecodable → return **empty WITHOUT overwriting**.
+    ///     A schema change or transient corruption must NEVER cause us to
+    ///     re-seed on top of the user's real data — that's how an update wiped
+    ///     saved accounts. We keep the raw bytes so a future migration can
+    ///     still recover them, and we do NOT touch the active-shop pointer.
+    ///   - Key PRESENT and decodable → return it.
+    ///
+    /// The previous implementation collapsed the middle case into the first,
+    /// silently destroying stored shops (and orphaning Keychain passwords) on
+    /// any decode failure.
     static func all() -> [Shop] {
-        guard let data = UserDefaults.standard.data(forKey: shopsKey),
-              let shops = try? JSONDecoder().decode([Shop].self, from: data)
-        else {
+        guard let data = UserDefaults.standard.data(forKey: shopsKey) else {
+            // Genuinely nothing stored yet → first launch: seed + persist.
             let seeded = bootstrappedShops()
             saveAll(seeded)
             UserDefaults.standard.set(seeded.first?.id, forKey: activeShopKey)
             return seeded
+        }
+        guard let shops = try? JSONDecoder().decode([Shop].self, from: data) else {
+            // Data exists but won't decode. DO NOT re-seed/overwrite — that
+            // would wipe real accounts. Preserve the bytes untouched; surface
+            // an empty list so the UI shows "add a shop" rather than crashing.
+            NSLog("[shopstore] stored shops present but failed to decode — "
+                + "NOT overwriting (preserving \(data.count) bytes for recovery)")
+            return []
         }
         return shops
     }
@@ -132,6 +161,7 @@ enum ShopStore {
         for role in Role.staffRoles {
             deletePassword(shopId: id, role: role)
         }
+        UserDefaults.standard.removeObject(forKey: kitchenDisplayKey(id))
 
         // Pick a new active shop if we just removed it.
         if UserDefaults.standard.string(forKey: activeShopKey) == id {
@@ -149,12 +179,40 @@ enum ShopStore {
         updateShop(s)
     }
 
+    // MARK: - Kitchen display (UserDefaults, per shop)
+
+    /// Whether the Küche role starts on the kitchen display
+    /// (`/kitchen/display`, the board screen for a kitchen iPad) instead of
+    /// the order list (`/kitchen`). Kept outside [Shop] on purpose: a new
+    /// field there changes the persisted shop JSON, which every installed
+    /// version must keep decoding (see `all()`).
+    static func kitchenOpensDisplay(shopId: String) -> Bool {
+        UserDefaults.standard.bool(forKey: kitchenDisplayKey(shopId))
+    }
+
+    static func setKitchenOpensDisplay(shopId: String, _ on: Bool) {
+        UserDefaults.standard.set(on, forKey: kitchenDisplayKey(shopId))
+    }
+
+    /// Where the shop opens for its active role.
+    static func homePath(for shop: Shop) -> String {
+        if shop.activeRole == .kitchen && kitchenOpensDisplay(shopId: shop.id) {
+            return "/kitchen/display"
+        }
+        return shop.activeRole.homePath
+    }
+
+    private static func kitchenDisplayKey(_ shopId: String) -> String {
+        "rusterando.kitchen_display.\(shopId)"
+    }
+
     /// Drop every shop, every credential, every cached state.
     static func wipeAll() {
         for shop in all() {
             for role in Role.staffRoles {
                 deletePassword(shopId: shop.id, role: role)
             }
+            UserDefaults.standard.removeObject(forKey: kitchenDisplayKey(shop.id))
         }
         UserDefaults.standard.removeObject(forKey: shopsKey)
         UserDefaults.standard.removeObject(forKey: activeShopKey)

@@ -1,0 +1,1187 @@
+// Kitchen display for the STM32MP135F-DK: 4.3" 480×272 capacitive touch —
+// and the same screen in the browser (/kitchen/display, crates/kds-web).
+// Three columns — Neu / In Arbeit / Fertig — of compact order cards; a tap
+// opens the full order with big action buttons. All state lives in Rust
+// (crates/kds-ui/src/lib.rs); this file only lays it out and reports taps.
+//
+// Fonts are embedded (the board image has no usable UI font): Poppins
+// Medium for body text, Bold for numbers and labels. Glyphs outside
+// Latin-1 are avoided on purpose — no emoji, no arrows.
+
+import "../assets/fonts/Poppins-Medium.ttf";
+import "../assets/fonts/Poppins-Bold.ttf";
+
+export struct Card {
+    id: string,
+    // Short order number, as printed big on the Bon ("0012").
+    number: string,
+    delivery: bool,
+    // "19:30" for a pre-order, "sofort" otherwise.
+    when: string,
+    // "12 min" waiting, or "in 25 min" / "fällig" for a pre-order.
+    age: string,
+    // 0 on time · 1 getting late · 2 late.
+    urgency: int,
+    // "2× #22a Funghi · 1× #51 Inferno" — elided on the card.
+    summary: string,
+    // Arrived in the last few minutes and not started yet.
+    fresh: bool,
+    test: bool,
+    // Paid online (Stripe / voucher) — else cash ("BAR") on pickup/delivery.
+    paid: bool,
+}
+
+export struct Line {
+    text: string,
+    sub: string,
+}
+
+global Theme {
+    out property <color> bg: #0e1014;
+    out property <color> panel: #161920;
+    out property <color> card: #232833;
+    out property <color> card-fresh: #1f3a63;
+    out property <color> text: #f1f3f5;
+    out property <color> muted: #9ba4ae;
+    out property <color> new: #4d8ff7;
+    out property <color> work: #f5a524;
+    out property <color> ready: #2fc76b;
+    out property <color> late: #ef4b4b;
+    out property <color> button: #2c323d;
+
+    // Shop traffic light: 0 open (green) · 1 opens later / paused (amber) ·
+    // 2 closed (red) · anything else unknown.
+    public pure function light-color(light: int) -> color {
+        return light == 0 ? self.ready : light == 1 ? self.work : light == 2 ? self.late : self.muted;
+    }
+}
+
+// A small pill, vertically centred in whatever height the layout gives it.
+component Badge inherits Rectangle {
+    in property <string> text;
+    in property <color> tint;
+    in property <color> ink: #0b0d10;
+    width: label.preferred-width + 8px;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        height: 16px;
+        border-radius: 3px;
+        background: root.tint;
+        label := Text {
+            text: root.text;
+            color: root.ink;
+            font-size: 10px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Dot inherits Rectangle {
+    in property <color> tint;
+    width: 10px;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 8px;
+        height: 8px;
+        border-radius: 4px;
+        background: root.tint;
+    }
+}
+
+component Spacer inherits Rectangle {
+    horizontal-stretch: 1;
+}
+
+component OrderCard inherits Rectangle {
+    in property <Card> card;
+    in property <color> accent;
+    callback tapped();
+    border-radius: 6px;
+    clip: true;
+    background: touch.pressed ? Theme.card.brighter(0.25) : root.card.fresh ? Theme.card-fresh : Theme.card;
+
+    // Left stripe: column colour, turning amber/red as the order ages.
+    Rectangle {
+        x: 0;
+        width: 4px;
+        background: root.card.urgency >= 2 ? Theme.late : root.card.urgency == 1 ? Theme.work : root.accent;
+    }
+
+    VerticalLayout {
+        padding-left: 10px;
+        padding-right: 6px;
+        padding-top: 2px;
+        padding-bottom: 4px;
+        spacing: 0px;
+
+        HorizontalLayout {
+            spacing: 4px;
+            height: 24px;
+            Text {
+                text: root.card.number;
+                color: Theme.text;
+                font-size: 20px;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+            Spacer { }
+            // Cash or paid — must be readable at a glance.
+            Badge {
+                text: root.card.paid ? "BEZAHLT" : "BAR";
+                tint: root.card.paid ? Theme.ready : Theme.late;
+                ink: root.card.paid ? #0b0d10 : #ffffff;
+            }
+        }
+
+        HorizontalLayout {
+            height: 15px;
+            spacing: 4px;
+            Badge {
+                text: root.card.delivery ? "LIEF" : "ABH";
+                tint: root.card.delivery ? #7fb2ff : #c9b8ff;
+            }
+            Text {
+                text: root.card.when;
+                color: Theme.muted;
+                font-size: 11px;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+            Spacer { }
+            Text {
+                text: root.card.age;
+                color: root.card.urgency >= 2 ? Theme.late : root.card.urgency == 1 ? Theme.work : Theme.text;
+                font-size: 12px;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 4px;
+            if root.card.test: Badge {
+                text: "TEST";
+                tint: Theme.work;
+            }
+            Text {
+                text: root.card.summary;
+                color: Theme.muted;
+                font-size: 10px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.tapped();
+        }
+    }
+}
+
+component BoardColumn inherits Rectangle {
+    in property <string> title;
+    in property <color> accent;
+    in property <[Card]> cards;
+    in property <string> empty-text;
+    callback open(string);
+    callback activity();
+
+    property <length> card-height: 58px;
+    property <length> gap: 4px;
+
+    background: Theme.panel;
+    border-radius: 6px;
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 4px;
+
+        HorizontalLayout {
+            height: 18px;
+            padding-left: 4px;
+            padding-right: 4px;
+            Text {
+                text: root.title;
+                color: root.accent;
+                font-size: 11px;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: root.cards.length;
+                color: root.accent;
+                font-size: 13px;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+        }
+
+        list := Flickable {
+            vertical-stretch: 1;
+            flicked => {
+                root.activity();
+            }
+            content-height: max(self.height, root.cards.length * (root.card-height + root.gap));
+
+            if root.cards.length == 0: Text {
+                y: 12px;
+                width: list.width;
+                text: root.empty-text;
+                color: Theme.muted;
+                font-size: 11px;
+                horizontal-alignment: center;
+            }
+
+            for c[i] in root.cards: OrderCard {
+                x: 0;
+                y: i * (root.card-height + root.gap);
+                width: list.width;
+                height: root.card-height;
+                card: c;
+                accent: root.accent;
+                tapped => {
+                    root.open(c.id);
+                }
+            }
+        }
+    }
+}
+
+component BigButton inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: 15px;
+    in property <color> tint: Theme.button;
+    in property <color> text-color: Theme.text;
+    in property <bool> enabled: true;
+    callback clicked();
+    border-radius: 6px;
+    opacity: root.enabled ? 1 : 0.45;
+    background: touch.pressed && root.enabled ? root.tint.darker(0.3) : root.tint;
+    Text {
+        text: root.text;
+        color: root.text-color;
+        font-size: root.font-size;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Start page: one column's count; a tap goes to the board.
+component CountTile inherits Rectangle {
+    in property <string> title;
+    in property <int> count;
+    in property <color> accent;
+    callback clicked();
+    horizontal-stretch: 1;
+    border-radius: 6px;
+    background: touch.pressed ? Theme.card.brighter(0.25) : Theme.card;
+    Rectangle {
+        x: 0;
+        width: 4px;
+        background: root.accent;
+    }
+    VerticalLayout {
+        padding: 6px;
+        padding-left: 12px;
+        spacing: 0px;
+        Text {
+            text: root.title;
+            color: root.accent;
+            font-size: 11px;
+            font-weight: 700;
+        }
+        Text {
+            text: root.count;
+            color: Theme.text;
+            font-size: 28px;
+            font-weight: 700;
+        }
+    }
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Compact button for the "Öffnungszeiten" rows.
+component SmallButton inherits BigButton {
+    font-size: 12px;
+    width: max(40px, label-width.preferred-width + 16px);
+    label-width := Text {
+        visible: false;
+        text: root.text;
+        font-size: 12px;
+        font-weight: 700;
+    }
+}
+
+component RowLabel inherits Text {
+    color: Theme.muted;
+    font-size: 11px;
+    font-weight: 700;
+    vertical-alignment: center;
+    horizontal-stretch: 0;
+}
+
+export component KitchenWindow inherits Window {
+    title: "Rusterando Küche";
+    preferred-width: 480px;
+    preferred-height: 272px;
+    min-width: 480px;
+    min-height: 272px;
+    background: Theme.bg;
+    default-font-family: "Poppins";
+    default-font-size: 12px;
+    default-font-weight: 500;
+
+    // ----- header -----
+    in property <string> clock;
+    in property <bool> online;
+    // Connection banner under the header; empty = none. Amber when online
+    // but the server sends no board, red when offline.
+    in property <string> banner;
+    in property <bool> banner-warn;
+    in property <bool> have-board;
+    in property <bool> printer-ok;
+    in property <string> printer-text;
+
+    // ----- columns -----
+    in property <[Card]> col-new;
+    in property <[Card]> col-work;
+    in property <[Card]> col-ready;
+
+    // ----- detail overlay -----
+    in property <bool> detail-open;
+    in property <string> d-id;
+    in property <string> d-number;
+    in property <bool> d-delivery;
+    in property <bool> d-test;
+    in property <bool> d-paid;
+    // "BAR 28,50 €" / "BEZAHLT".
+    in property <string> d-pay-short;
+    in property <string> d-head;
+    in property <string> d-who;
+    in property <string> d-address;
+    in property <[Line]> d-lines;
+    in property <string> d-note;
+    in property <string> d-pay;
+    // Buttons: label + BoardStatus index (see kds::status_from_index);
+    // an empty label hides the button.
+    in property <string> d-primary;
+    in property <int> d-primary-to;
+    in property <string> d-back;
+    in property <int> d-back-to;
+    // Storno at the bottom of the detail: first tap arms, second confirms.
+    in property <string> d-cancel-text;
+    in property <bool> d-cancel-armed;
+    callback cancel-tap(string);
+
+    callback open(string);
+    callback close-detail();
+    callback advance(string, int);
+
+    // ----- pages: 0 Start · 1 Küche (default) · 2 Öffnungszeiten -----
+    // Header tabs, a two-finger swipe (fingers left = next page to the
+    // right, like turning pages), or the shop chip (→ Öffnungszeiten).
+    in property <int> page: 1;
+    callback go-page(int);
+
+    // ----- Start page -----
+    in property <string> date-text;
+    // "v0.3.0 · LAN 192.168.1.20 · Drucker: usb"
+    in property <string> info-text;
+    // A printer is reachable (configured, or a USB printer detected) →
+    // "Testdruck" works; the label names it.
+    in property <bool> can-test-print;
+    in property <string> test-print-text: "Testdruck";
+    // Board build with a screensaver program → "Globus" button.
+    in property <bool> has-saver;
+    // Utility buttons: 0 Testdruck, 1 Globus (screensaver now), 2 Alarm testen.
+    callback util(int);
+
+    // ----- "Öffnungszeiten" page: /admin/hours quick controls -----
+    in property <int> shop-light: -1;
+    // Header chip, e.g. "Offen", "Pause bis 18:30", "Geschlossen".
+    in property <string> shop-short;
+    // Status line, same wording as /admin/hours.
+    in property <string> shop-status;
+    // Open right now → the toggle reads "Jetzt schließen".
+    in property <bool> shop-is-open;
+    in property <bool> delivery-paused;
+    // A manual override is active → "Auf Plan" is offered.
+    in property <bool> overridden;
+    // Customers can order right now; when not, "Notbetrieb" is offered.
+    in property <bool> gate-open: true;
+    in property <string> today-text;
+    in property <string> pick-open;
+    in property <string> pick-close;
+    // New-order alert: the screen flashes white (Rust toggles `flash`).
+    in property <bool> flash;
+    in property <string> flash-title;
+    in property <string> flash-text;
+
+    // Message line: a refused shop action, or a util result.
+    in property <string> shop-notice;
+    in property <bool> notice-ok;
+    // Action codes: see kds::shop_action.
+    callback shop(int, int);
+    // Stepper: which (0 = ab, 1 = bis), delta in minutes.
+    callback pick-step(int, int);
+
+    // ----- screensaver (src/kds/saver.rs) -----
+    // Any touch counts as activity (resets the idle timer).
+    callback activity();
+    // Black cover shown for a frame before the screen is lent to the saver
+    // program, and while it runs. It sees the touches the saver also gets;
+    // Rust turns a double tap into "back to the board" (single taps and
+    // drags belong to the saver). Kind: 0 down, 1 up.
+    in property <bool> saver;
+    callback saver-pointer(int, length, length);
+
+    // Bottom-most: taps on empty areas still count as activity.
+    TouchArea {
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down {
+                root.activity();
+            }
+        }
+    }
+
+    // Two-finger swipe between the pages. A swipe is a two-finger gesture
+    // whose midpoint travelled ≥ 80px sideways without pinching or
+    // drifting much vertically.
+    swipe := ScaleRotateGestureHandler {
+        width: 100%;
+        height: 100%;
+        property <length> start-x;
+        property <length> start-y;
+        property <length> last-x;
+        property <length> last-y;
+        property <float> last-scale: 1;
+        started => {
+            self.start-x = self.center.x;
+            self.start-y = self.center.y;
+            self.last-x = self.center.x;
+            self.last-y = self.center.y;
+            self.last-scale = 1;
+        }
+        updated => {
+            self.last-x = self.center.x;
+            self.last-y = self.center.y;
+            self.last-scale = self.scale;
+        }
+        ended => {
+            if abs(self.last-scale - 1) < 0.25 && abs(self.last-y - self.start-y) < 60px {
+                // Like turning pages: fingers to the left → page to the right.
+                if self.start-x - self.last-x >= 80px {
+                    root.go-page(root.page + 1);
+                } else if self.last-x - self.start-x >= 80px {
+                    root.go-page(root.page - 1);
+                }
+            }
+        }
+
+    VerticalLayout {
+        padding: 4px;
+        spacing: 4px;
+
+        // Header: label + clock on the left, printer / connection state right.
+        HorizontalLayout {
+            height: 20px;
+            padding-left: 4px;
+            padding-right: 4px;
+            spacing: 6px;
+            for tab[i] in ["Start", "Küche", "Zeiten"]: Rectangle {
+                horizontal-stretch: 0;
+                width: tab-label.preferred-width + 12px;
+                border-radius: 4px;
+                background: root.page == i ? Theme.button : transparent;
+                tab-label := Text {
+                    text: tab;
+                    color: root.page == i ? Theme.text : Theme.muted;
+                    font-size: 11px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    clicked => {
+                        root.go-page(i);
+                    }
+                }
+            }
+            Text {
+                text: root.clock;
+                color: Theme.text;
+                font-size: 14px;
+                font-weight: 700;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+            // Shop state; a tap opens "Öffnungszeiten".
+            Rectangle {
+                horizontal-stretch: 0;
+                width: shop-chip.preferred-width;
+                shop-chip := HorizontalLayout {
+                    spacing: 2px;
+                    Dot {
+                        tint: Theme.light-color(root.shop-light);
+                    }
+                    Text {
+                        text: root.shop-short;
+                        color: Theme.light-color(root.shop-light);
+                        font-size: 11px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                }
+                TouchArea {
+                    clicked => {
+                        root.go-page(2);
+                    }
+                }
+            }
+            Spacer { }
+            Dot {
+                tint: root.printer-ok ? Theme.ready : Theme.late;
+            }
+            Text {
+                text: root.printer-text;
+                color: root.printer-ok ? Theme.muted : Theme.late;
+                font-size: 11px;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+            Dot {
+                tint: root.online ? Theme.ready : Theme.late;
+            }
+            Text {
+                text: root.online ? "Online" : "Offline";
+                color: root.online ? Theme.muted : Theme.late;
+                font-size: 11px;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
+        }
+
+        if root.banner != "": Rectangle {
+            height: 18px;
+            border-radius: 4px;
+            background: root.banner-warn ? Theme.work : Theme.late;
+            Text {
+                text: root.banner;
+                color: root.banner-warn ? #0b0d10 : #ffffff;
+                font-size: 11px;
+                font-weight: 700;
+            }
+        }
+
+        // ----- Start -----
+        if root.page == 0: VerticalLayout {
+            vertical-stretch: 1;
+            padding: 4px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 12px;
+                Text {
+                    text: root.clock;
+                    color: Theme.text;
+                    font-size: 46px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: root.date-text;
+                        color: Theme.muted;
+                        font-size: 13px;
+                        font-weight: 700;
+                    }
+                    HorizontalLayout {
+                        spacing: 4px;
+                        Dot {
+                            tint: Theme.light-color(root.shop-light);
+                        }
+                        Text {
+                            text: root.shop-status;
+                            color: Theme.light-color(root.shop-light);
+                            font-size: 12px;
+                            font-weight: 700;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                height: 64px;
+                spacing: 6px;
+                CountTile {
+                    title: "NEU";
+                    count: root.col-new.length;
+                    accent: Theme.new;
+                    clicked => {
+                        root.go-page(1);
+                    }
+                }
+                CountTile {
+                    title: "IN ARBEIT";
+                    count: root.col-work.length;
+                    accent: Theme.work;
+                    clicked => {
+                        root.go-page(1);
+                    }
+                }
+                CountTile {
+                    title: "FERTIG";
+                    count: root.col-ready.length;
+                    accent: Theme.ready;
+                    clicked => {
+                        root.go-page(1);
+                    }
+                }
+            }
+            HorizontalLayout {
+                height: 44px;
+                spacing: 6px;
+                BigButton {
+                    horizontal-stretch: 1;
+                    font-size: 13px;
+                    text: root.test-print-text;
+                    enabled: root.can-test-print;
+                    clicked => {
+                        root.util(0);
+                    }
+                }
+                if root.has-saver: BigButton {
+                    horizontal-stretch: 1;
+                    font-size: 13px;
+                    text: "Globus";
+                    clicked => {
+                        root.util(1);
+                    }
+                }
+                BigButton {
+                    horizontal-stretch: 1;
+                    font-size: 13px;
+                    text: "Alarm testen";
+                    clicked => {
+                        root.util(2);
+                    }
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+            }
+            Text {
+                text: root.info-text;
+                color: Theme.muted;
+                font-size: 10px;
+                overflow: elide;
+            }
+        }
+
+        // ----- Öffnungszeiten -----
+        if root.page == 2: VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 4px;
+            HorizontalLayout {
+                height: 22px;
+                spacing: 6px;
+                Dot {
+                    tint: Theme.light-color(root.shop-light);
+                }
+                Text {
+                    text: root.shop-status;
+                    color: Theme.light-color(root.shop-light);
+                    font-size: 13px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+            HorizontalLayout {
+                height: 38px;
+                spacing: 6px;
+                BigButton {
+                    horizontal-stretch: 1;
+                    text: root.shop-is-open ? "Jetzt schließen" : "Jetzt öffnen";
+                    tint: root.shop-is-open ? Theme.late : Theme.ready;
+                    text-color: #0b0d10;
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(0, root.shop-is-open ? 0 : 1);
+                    }
+                }
+                BigButton {
+                    horizontal-stretch: 1;
+                    font-size: 13px;
+                    text: root.delivery-paused ? "Lieferung wieder an" : "Keine Lieferung (nur Abholung)";
+                    tint: root.delivery-paused ? Theme.work : Theme.button;
+                    text-color: root.delivery-paused ? #0b0d10 : Theme.text;
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(3, root.delivery-paused ? 0 : 1);
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                height: 30px;
+                spacing: 5px;
+                RowLabel {
+                    text: "Bei Überlastung pausieren:";
+                }
+                SmallButton {
+                    text: "30 Min";
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(2, 30);
+                    }
+                }
+                SmallButton {
+                    text: "1 Std";
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(2, 60);
+                    }
+                }
+                SmallButton {
+                    text: "2 Std";
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(2, 120);
+                    }
+                }
+                Spacer { }
+                if root.overridden: SmallButton {
+                    text: "Auf Plan";
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(1, 0);
+                    }
+                }
+            }
+
+            if !root.gate-open: BigButton {
+                height: 30px;
+                font-size: 13px;
+                text: "Notbetrieb: alles sofort annehmen";
+                tint: Theme.late;
+                text-color: #ffffff;
+                enabled: root.online;
+                clicked => {
+                    root.shop(0, 1);
+                }
+            }
+
+            Text {
+                text: root.today-text;
+                color: Theme.text;
+                font-size: 12px;
+                font-weight: 700;
+            }
+
+            HorizontalLayout {
+                height: 30px;
+                spacing: 4px;
+                RowLabel {
+                    width: 54px;
+                    text: "Früher:";
+                }
+                SmallButton {
+                    text: "-30 Min";
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(4, 30);
+                    }
+                }
+                SmallButton {
+                    text: "-1 Std";
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(4, 60);
+                    }
+                }
+                Spacer { }
+                RowLabel {
+                    text: "oder ab";
+                }
+                SmallButton {
+                    text: "-";
+                    clicked => {
+                        root.pick-step(0, -15);
+                    }
+                }
+                Text {
+                    width: 44px;
+                    text: root.pick-open;
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                SmallButton {
+                    text: "+";
+                    clicked => {
+                        root.pick-step(0, 15);
+                    }
+                }
+                SmallButton {
+                    text: "Setzen";
+                    tint: Theme.ready;
+                    text-color: #0b0d10;
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(6, 0);
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                height: 30px;
+                spacing: 4px;
+                RowLabel {
+                    width: 54px;
+                    text: "Länger:";
+                }
+                SmallButton {
+                    text: "+30 Min";
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(5, 30);
+                    }
+                }
+                SmallButton {
+                    text: "+1 Std";
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(5, 60);
+                    }
+                }
+                Spacer { }
+                RowLabel {
+                    text: "oder bis";
+                }
+                SmallButton {
+                    text: "-";
+                    clicked => {
+                        root.pick-step(1, -15);
+                    }
+                }
+                Text {
+                    width: 44px;
+                    text: root.pick-close;
+                    color: Theme.text;
+                    font-size: 13px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                SmallButton {
+                    text: "+";
+                    clicked => {
+                        root.pick-step(1, 15);
+                    }
+                }
+                SmallButton {
+                    text: "Setzen";
+                    tint: Theme.ready;
+                    text-color: #0b0d10;
+                    enabled: root.online;
+                    clicked => {
+                        root.shop(7, 0);
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+            }
+        }
+
+        // ----- Küche -----
+        if root.page == 1: HorizontalLayout {
+            spacing: 4px;
+            vertical-stretch: 1;
+            BoardColumn {
+                title: "NEU";
+                activity => {
+                    root.activity();
+                }
+                accent: Theme.new;
+                cards: root.col-new;
+                empty-text: "Keine neuen Bestellungen";
+                open(id) => {
+                    root.open(id);
+                }
+            }
+            BoardColumn {
+                title: "IN ARBEIT";
+                activity => {
+                    root.activity();
+                }
+                accent: Theme.work;
+                cards: root.col-work;
+                empty-text: "Nichts in Arbeit";
+                open(id) => {
+                    root.open(id);
+                }
+            }
+            BoardColumn {
+                title: "FERTIG";
+                activity => {
+                    root.activity();
+                }
+                accent: Theme.ready;
+                cards: root.col-ready;
+                empty-text: "Nichts abholbereit";
+                open(id) => {
+                    root.open(id);
+                }
+            }
+        }
+    }
+
+    // ----- detail overlay: the whole order + actions -----
+    if root.detail-open: Rectangle {
+        background: Theme.bg;
+        // Swallow taps so nothing underneath reacts.
+        TouchArea {
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.activity();
+                }
+            }
+        }
+
+        VerticalLayout {
+            padding: 6px;
+            spacing: 4px;
+
+            HorizontalLayout {
+                height: 30px;
+                spacing: 6px;
+                Text {
+                    text: root.d-number;
+                    color: Theme.text;
+                    font-size: 22px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    horizontal-stretch: 0;
+                }
+                Badge {
+                    text: root.d-delivery ? "LIEFERUNG" : "ABHOLUNG";
+                    tint: root.d-delivery ? #7fb2ff : #c9b8ff;
+                }
+                Badge {
+                    text: root.d-pay-short;
+                    tint: root.d-paid ? Theme.ready : Theme.late;
+                    ink: root.d-paid ? #0b0d10 : #ffffff;
+                }
+                if root.d-test: Badge {
+                    text: "TEST";
+                    tint: Theme.late;
+                }
+                Spacer { }
+                BigButton {
+                    width: 96px;
+                    text: "Schließen";
+                    clicked => {
+                        root.close-detail();
+                    }
+                }
+            }
+
+            Text {
+                text: root.d-head;
+                color: Theme.muted;
+                font-size: 12px;
+                font-weight: 700;
+                overflow: elide;
+            }
+
+            body-scroll := Flickable {
+                vertical-stretch: 1;
+                flicked => {
+                    root.activity();
+                }
+                content-height: max(self.height, body.preferred-height);
+
+                body := VerticalLayout {
+                    width: body-scroll.width;
+                    spacing: 3px;
+
+                    Text {
+                        text: root.d-who;
+                        color: Theme.text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    if root.d-address != "": Text {
+                        text: root.d-address;
+                        color: Theme.text;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: 1px;
+                        background: Theme.button;
+                    }
+                    for line in root.d-lines: VerticalLayout {
+                        spacing: 0px;
+                        Text {
+                            text: line.text;
+                            color: Theme.text;
+                            font-size: 15px;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                        }
+                        if line.sub != "": Text {
+                            text: line.sub;
+                            color: Theme.work;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                    }
+                    if root.d-note != "": Rectangle {
+                        background: #4a3b10;
+                        border-radius: 4px;
+                        height: note.preferred-height + 8px;
+                        note := Text {
+                            x: 6px;
+                            width: parent.width - 12px;
+                            text: root.d-note;
+                            color: #ffe08a;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: root.d-pay;
+                        color: Theme.muted;
+                        font-size: 12px;
+                        font-weight: 700;
+                    }
+                    Rectangle {
+                        height: 6px;
+                    }
+                    BigButton {
+                        height: 40px;
+                        font-size: 13px;
+                        text: root.d-cancel-text;
+                        tint: root.d-cancel-armed ? Theme.late : #4a1c1c;
+                        text-color: root.d-cancel-armed ? #ffffff : #ffb3b3;
+                        enabled: root.online;
+                        clicked => {
+                            root.cancel-tap(root.d-id);
+                        }
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                height: 46px;
+                spacing: 6px;
+                if root.d-back != "": BigButton {
+                    width: 150px;
+                    text: root.d-back;
+                    enabled: root.online;
+                    clicked => {
+                        root.advance(root.d-id, root.d-back-to);
+                    }
+                }
+                if root.d-primary != "": BigButton {
+                    horizontal-stretch: 1;
+                    text: root.d-primary;
+                    tint: Theme.ready;
+                    text-color: #08210f;
+                    enabled: root.online;
+                    clicked => {
+                        root.advance(root.d-id, root.d-primary-to);
+                    }
+                }
+            }
+        }
+    }
+
+    // Messages: a refused shop action (red), a util result (green / red).
+    if root.shop-notice != "": Rectangle {
+        x: 6px;
+        width: parent.width - 12px;
+        height: notice-text.preferred-height + 10px;
+        y: parent.height - self.height - 6px;
+        border-radius: 4px;
+        background: root.notice-ok ? Theme.ready : Theme.late;
+        notice-text := Text {
+            x: 6px;
+            width: parent.width - 12px;
+            text: root.shop-notice;
+            color: root.notice-ok ? #0b0d10 : #ffffff;
+            font-size: 11px;
+            font-weight: 700;
+            wrap: word-wrap;
+            vertical-alignment: center;
+        }
+    }
+    }
+
+    if root.flash: Rectangle {
+        background: #ffffff;
+        // Swallow taps: nothing underneath is visible right now.
+        TouchArea { }
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+            Text {
+                text: root.flash-title;
+                color: #0b0d10;
+                font-size: 30px;
+                font-weight: 700;
+                horizontal-alignment: center;
+            }
+            Text {
+                text: root.flash-text;
+                color: #0b0d10;
+                font-size: 22px;
+                font-weight: 700;
+                horizontal-alignment: center;
+            }
+        }
+    }
+
+    if root.saver: Rectangle {
+        background: #000000;
+        TouchArea {
+            pointer-event(e) => {
+                if e.kind == PointerEventKind.down {
+                    root.saver-pointer(0, self.mouse-x, self.mouse-y);
+                } else if e.kind == PointerEventKind.up {
+                    root.saver-pointer(1, self.mouse-x, self.mouse-y);
+                }
+            }
+        }
+    }
+}

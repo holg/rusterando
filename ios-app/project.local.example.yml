@@ -34,6 +34,11 @@ targets:
       - path: Sources
       - path: Resources/Assets.xcassets
       - path: Resources/LaunchScreen.storyboard
+      # The kitchen display's gong, used as the sound of urgent pushes (new
+      # order, kitchen alarm, delivery ready). One file for board, browser
+      # display and app.
+      - path: ../crates/rusterando-printer/assets/sounds/gong.wav
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: "My Shop"
@@ -53,6 +58,8 @@ targets:
       path: MyShop.entitlements
       properties:
         aps-environment: development
+        # Urgent pushes (new order, kitchen alarm) break through Focus.
+        com.apple.developer.usernotifications.time-sensitive: true
         com.apple.developer.applesignin:
           - Default
         # App Links — requires the matching assetlinks.json /

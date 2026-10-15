@@ -918,6 +918,43 @@ mod tests {
         }
     }
 
+    /// The brand line must follow the ORDER's shop_name (which the server
+    /// reads from the tenant's own app_settings), so a multi-tenant receipt
+    /// never prints another shop's name. An explicit `receipt_header_text`
+    /// still wins — that's the admin override.
+    #[test]
+    fn brand_line_follows_the_orders_shop_name() {
+        let mut o = sample(OrderChannel::Pickup, PaymentStatus::Prepaid);
+        o.shop_name = "Oase Grill".into();
+        let texts = |cfg: &ReceiptConfig| -> Vec<String> {
+            build_layout(&o, false, cfg)
+                .into_iter()
+                .filter_map(|l| match l {
+                    LayoutLine::Text { text, .. } => Some(text),
+                    _ => None,
+                })
+                .collect()
+        };
+        let lines = texts(&ReceiptConfig::default());
+        assert!(
+            lines.iter().any(|t| t.contains("Oase Grill")),
+            "receipt must carry the shop's own name, got {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|t| t.contains("Davids")),
+            "no other tenant's name may leak in"
+        );
+
+        // Admin override wins over the order's name.
+        let cfg = ReceiptConfig {
+            header_text: "Mein Kopf".into(),
+            ..ReceiptConfig::default()
+        };
+        let lines = texts(&cfg);
+        assert!(lines.iter().any(|t| t.contains("Mein Kopf")));
+        assert!(!lines.iter().any(|t| t.contains("Oase Grill")));
+    }
+
     #[test]
     fn delivery_puts_scheduled_above_eingang_and_has_rasters() {
         let o = sample(

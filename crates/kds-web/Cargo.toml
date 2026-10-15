@@ -1,0 +1,41 @@
+[package]
+name = "kds-web"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Holger Trahe <trahe@mac.com>"]
+repository = "https://github.com/holg/rusterando"
+description = "Browser mirror of the kitchen display (Slint → WASM), served at /kitchen/display"
+publish = false
+
+# Not a workspace member (see the root Cargo.toml). Build with
+# scripts/build_kds_web.sh → public/kds/.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+kds-ui = { path = "../kds-ui" }
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.1.0" }
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-18", "backend-winit", "renderer-femtovg"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+base64 = "0.22"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "Location", "Element", "HtmlCanvasElement", "HtmlAudioElement",
+    "HtmlMediaElement", "EventSource", "MessageEvent", "Event", "Request", "RequestInit",
+    "RequestCredentials", "Response", "Headers",
+] }
+console_error_panic_hook = "0.1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+
+# Current rustc emits bulk-memory etc. by default; let wasm-opt accept them.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Os", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-sign-ext", "--enable-mutable-globals"]

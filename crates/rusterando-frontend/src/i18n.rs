@@ -265,9 +265,28 @@ pub fn provide_pack_gen() -> RwSignal<u32> {
 /// Register a reactive dependency on the pack generation (no-op outside a
 /// reactive context, and when the context isn't installed). Called at the top
 /// of `t()`/`t_menu()` so a pack load re-renders translated text.
+///
+/// Inside a view the `.get()` subscribes as intended, so a pack load
+/// re-renders the text. Called from plain (non-reactive) code — a component
+/// body, an `AnyView` builder, an event handler, or a `{t!("…")}` that passes
+/// a VALUE rather than a closure — the same read subscribes to nothing and
+/// leptos logged "you access a signal outside a reactive tracking context" on
+/// every single call, burying real warnings in the browser console.
+///
+/// So ask first: with no observer active nothing could subscribe, and the
+/// read is skipped entirely. Behaviour inside views is unchanged (the
+/// dependency is still registered); outside them the console stays clean.
+/// This is also the direction leptos is tightening towards, so it keeps us
+/// compatible with future versions.
+///
+/// `Observer` comes from `reactive_graph` directly — leptos 0.8 re-exports
+/// only `graph::untrack`, not the observer accessor.
 fn track_pack_gen() {
+    if reactive_graph::graph::Observer::get().is_none() {
+        return;
+    }
     if let Some(PackGen(sig)) = use_context::<PackGen>() {
-        // `.get()` registers the dependency; the value itself is unused.
+        // Registers the dependency; the value itself is unused.
         let _ = sig.get();
     }
 }

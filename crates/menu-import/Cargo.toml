@@ -30,6 +30,10 @@ sqlx = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
+# Blocking HTTP for the one-shot branding-image download (no TLS backend
+# juggling: ureq with rustls is already in the workspace via build deps).
+ureq = { version = "2", features = ["tls"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
 dotenvy = { workspace = true }

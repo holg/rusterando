@@ -35,6 +35,10 @@ include:
 settings:
   base:
     SWIFT_VERSION: "5.9"
+    # NOTE: the shippable per-tenant targets set their version in their
+    # Info-*.plist (e.g. Info-Davids.plist), which OVERRIDES these. These are
+    # only the fallback for the OSS example target. Keep the real version in
+    # the tenant plist.
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: 1
     # DEVELOPMENT_TEAM intentionally absent. Provide via project.local.yml.
@@ -61,6 +65,11 @@ targets:
       - path: Sources
       - path: Resources/Assets.xcassets
       - path: Resources/LaunchScreen.storyboard
+      # The kitchen display's gong, used as the sound of urgent pushes (new
+      # order, kitchen alarm, delivery ready). One file for board, browser
+      # display and app.
+      - path: ../crates/rusterando-printer/assets/sounds/gong.wav
+        buildPhase: resources
     settings:
       base:
         PRODUCT_NAME: "Rusterando"
@@ -76,3 +85,5 @@ targets:
       path: Rusterando-Example.entitlements
       properties:
         aps-environment: development
+        # Urgent pushes (new order, kitchen alarm) break through Focus.
+        com.apple.developer.usernotifications.time-sensitive: true

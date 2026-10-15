@@ -1,0 +1,12 @@
+[Unit]
+Description=Rusterando kitchen display: play the new-order gong
+
+[Service]
+# Oneshot: a trigger while it still plays is folded into this run, so a
+# burst of orders gives one gong, not a cacophony.
+Type=oneshot
+# PipeWire + WirePlumber run as root's lingering user session (the Weston
+# session that normally starts them is disabled on the kiosk); the paired
+# Bluetooth speaker is its default sink.
+Environment=XDG_RUNTIME_DIR=/run/user/0
+ExecStart=/usr/bin/gst-launch-1.0 -q filesrc location=/usr/local/share/rusterando/gong.wav ! wavparse ! audioconvert ! audioresample ! pipewiresink

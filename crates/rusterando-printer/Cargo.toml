@@ -4,7 +4,7 @@ name = "rusterando-printer"
 # rasterizes the server-composed logo SVG to 1-bit and caches it by content
 # hash; bundles Poppins + resvg. 0.2.0 was the pure raster interpreter.
 # The startup log's `version=` proves which build is running on the Pi.
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # Not a workspace member, so metadata is spelled out instead of inherited.
 license = "AGPL-3.0-or-later"
@@ -16,6 +16,8 @@ keywords = ["restaurant", "printer", "escpos", "raspberry-pi"]
 categories = ["hardware-support"]
 description = "Kitchen receipt printer client for Rusterando (Raspberry Pi / ESC-POS), speaking kitchen-protocol over TCP"
 
+# 0.3.1: kitchen display screen moved to crates/kds-ui (shared with the
+# browser mirror); printing starts before the screen is free.
 # Pi binary. Cross-compiles to aarch64-unknown-linux-gnu using the
 # brew toolchain + the C23 shim from scripts/cross-shims/. Excluded
 # from the main workspace (see top-level Cargo.toml) because its dep
@@ -39,9 +41,9 @@ path = "src/main.rs"
 [dependencies]
 # Protocol crate. Relative path because this crate isn't a workspace
 # member — `{ workspace = true }` is unavailable here.
-kitchen-protocol = { path = "../kitchen-protocol", version = "2.0.0" }
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.1.0" }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 bytes = "1"
@@ -71,6 +73,33 @@ resvg = { version = "0.44", default-features = false, features = ["text", "raste
 tiny-skia = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Userspace USB printing (PRINTER_PATH=usb) for kernels without `usblp` —
+# the STM32MP135F-DK's. Pure Rust over usbfs, no libusb.
+nusb = "0.2"
+
+# Kitchen display UI — see [features]. Software renderer only: the
+# STM32MP135 has no GPU, and the desktop build uses the same renderer so
+# what you see on the Mac is what the board draws.
+# The screen itself (ui/kitchen.slint + its logic), shared with the browser
+# mirror.
+kds-ui = { path = "../kds-ui", optional = true }
+slint = { version = "1.18", optional = true, default-features = false, features = ["std", "compat-1-18", "software-renderer-systemfonts"] }
+
+# Screensaver handover on the board (kds-kms): DRM master + CRTC restore on
+# Slint's own fd. Same version Slint's linuxkms backend links.
+drm = { version = "0.14", optional = true }
+
+[features]
+default = []
+# Kitchen display terminal: printer client + board subscription + Slint
+# touch UI on the main thread. Pick one backend below.
+kds = ["dep:kds-ui", "dep:slint"]
+# Development window on macOS / desktop Linux.
+kds-desktop = ["kds", "slint/backend-winit"]
+# STM32MP135F-DK: straight to DRM/KMS + libinput touch, no seat daemon
+# (the unit stops Weston and runs with video+input access).
+# `drm` (same version Slint uses) lends the screen to the screensaver.
+kds-kms = ["kds", "slint/backend-linuxkms-noseat", "slint/backend-linuxkms-libinput", "dep:drm"]
 
 [profile.release]
 lto = "thin"

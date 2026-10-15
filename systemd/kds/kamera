@@ -1,0 +1,75 @@
+#!/bin/sh
+# kamera — the board's camera (GC2145, 640×480) for a quick look from afar.
+#
+#   kamera foto          one JPEG → /tmp/kamera.jpg
+#   kamera live [MIN]    MJPEG stream on 127.0.0.1:8081 for MIN minutes (default 10)
+#
+# Loopback only: reachable through your SSH connection, never from the shop
+# network or the board's WiFi. From the Mac:
+#   ssh root@<board> 'kamera foto' && scp root@<board>:/tmp/kamera.jpg .
+#   ssh -L 8081:127.0.0.1:8081 root@<board> 'kamera live'   (leave open)
+#   ffplay -f mjpeg tcp://127.0.0.1:8081                     (second terminal)
+#
+# The STM32MP135 has no H.264 encoder (hardware or in this image), so the
+# live view is JPEG frames, at 5 fps to leave the CPU to the kitchen display.
+#
+# Two camera paths, detected from the media graph:
+#   OpenSTLinux 5.x / kernel 6.6: the GC2145 speaks UYVY over MIPI CSI-2
+#     through the st-mipid02 bridge into "dcmipp_input". No frame-interval
+#     control on the sensor, and the bridge pads need field:none or STREAMON
+#     fails with EPIPE. jpegenc takes UYVY directly (no videoconvert).
+#   OpenSTLinux 4.x / kernel 5.15: RGB565 into "dcmipp_parallel", as in ST's
+#     /usr/local/demo/application/camera script; the capture node defaults to
+#     YUYV, so RGB16 is requested explicitly.
+set -e
+W=640
+H=480
+MC="media-ctl -d /dev/media0 --set-v4l2"
+
+setup() {
+    if media-ctl -d /dev/media0 -p 2>/dev/null | grep -q '"\?dcmipp_input'; then
+        $MC "'gc2145 1-003c':0[fmt:UYVY8_1X16/${W}x${H} field:none]"
+        $MC "'st-mipid02 1-0014':0[fmt:UYVY8_1X16/${W}x${H} field:none]"
+        $MC "'st-mipid02 1-0014':2[fmt:UYVY8_2X8/${W}x${H} field:none]"
+        $MC "'dcmipp_input':0[fmt:UYVY8_2X8/${W}x${H}]"
+        $MC "'dcmipp_input':1[fmt:UYVY8_2X8/${W}x${H}]"
+        $MC "'dcmipp_dump_postproc':0[fmt:UYVY8_2X8/${W}x${H}]"
+        $MC "'dcmipp_dump_postproc':1[fmt:UYVY8_2X8/${W}x${H}]"
+        CAPS="video/x-raw,format=UYVY,width=$W,height=$H"
+        CONVERT=""
+    else
+        $MC "'gc2145 1-003c':0[fmt:RGB565_2X8_BE/${W}x${H}@1/30 field:none]"
+        $MC "'dcmipp_parallel':0[fmt:RGB565_2X8_BE/${W}x${H}]"
+        $MC "'dcmipp_parallel':1[fmt:RGB565_2X8_LE/${W}x${H}]"
+        $MC "'dcmipp_dump_postproc':1[fmt:RGB565_2X8_LE/${W}x${H}]"
+        $MC "'dcmipp_dump_postproc':1[crop:(0,0)/${W}x${H}]"
+        CAPS="video/x-raw,format=RGB16,width=$W,height=$H"
+        CONVERT="videoconvert !"
+    fi
+}
+
+case "${1:-}" in
+foto)
+    setup
+    rm -f /tmp/kam-*.jpg
+    # 20 frames so auto-exposure settles; keep the last one.
+    gst-launch-1.0 -q v4l2src device=/dev/video0 num-buffers=20 ! "$CAPS" \
+        ! $CONVERT jpegenc quality=85 ! multifilesink location=/tmp/kam-%02d.jpg
+    mv /tmp/kam-19.jpg /tmp/kamera.jpg
+    rm -f /tmp/kam-*.jpg
+    echo "/tmp/kamera.jpg"
+    ;;
+live)
+    setup
+    MIN="${2:-10}"
+    echo "live on 127.0.0.1:8081 for $MIN min — ffplay -f mjpeg tcp://127.0.0.1:8081"
+    timeout $((MIN * 60)) gst-launch-1.0 -q v4l2src device=/dev/video0 ! "$CAPS" \
+        ! videorate drop-only=true ! video/x-raw,framerate=5/1 \
+        ! $CONVERT jpegenc quality=70 \
+        ! tcpserversink host=127.0.0.1 port=8081 || true
+    ;;
+*)
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

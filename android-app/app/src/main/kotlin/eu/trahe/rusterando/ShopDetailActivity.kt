@@ -13,6 +13,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.appcompat.widget.SwitchCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,6 +28,7 @@ import kotlinx.coroutines.withContext
  *  - "Diese Shop aktivieren" — switches MainActivity to this shop's URL.
  *  - Aktive Rolle picker — switches role within the shop.
  *  - Gespeicherte Passwörter — Admin / Küche / Fahrer rows.
+ *  - Küche — start on the kitchen display instead of the order list.
  *  - Shop entfernen.
  *
  * On role activation we POST to the shop's login endpoint via
@@ -134,6 +136,14 @@ class ShopDetailActivity : AppCompatActivity() {
         }
         root.addView(footer(
             "Passwörter werden lokal verschlüsselt gespeichert (AndroidKeyStore).",
+        ))
+
+        // Section: kitchen display.
+        root.addView(header("Küche"))
+        root.addView(kitchenDisplayRow(s))
+        root.addView(footer(
+            "Als „Küche\" öffnet die App das Küchen-Display statt der Bestellliste — " +
+                "für das Tablet in der Küche. Der Bildschirm bleibt an.",
         ))
 
         // Section: delete this shop.
@@ -248,6 +258,31 @@ class ShopDetailActivity : AppCompatActivity() {
             setTextColor(if (saved) 0xFF2E7D32.toInt() else 0xFF1565C0.toInt())
         })
         row.setOnClickListener { editPassword(role) }
+        return row
+    }
+
+    private fun kitchenDisplayRow(s: Shop): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12))
+        }
+        row.addView(TextView(this).apply {
+            text = "Startet im Küchen-Display"
+            textSize = 16f
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        row.addView(SwitchCompat(this).apply {
+            isChecked = ShopStore.kitchenOpensDisplay(this@ShopDetailActivity, s.id)
+            setOnCheckedChangeListener { _, on ->
+                ShopStore.setKitchenOpensDisplay(this@ShopDetailActivity, s.id, on)
+                // Already working as Küche in this shop: MainActivity reloads
+                // to the new home once the user leaves settings.
+                if (s.activeRole == Role.Kitchen && ShopStore.activeShop(this@ShopDetailActivity)?.id == s.id) {
+                    setResult(Activity.RESULT_OK, Intent().putExtra(EXTRA_SHOP_ID, s.id))
+                }
+            }
+        })
         return row
     }
 

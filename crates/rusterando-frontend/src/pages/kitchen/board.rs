@@ -301,6 +301,8 @@ pub fn KitchenBoardPage() -> impl IntoView {
         move || advance.version().get(),
         |_| async move { list_kitchen_orders().await },
     );
+    // Live: follow changes made elsewhere (kitchen display, admin, new orders).
+    crate::utils::on_board_change(move || orders.refetch());
     view! {
         <div class="kitchen-shell">
             <header class="kitchen-bar">

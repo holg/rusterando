@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod cart;
 pub mod driver;
+pub mod geo;
 pub mod home;
 pub mod home_content;
 pub mod kitchen;
@@ -13,4 +14,5 @@ pub mod push;
 pub mod seo;
 pub mod session;
 pub mod settings;
+pub mod sysadmin;
 pub mod vouchers;

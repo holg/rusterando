@@ -481,6 +481,51 @@ if [ $LEPTOS_RC -eq 0 ]; then
         bash scripts/build-i18n-mgmt.sh || echo "  ! i18n-mgmt build failed (non-fatal)"
       fi
     fi
+    # Kitchen display in the browser (/kitchen/display): same ordering rule
+    # as the i18n pack — after leptos, so its files keep their names.
+    if [ -f scripts/build_kds_web.sh ]; then
+      echo "Building the browser kitchen display into site/pkg/kds …"
+      bash scripts/build_kds_web.sh || echo "  ! kds-web build failed (non-fatal; /kitchen/display answers 503)"
+    fi
+  fi
+
+  # Pre-compress the hashed bundle so nginx can serve it with
+  # `brotli_static on; gzip_static on;` (both modules are present on the
+  # VPS). The 5.6 MB hydrate WASM goes to ~1.3 MB (br) / ~2.0 MB (gz);
+  # uncompressed it was the single largest first-visit cost. Hashed names
+  # are immutable, so the sidecars never go stale. Non-fatal when the
+  # tools are missing.
+  echo ""
+  echo "=== Pre-compressing site bundle (brotli + gzip) ==="
+  for f in target/site/pkg/*.wasm target/site/pkg/*.js target/site/pkg/*.css; do
+    [[ -f "$f" ]] || continue
+    if command -v brotli >/dev/null 2>&1; then brotli -f -q 11 -k "$f"; fi
+    if command -v gzip >/dev/null 2>&1; then gzip -9 -k -f "$f"; fi
+  done
+  ls -la target/site/pkg/*.wasm* 2>/dev/null | awk '{print $5, $9}'
+
+  # Cross-build the address-index importer (crates/rusterando-geo, a
+  # workspace member) with the same profile so it lands next to the server
+  # binary in target/<triple>/release-prod/ and deploy_to_server.sh can
+  # rsync it. Pure Rust, no extra toolchain. Non-fatal: a failure here must
+  # not block the server deploy.
+  echo ""
+  echo "=== Cross-building geo-import (address index importer) ==="
+  if cargo build --profile release-prod --target "$TARGET_TRIPLE" -p rusterando-geo --bin geo-import; then
+    echo "geo-import: target/$TARGET_TRIPLE/release-prod/geo-import"
+  else
+    echo "geo-import build failed — continuing without it (server build unaffected)."
+  fi
+
+  # menu-import: the shop onboarding tool (.env + sqlite + menu). The sys-admin
+  # web wizard (/sysadmin) spawns it on the server as ./menu-import-linux-x64,
+  # so ship it with every release — an old copy silently lacks new flags
+  # (e.g. --set for the generated passwords).
+  echo "=== Cross-building menu-import (shop onboarding) ==="
+  if cargo build --profile release-prod --target "$TARGET_TRIPLE" -p menu-import; then
+    echo "menu-import: target/$TARGET_TRIPLE/release-prod/menu-import"
+  else
+    echo "menu-import build failed — continuing without it (server build unaffected)."
   fi
 
   # Cross-build the Pi binary (rusterando-printer) for aarch64 targets.

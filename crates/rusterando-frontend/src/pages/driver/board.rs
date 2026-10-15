@@ -422,6 +422,8 @@ pub fn DriverBoardPage() -> impl IntoView {
         },
         |_| async move { list_driver_orders().await },
     );
+    // Live: follow changes made elsewhere (kitchen display, admin, new orders).
+    crate::utils::on_board_change(move || orders.refetch());
     let on_start_tour = move |_| {
         let ids = selected.get_untracked();
         if ids.is_empty() {

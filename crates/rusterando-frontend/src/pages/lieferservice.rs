@@ -157,7 +157,7 @@ pub fn DeliveryAreaPage() -> impl IntoView {
 
     view! {
         <leptos_meta::Link rel="canonical" href=canonical/>
-        <Suspense fallback=|| view! { <p class="loading">{crate::t!("common.loading")}</p> }>
+        <Suspense fallback=|| view! { <p class="loading">{move || crate::t!("common.loading")}</p> }>
             {move || {
                 data.get().map(move |res| match res {
                     Err(e) => view! { <p class="error">{format!("{}: {e}", crate::t!("common.error"))}</p> }.into_any(),
@@ -166,7 +166,7 @@ pub fn DeliveryAreaPage() -> impl IntoView {
                         if let Some(resp) = use_context::<leptos_axum::ResponseOptions>() {
                             resp.set_status(http::StatusCode::NOT_FOUND);
                         }
-                        view! { <p class="error">{crate::t!("errors.page_not_found")}</p> }.into_any()
+                        view! { <p class="error">{move || crate::t!("errors.page_not_found")}</p> }.into_any()
                     }
                     Ok(Some(p)) => {
                         let copy = if p.seo_text.trim().is_empty() {
@@ -191,15 +191,15 @@ pub fn DeliveryAreaPage() -> impl IntoView {
                                 <h1>{crate::t!("lieferservice.title").replace("{area}", &p.area_name)}</h1>
                                 <p class="lead">{copy}</p>
                                 <ul class="liefer-facts">
-                                    <li><strong>{crate::t!("lieferservice.delivery_fee")} ": "</strong>
+                                    <li><strong>{move || crate::t!("lieferservice.delivery_fee")} ": "</strong>
                                         {if p.fee_cents == 0 { crate::t!("lieferservice.fee_free") } else { format_eur(p.fee_cents) }}</li>
                                     {(p.min_order_cents > 0).then(|| view! {
-                                        <li><strong>{crate::t!("lieferservice.min_order")} ": "</strong>{format_eur(p.min_order_cents)}</li>
+                                        <li><strong>{move || crate::t!("lieferservice.min_order")} ": "</strong>{format_eur(p.min_order_cents)}</li>
                                     })}
-                                    <li><strong>{crate::t!("lieferservice.delivery_eta")} ": "</strong>{crate::t!("lieferservice.eta_minutes").replace("{n}", &p.eta_minutes.to_string())}</li>
+                                    <li><strong>{move || crate::t!("lieferservice.delivery_eta")} ": "</strong>{crate::t!("lieferservice.eta_minutes").replace("{n}", &p.eta_minutes.to_string())}</li>
                                 </ul>
-                                <a class="btn primary" href="/menu">{crate::t!("home.order_now")}</a>
-                                <h2>{crate::t!("header.opening_hours")}</h2>
+                                <a class="btn primary" href="/menu">{move || crate::t!("home.order_now")}</a>
+                                <h2>{move || crate::t!("header.opening_hours")}</h2>
                                 <table class="liefer-hours">
                                     {hours.into_iter().map(|(day, win)| view! {
                                         <tr><th>{day}</th><td>{win}</td></tr>

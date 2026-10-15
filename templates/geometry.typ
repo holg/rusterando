@@ -57,7 +57,12 @@
 //
 //   show-ingredients : append the muted ingredients line under each name.
 //   sz               : the row size profile (tiny squeeze vs airy original).
-#let show-ingredients = sys.inputs.at("show-ingredients", default: true)
+// The Rust handler passes a Bool; the `typst` CLI (local design iteration via
+// `--input show-ingredients=false`) can only pass strings — accept both.
+#let show-ingredients = {
+  let v = sys.inputs.at("show-ingredients", default: true)
+  if type(v) == str { v != "false" and v != "0" } else { v }
+}
 
 // Row size profiles. Picked once per render from `show-ingredients`:
 //   ingr      — WITH ingredients (the default hand-out). 160 items + an
@@ -72,7 +77,9 @@
 // rest. Absolute pt pins every gap to the row size for uniform spacing.
 // 7.25pt name / 5.75pt ingredients — the ceiling that still holds the full
 // 160-item menu in 2 pages (one fold sheet) AFTER tightening the title +
-// size-label header leading. 7.5pt spills to a 3rd page.
+// size-label header leading. `row` is the MINIMUM row gap: the packer widens
+// it (feathering) to use up column slack, and scales the whole profile down
+// if the menu outgrows the 8 columns (see "Measured column packer").
 #let sz-ingr = (
   name: 7.25pt, price: 7.25pt, code: 5.25pt, ing: 5.75pt,
   row: 2.6pt, lead: 4.2pt, title: 10pt, inset: 2.5mm, label: 6pt, titlegap: 1.4pt,
@@ -125,40 +132,74 @@
     name-cell,
     align(right, text(size: sz.price, weight: "bold")[#small]),
   )
-  // `breakable: false` keeps a name and its ingredients line together: at a
-  // column boundary the whole row moves to the next column instead of leaving
-  // the name stranded at the bottom with its "mit …" line orphaned on top of
-  // the next column.
+  // `breakable: false` keeps a name and its ingredients line together (the
+  // packer never splits inside a unit anyway). No `spacing:` here — the
+  // enclosing card fragment sets the row gap, which may be feathered.
   if has-large {
     cells.push(align(right, text(size: sz.price, weight: "bold")[#large]))
-    block(spacing: sz.row, breakable: false, grid(
-      columns: (1fr, 12mm, 12mm), gutter: 1mm, ..cells
-    ))
+    block(breakable: false, grid(columns: (1fr, 12mm, 12mm), gutter: 1mm, ..cells))
   } else {
-    block(spacing: sz.row, breakable: false, grid(
-      columns: (1fr, 12mm), gutter: 1mm, ..cells
-    ))
+    block(breakable: false, grid(columns: (1fr, 12mm), gutter: 1mm, ..cells))
   }
 }
 
-// One category card. Same frame/colors as the theme's `category-card`.
-// `atomic-max`: categories with this many items or fewer are kept whole
-// (breakable: false) so a short category can't be split across a column
-// boundary — which strands its header in one column and its rows in the next,
-// out of reading order (the "Pizzen — mit frischen Tomaten" glitch). Larger
-// categories stay breakable (the 33/22/18-item lists are taller than a column
-// and MUST flow). Pass 0 to keep everything breakable (the trifold, which is
-// at the 2-page edge and can't spare the wasted column bottoms).
-#let g-category-card(cat, show-ing, sz, atomic-max) = {
+
+// ===========================================================================
+// Measured column packer
+// ===========================================================================
+// Typst's `columns()` fills each column to the bottom and dumps the remainder
+// into the last one, and a page split guessed from ITEM counts (57% / 45%)
+// can't know how tall a row really is (a two-line ingredients line, a wrapped
+// title). The result was ragged column bottoms, a half-empty last column on
+// page 1 and — in the condensed variant — a page-1 column left entirely blank.
+//
+// So the geometry layer lays the columns out itself:
+//   1. Every card is split into UNITS: a head (title + size labels + first
+//      row, never separated) and one unit per further row.
+//   2. Each unit is `measure()`d at the card's inner width — real heights,
+//      not counts.
+//   3. `g-pack` fills the 8 columns (4 per page) first-fit with a height cap
+//      T; `g-balance` binary-searches the smallest T that still fits, so all
+//      columns end at (nearly) the same height instead of the last one
+//      running short.
+//   4. Leftover height is first absorbed by feathering the row gap (up to
+//      `feather-max`), so the rows breathe a little instead of leaving a void.
+//   5. Each column is a fixed-height box and its last card fragment gets
+//      `height: 1fr`, so the pink card background runs down to the column
+//      end — every column bottom lines up.
+//   6. If the menu doesn't fit 8 columns even at full height, the row size
+//      profile is scaled down in 5% steps (to 80%) instead of spilling onto a
+//      3rd page the fold can't hold.
+// Only theme EXPORTS are used (`col-*`, `fmt-eur`, `csv-codes`, `data`,
+// `extras-*`, `legend`), so this works against any forked `pdf_themes` row.
+
+#let card-gap = 2mm          // vertical gap between cards in a column
+#let card-stroke = 0.5pt
+#let n-menu-cols = 8         // 4 per page × 2 pages, both formats
+// Row-gap feathering cap (× the profile's `row`). 1.0 = off: slack stays as
+// stretched card background only. See `g-feather`.
+#let feather-max = 2.0
+#let debug-fill = sys.inputs.at("debug", default: "0") == "1"
+
+#let g-title(name, sz) = block(spacing: sz.titlegap, par(leading: sz.titlegap)[
+  // Tight leading on the title: a two-line category name ("Pizza
+  // Spezialitäten — mit versch. Käsesorten") otherwise gets the theme's
+  // body leading between its wrapped lines.
+  #text(size: sz.title, weight: "bold", fill: col-red, style: "italic")[#name]
+])
+
+// Category → units. Head = title + size-label row + first row.
+#let g-category-units(cat, show-ing, sz) = {
   let first-with-large = cat.items.find(it => it.at("price_large_cents", default: none) != none)
   let has-large = first-with-large != none
 
   let header-row = if has-large {
     let small-label = first-with-large.at("size_small_label", default: "")
     let large-label = first-with-large.at("size_large_label", default: "")
-    // Tight local leading so the size-label row hugs the title instead of
-    // inheriting the theme's 0.75em-of-11.5pt line height.
-    block(spacing: 0pt, par(leading: sz.lead)[
+    // `set par` rather than `par(..)[grid]`: a grid can't live inside a
+    // paragraph — Typst warned and silently dropped the label row.
+    block(spacing: 0pt)[
+      #set par(leading: sz.lead)
       #grid(
         columns: (1fr, 12mm, 12mm),
         gutter: 1mm,
@@ -166,68 +207,302 @@
         align(right, text(size: sz.label, fill: col-muted)[#small-label]),
         align(right, text(size: sz.label, fill: col-muted)[#large-label]),
       )
-    ])
+    ]
   } else { [] }
 
-  block(
-    fill: col-pink,
-    stroke: 0.5pt + col-pink-2,
-    radius: 2pt,
-    inset: sz.inset,
-    breakable: cat.items.len() > atomic-max,
-    width: 100%,
-    spacing: 2mm,
-  )[
-    // One local block-spacing for the WHOLE card so the gap before the first
-    // row matches the gap between every later row. (Previously the first row
-    // lived inside a separate breakable:false block and inherited the theme's
-    // 0.79em block-spacing → the inconsistent extra gap on the first entry.)
+  // The head sets its OWN internal spacing so its measured height is exact
+  // whatever row gap the fragment around it ends up with.
+  let head = block(breakable: false)[
     #set block(spacing: sz.row)
-    // Keep the title + first row together so the title never orphans at a
-    // column bottom, but space them with the SAME `sz` gaps as everything else.
-    #block(breakable: false, spacing: sz.row)[
-      // Tight leading on the title too: a two-line category name (e.g.
-      // "Pizza Spezialitäten — mit versch. Käsesorten") was the worst offender,
-      // getting 0.75em-of-11.5pt between its wrapped lines. Pin it to the
-      // title size so the header block hugs the first row.
-      #block(spacing: sz.titlegap, par(leading: sz.titlegap)[
-        #text(size: sz.title, weight: "bold", fill: col-red, style: "italic")[#cat.name]
-      ])
-      #header-row
-      #v(sz.titlegap)
-      #g-item-row(cat.items.first(), has-large, show-ing, sz)
-    ]
-    #for it in cat.items.slice(1) {
-      g-item-row(it, has-large, show-ing, sz)
-    }
+    #g-title(cat.name, sz)
+    #header-row
+    #v(sz.titlegap)
+    #g-item-row(cat.items.first(), has-large, show-ing, sz)
   ]
+  let units = (head,)
+  for it in cat.items.slice(1) {
+    units.push(g-item-row(it, has-large, show-ing, sz))
+  }
+  units
 }
 
-// Extras card: reuse the theme's `extras-card` verbatim — it carries no
-// per-item description, so it's identical in both variants. We only adjust
-// nothing here; the theme binding handles the free-text extras lines.
+// Extras lines ("Krabben 1 €") → (name, price). Same rule as the theme's
+// `extras-card`: the price column starts at the LEFTMOST space after which
+// the rest of the line is price-ish (digits , . € spaces) and holds a digit,
+// so "Kräuterbutter 0,60 €" splits before "0,60", not between "0,60" and "€".
+#let g-parse-extra(line) = {
+  let digits = "0123456789"
+  let price-chars = digits + ",.€" + "\u{00A0}"
+  let chars = line.clusters()
+  let split-at = none
+  let i = chars.len()
+  let all-price = true
+  while i > 0 {
+    i = i - 1
+    let c = chars.at(i)
+    if c == " " and all-price {
+      let candidate = chars.slice(i + 1).join("")
+      let has-digit = candidate.clusters().any(d => digits.contains(d))
+      if has-digit { split-at = i }
+    } else if not (price-chars.contains(c) or c == " ") {
+      all-price = false
+    }
+  }
+  if split-at == none { return (line, "") }
+  let name = chars.slice(0, split-at).join("").trim()
+  let price = chars.slice(split-at + 1).join("").trim().replace(" ", "\u{00A0}")
+  (name, price)
+}
 
-// Flat (card, item-count) list, geometry-rendered. Mirrors the theme's
-// `card-list` (categories + Pizza/Pasta extras) but with our rows.
-#let g-card-list(show-ing, sz, atomic-max) = {
+#let g-extras-row(name, price, sz) = block(breakable: false, grid(
+  columns: (1fr, 14mm),
+  gutter: 1mm,
+  text(size: sz.name)[#name],
+  align(right, text(size: sz.price, weight: "bold")[#price]),
+))
+
+// Extras card → units, same shape as a category so it packs + stretches the
+// same way (the theme's `extras-card` is one opaque block and couldn't be
+// stretched to the column end without a second frame inside it).
+#let g-extras-units(title, lines, sz) = {
+  let cleaned = lines.map(l => l.trim()).filter(l => l.len() > 0)
+  if cleaned.len() == 0 { return () }
+  let rows = cleaned.map(raw => {
+    let (name, price) = g-parse-extra(raw)
+    g-extras-row(name, price, sz)
+  })
+  let head = block(breakable: false)[
+    #set block(spacing: sz.row)
+    #g-title(title, sz)
+    #v(sz.titlegap)
+    #rows.first()
+  ]
+  (head,) + rows.slice(1)
+}
+
+// All cards in flow order. `atomic`: keep the whole card in one column (short
+// categories, so a header never strands away from its rows — the "Pizzen —
+// mit frischen Tomaten" glitch). `atomic-max` 0 = everything may break.
+#let g-cards(show-ing, sz, atomic-max) = {
   let xs = ()
   for cat in data.categories {
-    xs.push((card: g-category-card(cat, show-ing, sz, atomic-max), n: cat.items.len()))
+    if cat.items.len() == 0 { continue }
+    xs.push((units: g-category-units(cat, show-ing, sz), atomic: cat.items.len() <= atomic-max))
   }
-  if extras-pizza.len() > 0 {
-    xs.push((card: extras-card("Pizza-Extras", extras-pizza), n: extras-pizza.len()))
-  }
-  if extras-pasta.len() > 0 {
-    xs.push((card: extras-card("Pasta-Extras", extras-pasta), n: extras-pasta.len()))
+  for (title, lines) in (("Pizza-Extras", extras-pizza), ("Pasta-Extras", extras-pasta)) {
+    let units = g-extras-units(title, lines, sz)
+    if units.len() > 0 {
+      xs.push((units: units, atomic: units.len() <= atomic-max))
+    }
   }
   xs
 }
 
-#let g-cards-to-content(cards) = {
-  for c in cards [
-    #c
-    #v(2mm)
-  ]
+// Attach measured unit heights. `iw` = inner card width (column minus inset).
+// Must run inside `context` (measure needs the live text styles).
+#let g-measure-cards(cards, iw) = cards.map(c => (
+  ..c,
+  heights: c.units.map(u => measure(width: iw, u).height),
+))
+
+// Height of the card fragment holding units a..b (b exclusive): inset top +
+// bottom, the unit heights, and the row `gap` between adjacent units.
+#let g-frag-h(card, a, b, sz, gap) = {
+  let h = 2 * sz.inset
+  for k in range(a, b) { h += card.heights.at(k) }
+  h + (b - a - 1) * gap
+}
+
+// First-fit packing into `caps.len()` columns, each with its own height cap.
+// A card fragment is (card, a, b). Non-atomic cards break between units
+// (never inside a unit: the head, or a name + its ingredients line). Returns
+// (cols, overflow); when something can't fit even an empty column — or the
+// last column is full — it is forced in and `overflow` is set, so the
+// caller can pick a smaller size profile instead of dropping items.
+#let g-pack(cards, caps, sz, gap) = {
+  let ncols = caps.len()
+  let eps = 0.5pt              // measure-vs-layout rounding tolerance
+  let min-units = 2            // smallest fragment on either side of a break
+  let cols = ()
+  let col = ()
+  let used = 0pt
+  let ci = 0
+  let overflow = false
+  for card in cards {
+    let n = card.units.len()
+    let a = 0
+    while a < n {
+      let start = if col.len() == 0 { 0pt } else { used + card-gap }
+      let room = caps.at(calc.min(ci, ncols - 1)) - start - eps
+      // Extend the fragment one unit at a time while it still fits.
+      let b = a
+      let h = 2 * sz.inset
+      while b < n {
+        let step = card.heights.at(b) + (if b > a { gap } else { 0pt })
+        if h + step > room { break }
+        h += step
+        b += 1
+      }
+      let greedy-b = b
+      if not card.atomic and b < n {
+        // The card continues in the next column: never leave a lone head (or
+        // single row) at a column bottom, and never strand a single row at
+        // the top of the next one. Fewer than `min-units` here → move the
+        // whole fragment over; a 1-unit remainder → pull one unit back.
+        if b - a < min-units {
+          b = a
+        } else if n - b < min-units {
+          // 1-unit remainder: pull one back if this side can spare it,
+          // otherwise (a 3-unit card) move the whole card over.
+          if b - a > min-units { b -= min-units - (n - b) } else { b = a }
+        }
+        if b != greedy-b { h = g-frag-h(card, a, b, sz, gap) }
+      }
+      let last-col = ci >= ncols - 1
+      if b == a or (card.atomic and b < n) {
+        // Nothing (or not the whole atomic card) fits here.
+        if col.len() > 0 and not last-col {
+          // Column has content: close it and retry in the next one.
+          cols.push(col)
+          col = ()
+          used = 0pt
+          ci += 1
+          continue
+        }
+        // Empty column (or the last one) and it still doesn't fit: force.
+        overflow = true
+        b = if card.atomic { n } else { calc.max(greedy-b, a + 1) }
+        h = g-frag-h(card, a, b, sz, gap)
+      }
+      col.push((card: card, a: a, b: b))
+      used = start + h
+      a = b
+      if a < n {
+        // Card continues in the next column.
+        if last-col {
+          overflow = true
+        } else {
+          cols.push(col)
+          col = ()
+          used = 0pt
+          ci += 1
+        }
+      }
+    }
+  }
+  cols.push(col)
+  while cols.len() < ncols { cols.push(()) }
+  (cols: cols, overflow: overflow)
+}
+
+// Smallest column height T at which everything packs into `ncols` columns.
+// The last column also carries the legend (`tail-h`, pinned to its bottom),
+// so its cap is `min(T, H - tail-h)`. Binary search — 14 halvings of ~200mm
+// is ~0.01mm, far below any visible difference. `fits: false` means even
+// T = H overflows; the returned pack is the forced one.
+#let g-caps-for(ncols, H, tail-h, T) = range(ncols).map(i =>
+  if i == ncols - 1 { calc.min(T, H - tail-h) } else { T }
+)
+
+#let g-balance(cards, ncols, H, tail-h, sz, gap) = {
+  let best = g-pack(cards, g-caps-for(ncols, H, tail-h, H), sz, gap)
+  if best.overflow { return (pack: best, T: H, fits: false) }
+  let lo = 0pt
+  let hi = H
+  for _ in range(14) {
+    let mid = (lo + hi) / 2
+    let p = g-pack(cards, g-caps-for(ncols, H, tail-h, mid), sz, gap)
+    if p.overflow { lo = mid } else { hi = mid; best = p }
+  }
+  (pack: best, T: hi, fits: true)
+}
+
+// Feathering: the largest row gap in [sz.row, feather-max × sz.row] at which
+// the menu still fits full-height columns. Slack that would otherwise sit as
+// a pink void under the last row of every column becomes a slightly airier
+// row rhythm instead; whatever is left after the cap is still stretched.
+// Pure arithmetic (unit heights don't depend on the gap) — no re-measuring.
+#let g-feather(cards, ncols, H, tail-h, sz) = {
+  let caps = g-caps-for(ncols, H, tail-h, H)
+  let lo = sz.row
+  let hi = sz.row * feather-max
+  if not g-pack(cards, caps, sz, hi).overflow { return hi }
+  for _ in range(10) {
+    let mid = (lo + hi) / 2
+    if g-pack(cards, caps, sz, mid).overflow { hi = mid } else { lo = mid }
+  }
+  lo
+}
+
+#let g-scale(sz, f) = sz.pairs().map(((k, v)) => (k, v * f)).to-dict()
+
+// Full layout for one render: measure, balance, and shrink the size profile
+// only if the menu can't fit 8 columns at all. Returns
+// (cols: 8 arrays of fragments, sz: the profile used, gap: row gap, scale,
+// T, fits).
+#let g-layout(cw, H, sz, atomic-max) = {
+  let tail-h = measure(width: cw, legend).height + card-gap
+  let result = none
+  for f in (1.0, 0.95, 0.9, 0.85, 0.8) {
+    let szf = g-scale(sz, f)
+    let cards = g-measure-cards(g-cards(show-ingredients, szf, atomic-max), cw - 2 * szf.inset)
+    let bal = g-balance(cards, n-menu-cols, H, tail-h, szf, szf.row)
+    let gap = szf.row
+    if bal.fits and feather-max > 1.0 {
+      gap = g-feather(cards, n-menu-cols, H, tail-h, szf)
+      bal = g-balance(cards, n-menu-cols, H, tail-h, szf, gap)
+    }
+    result = (cols: bal.pack.cols, sz: szf, gap: gap, scale: f, T: bal.T, fits: bal.fits)
+    if bal.fits { break }
+  }
+  result
+}
+
+// One card fragment: the same frame as the theme's `category-card`. The last
+// fragment of a column is stretched (`1fr`) to the column bottom.
+#let g-fragment(frag, sz, gap, stretch) = block(
+  fill: col-pink,
+  stroke: card-stroke + col-pink-2,
+  radius: 2pt,
+  inset: sz.inset,
+  width: 100%,
+  height: if stretch { 1fr } else { auto },
+  breakable: false,
+)[
+  #set block(spacing: gap)
+  #for k in range(frag.a, frag.b) { frag.card.units.at(k) }
+]
+
+// One fixed-height column. `tail` (the legend) sits at the very bottom; the
+// last fragment stretches to meet it.
+#let g-column(frags, cw, H, sz, gap, tail) = block(width: cw, height: H, breakable: false)[
+  #set block(spacing: 0pt)
+  #for (i, fr) in frags.enumerate() {
+    if i > 0 { v(card-gap) }
+    g-fragment(fr, sz, gap, i == frags.len() - 1)
+  }
+  #if tail != none {
+    if frags.len() > 0 { v(card-gap) }
+    tail
+  }
+]
+
+// 4 columns of one page. `first` = index of the first column in the 8-col
+// flow; the legend goes into the last column of the last page.
+#let g-menu-area(L, first, cw, H, gutter, with-legend) = grid(
+  columns: (cw,) * 4,
+  gutter: gutter,
+  ..range(4).map(i => g-column(
+    L.cols.at(first + i), cw, H, L.sz, L.gap,
+    if with-legend and i == 3 { legend } else { none },
+  )),
+)
+
+// Tiny corner note for local tuning (`--input debug=1`), never set by Rust.
+#let g-debug(L) = if debug-fill {
+  place(top + left, dx: 1mm, dy: 0.5mm, text(size: 4pt, fill: col-muted)[
+    fill: scale #L.scale · gap #calc.round(L.gap / 1pt, digits: 2)pt · T #calc.round(L.T / 1mm, digits: 1)mm · fits #L.fits
+  ])
 }
 
 #if is-a5 {
@@ -240,37 +515,17 @@
   //   BACK  (page 2) L→R:  QR    | menuD | menuC   (reversed)
   // After the flip, P4(menuC) backs P3(menuB), P5(menuD) backs P2(menuA),
   // P6(QR) backs P1(cover).
-
-  // Each A5 menu PANEL holds 2 columns → 2 panels per side = 4 columns/side,
-  // 8 menu columns total across both sides. That's the SAME column count as
-  // the trifold (which fits this menu well), so we reuse the trifold's
-  // per-row text sizing instead of shrinking — the column width (~70mm) is
-  // comparable to the trifold's, so a category never gets clipped. No height
-  // box / no clipping: the menu flows + balances across the 4 columns per
-  // side exactly like the trifold's `columns(4, …)`.
   //
-  // Split front/back by item count. Both sides have equal menu room (4 cols),
-  // but the BACK column flow ends with the allergen legend, and category
-  // breaks are whole-category, so an even 50/50 spills the front past its 4
-  // columns onto a 3rd page. Bias the cut to the back (front ~45%) so each
-  // side's 4 columns hold their half with no overflow. The `sz` profile keeps
-  // both variants to 2 pages (one fold sheet). The A5 has column headroom, so
-  // small categories (≤9 items) snap whole — no orphaned headers / broken
-  // reading order across the 4-column flow.
-  let cards = g-card-list(show-ingredients, sz, 9)
-  let total = cards.fold(0, (a, c) => a + c.n)
-  let half = total * 0.45
-  let front = ()
-  let back = ()
-  let acc = 0
-  for c in cards {
-    if acc < half { front.push(c.card) } else { back.push(c.card) }
-    acc += c.n
-  }
-  // 4 columns across the 2-panel menu area = 2 columns per folded panel.
-  let menu-area(cards, tail) = pad(x: 4mm, y: 6mm,
-    columns(4, gutter: 4mm, g-cards-to-content(cards) + tail),
-  )
+  // Each A5 menu PANEL holds 2 columns → 4 columns per side, 8 total — the
+  // same column count as the trifold at a comparable width (~70mm), so the
+  // same `sz` profile serves both. The packer balances all 8 columns across
+  // both sides; small categories (≤9 items) snap whole so no header strands
+  // away from its rows.
+  let pad-x = 4mm
+  let pad-y = 6mm
+  let gutter = 4mm
+  let cw = (2 * a5-panel-w - 2 * pad-x - 3 * gutter) / 4
+  let H = a5-trim-h - 2 * pad-y
 
   // Fold + crop marks for the current page (2 interior seams + 4 corners),
   // drawn in the bleed margin so they're trimmed away. The full-bleed design
@@ -297,71 +552,67 @@
     }
   }
 
-  // FRONT (page 1): cover | [front menu over 2 panels = 4 cols].
-  grid(
-    columns: (a5-panel-w, 2 * a5-panel-w),
-    gutter: 0mm,
-    cover-panel,
-    menu-area(front, []),
-  )
+  // FRONT (page 1): cover | [menu columns 1–4 over 2 panels].
+  context {
+    let L = g-layout(cw, H, sz, 9)
+    grid(
+      columns: (a5-panel-w, 2 * a5-panel-w),
+      gutter: 0mm,
+      cover-panel,
+      pad(x: pad-x, y: pad-y, g-menu-area(L, 0, cw, H, gutter, false)),
+    )
+    g-debug(L)
+  }
   marks
 
   pagebreak()
 
-  // BACK (page 2): QR (placed left so it folds to the outer back) | [back menu
-  // over 2 panels = 4 cols, legend at the end]. With the duplex long-edge flip
-  // the QR panel lands behind the cover.
-  grid(
-    columns: (a5-panel-w, 2 * a5-panel-w),
-    gutter: 0mm,
-    qr-panel,
-    menu-area(back, v(2mm) + legend),
-  )
+  // BACK (page 2): QR (placed left so it folds to the outer back) | [menu
+  // columns 5–8, legend at the bottom of the last]. With the duplex long-edge
+  // flip the QR panel lands behind the cover.
+  context {
+    let L = g-layout(cw, H, sz, 9)
+    grid(
+      columns: (a5-panel-w, 2 * a5-panel-w),
+      gutter: 0mm,
+      qr-panel,
+      pad(x: pad-x, y: pad-y, g-menu-area(L, 4, cw, H, gutter, true)),
+    )
+  }
   marks
 } else {
   // ===== Tri-fold (default): the two-page 443×210 layout ===================
-  // Geometry-rendered rows so the DEFAULT carries ingredients. Page 1 takes a
-  // bit more than half because page 2 also carries the QR panel + the legend,
-  // which together eat column space — aim ~57% of items on page 1. The
-  // ingredients menu is denser per row, so the trifold uses the same `sz`
-  // squeeze (kept to 2 pages; `?condensed=1` strips ingredients for the airy
-  // in-house menu). atomic-max = 0: the trifold is at the 2-page edge, so
-  // every category stays breakable (snapping any whole costs a 3rd page —
-  // measured). Its last column has some harmless slack instead.
-  let cards = g-card-list(show-ingredients, sz, 0)
-  let total = cards.fold(0, (a, c) => a + c.n)
-  let target = total * 0.57
-  let acc = 0
-  let split-at = 0
-  for c in cards {
-    if acc + c.n > target { break }
-    acc += c.n
-    split-at += 1
-  }
-  let p1 = cards.slice(0, split-at).map(c => c.card)
-  let p2 = cards.slice(split-at).map(c => c.card)
+  // Page 1: cover (left panel) + menu columns 1–4 over the right two panels.
+  // Page 2: QR (left panel) + menu columns 5–8, legend at the bottom of the
+  // last. The packer balances all 8 columns, so page 2's QR panel and legend
+  // no longer need a guessed item-count bias. atomic-max = 0: the trifold is
+  // at the 2-page edge, so every category may break at a column boundary.
+  let pad-x = 3mm
+  let pad-y = 6mm
+  let gutter = 3mm
+  let cw = (2 * panel-w - 2 * pad-x - 3 * gutter) / 4
+  let H = 210mm - 2 * pad-y
 
-  // Page 1: cover image (left panel) + menu over the right two panels as one
-  // balanced 4-column flow.
-  grid(
-    columns: (panel-w, 2 * panel-w),
-    gutter: 0mm,
-    cover-panel,
-    pad(x: 3mm, y: 6mm,
-      columns(4, gutter: 3mm, g-cards-to-content(p1)),
-    ),
-  )
+  context {
+    let L = g-layout(cw, H, sz, 0)
+    grid(
+      columns: (panel-w, 2 * panel-w),
+      gutter: 0mm,
+      cover-panel,
+      pad(x: pad-x, y: pad-y, g-menu-area(L, 0, cw, H, gutter, false)),
+    )
+    g-debug(L)
+  }
 
   pagebreak()
 
-  // Page 2: QR (left panel) + the rest of the menu as a 4-column flow, legend
-  // appended so it lands in the last column.
-  grid(
-    columns: (panel-w, 2 * panel-w),
-    gutter: 0mm,
-    pad(x: 3mm, y: 6mm)[#qr-panel],
-    pad(x: 3mm, y: 6mm,
-      columns(4, gutter: 3mm, g-cards-to-content(p2) + v(2mm) + legend),
-    ),
-  )
+  context {
+    let L = g-layout(cw, H, sz, 0)
+    grid(
+      columns: (panel-w, 2 * panel-w),
+      gutter: 0mm,
+      pad(x: pad-x, y: pad-y)[#qr-panel],
+      pad(x: pad-x, y: pad-y, g-menu-area(L, 4, cw, H, gutter, true)),
+    )
+  }
 }

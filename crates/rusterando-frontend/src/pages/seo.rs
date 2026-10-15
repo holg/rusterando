@@ -58,8 +58,21 @@ mod ssr {
     /// Build the `Restaurant` JSON-LD string from the DB + a `Branding`
     /// snapshot. Pure inputs (no leptos context) so it runs at boot AND from
     /// any server fn. Empty string on a DB error → the component emits nothing.
-    pub async fn build_restaurant_jsonld(db: &SqlitePool, branding: &Branding) -> String {
-        let base = crate::pages::home::site_url();
+    ///
+    /// `base_url` is the shop's own public URL. It is a PARAMETER, not an
+    /// ambient read: this runs at boot where no request context exists, so
+    /// falling back to the process `PUBLIC_URL` stamped the apex showroom's
+    /// address into every tenant's structured data. Empty → process value.
+    pub async fn build_restaurant_jsonld(
+        db: &SqlitePool,
+        branding: &Branding,
+        base_url: &str,
+    ) -> String {
+        let base = if base_url.trim().is_empty() {
+            crate::pages::home::site_url()
+        } else {
+            base_url.to_string()
+        };
         let base = base.trim_end_matches('/').to_string();
 
         // openingHoursSpecification — one per open weekday shift.
@@ -215,7 +228,11 @@ pub async fn rebuild_jsonld_cache() {
     let branding = use_context::<crate::branding::BrandingHandle>()
         .map(|h| h.get())
         .unwrap_or_default();
-    let json = build_restaurant_jsonld(&db, &branding).await;
+    // Server-fn path: the per-request tenant's URL (see ResolvedTenant).
+    let base = use_context::<crate::pages::settings::ResolvedTenant>()
+        .map(|t| t.public_url)
+        .unwrap_or_default();
+    let json = build_restaurant_jsonld(&db, &branding, &base).await;
     handle.set(json);
 }
 

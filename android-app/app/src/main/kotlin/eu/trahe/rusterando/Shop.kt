@@ -63,6 +63,23 @@ data class Shop(
             credentials = emptyMap(),
         )
 
+        /**
+         * The flavor's seeded shop, with a DETERMINISTIC id derived from its
+         * URL. Must be stable across launches + app versions: the seed is
+         * recreated on a genuine first launch, and credentials are keyed to
+         * this id — a random UUID would orphan saved logins on every re-seed.
+         */
+        fun seed(name: String, baseUrl: String): Shop {
+            val url = baseUrl.trimEnd('/')
+            return Shop(
+                id = "seed-$url",
+                name = name,
+                baseUrl = url,
+                activeRole = Role.Customer,
+                credentials = emptyMap(),
+            )
+        }
+
         fun fromJson(obj: JSONObject): Shop {
             val creds = mutableMapOf<Role, String>()
             obj.optJSONObject("credentials")?.let { c ->

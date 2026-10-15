@@ -33,12 +33,15 @@ debug-inject = []
 
 [dependencies]
 rusterando-shared = { workspace = true }
+rusterando-geo = { workspace = true }
 rusterando-frontend = { workspace = true, features = ["ssr"] }
 
 # Kitchen printer subsystem (see src/kitchen.rs). The Pi binary lives at
 # crates/rusterando-printer/ and depends on the same protocol crate.
 kitchen-protocol = { workspace = true }
 postcard = { workspace = true }
+# Browser kitchen-display feed: postcard events, base64 per SSE message.
+base64 = "0.22"
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
 bytes = { workspace = true }
@@ -81,6 +84,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 dotenvy = { workspace = true }
+uuid = { workspace = true }
 glob = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -88,9 +92,9 @@ http = { workspace = true }
 anyhow = { workspace = true }
 typst = "0.14"
 typst-pdf = "0.14"
-typst-kit = { version = "0.14", features = ["embed-fonts"] }
 ecow = "0.2"
-comemo = "0.4"
+# Same comemo as typst 0.14 — `comemo::evict` must hit typst's own cache.
+comemo = "0.5"
 
 # RLIMIT_NOFILE lookup for src/health.rs (process-health observability).
 # Linux-only; the call is cfg-gated and macOS dev builds skip the syscall

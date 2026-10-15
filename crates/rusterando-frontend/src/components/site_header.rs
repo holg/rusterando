@@ -107,9 +107,9 @@ pub fn SiteHeader() -> impl IntoView {
                         <a class="pill last-order" href=href>{label}</a>
                     }
                 })}
-                <a class="pill" href="/menu">{crate::t!("header.menu")}</a>
-                <a class="pill" href="/#delivery">{crate::t!("header.delivery_area")}</a>
-                <a class="pill" href="/#hours">{crate::t!("header.opening_hours")}</a>
+                <a class="pill" href="/menu">{move || crate::t!("header.menu")}</a>
+                <a class="pill" href="/#delivery">{move || crate::t!("header.delivery_area")}</a>
+                <a class="pill" href="/#hours">{move || crate::t!("header.opening_hours")}</a>
                 <LocaleSwitcher/>
             </nav>
         </header>

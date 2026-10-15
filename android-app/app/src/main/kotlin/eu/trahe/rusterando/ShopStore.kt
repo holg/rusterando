@@ -25,6 +25,8 @@ import org.json.JSONObject
 object ShopStore {
 
     private const val SECURE_PREFS = "rusterando.shops"
+    /** Non-secret per-device settings (kitchen display), outside the shop blob. */
+    private const val PLAIN_PREFS = "rusterando.prefs"
     private const val KEY_PAYLOAD = "shops_v1"
     private const val SCHEMA_VERSION = 1
 
@@ -54,14 +56,30 @@ object ShopStore {
         synchronized(this) {
             cached?.let { return it }
             val raw = prefs(context).getString(KEY_PAYLOAD, null)
-            val state = if (raw == null) {
-                // First launch — seed from the flavor.
-                seedFromFlavor(context)
+            // DATA-SAFETY CONTRACT (see iOS ShopStore.all() for the twin):
+            //   - raw == null (true first launch) → seed from flavor + persist.
+            //   - raw present but unparseable → return an EMPTY state WITHOUT
+            //     writing. A schema change or corruption must NEVER re-seed on
+            //     top of the user's real data — that's how an update wiped saved
+            //     accounts. The encrypted blob is left byte-for-byte intact so a
+            //     future migration can still recover it.
+            //   - raw present + parseable → use it.
+            val state: State
+            if (raw == null) {
+                state = seedFromFlavor(context)
+                write(context, state)   // persist the seed only on first launch
             } else {
-                runCatching { parse(raw) }.getOrElse { seedFromFlavor(context) }
+                state = runCatching { parse(raw) }.getOrElse {
+                    android.util.Log.w(
+                        "ShopStore",
+                        "stored shops present but failed to parse — NOT overwriting " +
+                            "(preserving ${raw.length} chars for recovery)",
+                        it,
+                    )
+                    State(activeShopId = null, shops = emptyList())
+                }
             }
             cached = state
-            if (raw == null) write(context, state)
             return state
         }
     }
@@ -98,7 +116,7 @@ object ShopStore {
             return State(activeShopId = null, shops = emptyList())
         }
         val appName = context.getString(R.string.app_name)
-        val seed = Shop.new(name = appName, baseUrl = url)
+        val seed = Shop.seed(name = appName, baseUrl = url)
         return State(activeShopId = seed.id, shops = listOf(seed))
     }
 
@@ -172,6 +190,7 @@ object ShopStore {
             }
             state.copy(shops = remaining, activeShopId = nextActive)
         }
+        plain(context).edit().remove(kitchenDisplayKey(id)).apply()
     }
 
     fun setActiveShop(context: Context, id: String) {
@@ -191,6 +210,37 @@ object ShopStore {
         }
     }
 
+    // ---------------------------------------------------------------
+    // Kitchen display (plain prefs, per shop)
+    // ---------------------------------------------------------------
+
+    /**
+     * Whether the Küche role starts on the kitchen display
+     * (`/kitchen/display`, the board screen for a kitchen tablet) instead
+     * of the order list (`/kitchen`). Kept outside the `shops_v1` blob on
+     * purpose: that schema is shared with iOS and every installed version
+     * must keep parsing it. Twin of iOS `ShopStore.kitchenOpensDisplay`.
+     */
+    fun kitchenOpensDisplay(context: Context, shopId: String): Boolean =
+        plain(context).getBoolean(kitchenDisplayKey(shopId), false)
+
+    fun setKitchenOpensDisplay(context: Context, shopId: String, on: Boolean) {
+        plain(context).edit().putBoolean(kitchenDisplayKey(shopId), on).apply()
+    }
+
+    /** Where the shop opens for its active role. */
+    fun homePath(context: Context, shop: Shop): String =
+        if (shop.activeRole == Role.Kitchen && kitchenOpensDisplay(context, shop.id)) {
+            "/kitchen/display"
+        } else {
+            shop.activeRole.homePath
+        }
+
+    private fun plain(context: Context): SharedPreferences =
+        context.applicationContext.getSharedPreferences(PLAIN_PREFS, Context.MODE_PRIVATE)
+
+    private fun kitchenDisplayKey(shopId: String) = "kitchen_display.$shopId"
+
     fun setCredential(context: Context, shopId: String, role: Role, password: String?) {
         commit(context) { state ->
             state.copy(
@@ -205,6 +255,7 @@ object ShopStore {
     fun wipeAll(context: Context) {
         synchronized(this) {
             prefs(context).edit().remove(KEY_PAYLOAD).apply()
+            plain(context).edit().clear().apply()
             cached = null
         }
     }

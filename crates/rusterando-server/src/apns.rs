@@ -31,6 +31,11 @@ use async_trait::async_trait;
 use rusterando_frontend::pages::push::{BroadcastAudience, BroadcastSink};
 use sqlx::SqlitePool;
 
+/// Sound of urgent pushes: the kitchen display's gong, bundled in the staff
+/// app (ios-app/Resources/gong.wav). An app build without the file plays the
+/// default sound instead, so this is safe to send to every installed version.
+const URGENT_SOUND: &str = "gong.wav";
+
 #[derive(Clone)]
 pub struct ApnsHandle(Arc<Inner>);
 
@@ -94,6 +99,40 @@ impl ApnsHandle {
     /// Spawns the actual HTTP/2 calls so the caller doesn't block — the
     /// originating order/cart action returns immediately.
     pub fn notify(&self, role: &str, title: &str, body: &str, deep_link: Option<&str>) {
+        self.spawn_fan_out(role, title, body, deep_link, false);
+    }
+
+    /// Same as `notify` but fans out to several roles in parallel. Used
+    /// for events that multiple staff roles need to act on at once
+    /// (e.g. a new order pings kitchen + admin + driver simultaneously).
+    pub fn notify_roles(&self, roles: &[&str], title: &str, body: &str, deep_link: Option<&str>) {
+        for role in roles {
+            self.spawn_fan_out(role, title, body, deep_link, false);
+        }
+    }
+
+    /// `notify_roles` with the kitchen gong + time-sensitive delivery (see
+    /// [`URGENT_SOUND`]). For pushes someone has to act on now.
+    pub fn notify_roles_urgent(
+        &self,
+        roles: &[&str],
+        title: &str,
+        body: &str,
+        deep_link: Option<&str>,
+    ) {
+        for role in roles {
+            self.spawn_fan_out(role, title, body, deep_link, true);
+        }
+    }
+
+    fn spawn_fan_out(
+        &self,
+        role: &str,
+        title: &str,
+        body: &str,
+        deep_link: Option<&str>,
+        urgent: bool,
+    ) {
         let role = role.to_string();
         let title = title.to_string();
         let body = body.to_string();
@@ -102,21 +141,12 @@ impl ApnsHandle {
 
         tokio::spawn(async move {
             if let Err(e) = inner
-                .fan_out(&role, &title, &body, deep_link.as_deref())
+                .fan_out(&role, &title, &body, deep_link.as_deref(), urgent)
                 .await
             {
                 tracing::warn!(target: "apns", error = %e, %role, "fan-out failed");
             }
         });
-    }
-
-    /// Same as `notify` but fans out to several roles in parallel. Used
-    /// for events that multiple staff roles need to act on at once
-    /// (e.g. a new order pings kitchen + admin + driver simultaneously).
-    pub fn notify_roles(&self, roles: &[&str], title: &str, body: &str, deep_link: Option<&str>) {
-        for role in roles {
-            self.notify(role, title, body, deep_link);
-        }
     }
 
     /// Send a manual broadcast to the configured audience. Awaitable
@@ -208,6 +238,7 @@ impl Inner {
         title: &str,
         body: &str,
         deep_link: Option<&str>,
+        urgent: bool,
     ) -> Result<()> {
         let tokens: Vec<(String,)> = sqlx::query_as(
             "SELECT token FROM push_devices
@@ -227,13 +258,17 @@ impl Inner {
         // Info-level so production (RUST_LOG=info) shows the fan-out reached
         // real devices — the per-token result below stays at debug to avoid
         // noise. Staff pushes are low-frequency, so this is cheap.
-        tracing::info!(target: "apns", %role, devices = tokens.len(), "fan-out: sending push");
+        tracing::info!(target: "apns", %role, devices = tokens.len(), urgent, "fan-out: sending push");
 
         for (token,) in tokens {
-            let builder = DefaultNotificationBuilder::new()
-                .title(title)
-                .body(body)
-                .sound("default");
+            let builder = DefaultNotificationBuilder::new().title(title).body(body);
+            let builder = if urgent {
+                builder
+                    .sound(URGENT_SOUND)
+                    .time_sensitive_interruption_level()
+            } else {
+                builder.sound("default")
+            };
 
             let opts = NotificationOptions {
                 apns_priority: Some(Priority::High),
@@ -295,5 +330,15 @@ impl BroadcastSink for ApnsHandle {
 
     fn notify_roles(&self, roles: &[&str], title: &str, body: &str, deep_link: Option<&str>) {
         ApnsHandle::notify_roles(self, roles, title, body, deep_link);
+    }
+
+    fn notify_roles_urgent(
+        &self,
+        roles: &[&str],
+        title: &str,
+        body: &str,
+        deep_link: Option<&str>,
+    ) {
+        ApnsHandle::notify_roles_urgent(self, roles, title, body, deep_link);
     }
 }

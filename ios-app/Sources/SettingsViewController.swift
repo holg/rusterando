@@ -466,6 +466,15 @@ final class ShopDetailViewController: UIViewController {
         alert.addAction(UIAlertAction(title: "OK", style: .default))
         present(alert, animated: true)
     }
+
+    @objc private func kitchenDisplayToggled(_ sender: UISwitch) {
+        guard let s = shop else { return }
+        ShopStore.setKitchenOpensDisplay(shopId: s.id, sender.isOn)
+        // Already working as Küche in this shop: switch screens right away.
+        if s.activeRole == .kitchen, ShopStore.activeShop()?.id == s.id {
+            onShopChanged?(s)
+        }
+    }
 }
 
 extension ShopDetailViewController: UITableViewDataSource, UITableViewDelegate {
@@ -474,14 +483,16 @@ extension ShopDetailViewController: UITableViewDataSource, UITableViewDelegate {
     ///   1: "Diese Shop aktivieren".
     ///   2: Aktive Rolle.
     ///   3: Gespeicherte Passwörter.
-    ///   4: Shop entfernen.
-    func numberOfSections(in tv: UITableView) -> Int { 5 }
+    ///   4: Küche — start on the kitchen display.
+    ///   5: Shop entfernen.
+    func numberOfSections(in tv: UITableView) -> Int { 6 }
 
     func tableView(_ tv: UITableView, titleForHeaderInSection section: Int) -> String? {
         switch section {
         case 0: return "Shop"
         case 2: return "Aktive Rolle"
         case 3: return "Gespeicherte Passwörter"
+        case 4: return "Küche"
         default: return nil
         }
     }
@@ -490,6 +501,8 @@ extension ShopDetailViewController: UITableViewDataSource, UITableViewDelegate {
         switch section {
         case 2: return "„Kunde\" entspricht dem öffentlichen Shop ohne Login."
         case 3: return "Passwörter werden lokal im Schlüsselbund verschlüsselt gespeichert."
+        case 4: return "Als „Küche\" öffnet die App das Küchen-Display statt der Bestellliste — "
+            + "für das iPad in der Küche. Der Bildschirm bleibt an, der Gong ertönt auch bei stummem Gerät."
         default: return nil
         }
     }
@@ -501,6 +514,7 @@ extension ShopDetailViewController: UITableViewDataSource, UITableViewDelegate {
         case 2: return 1 + ShopStore.savedRoles(shopId: shopId).count  // customer + staff with creds
         case 3: return Role.staffRoles.count
         case 4: return 1
+        case 5: return 1
         default: return 0
         }
     }
@@ -551,6 +565,13 @@ extension ShopDetailViewController: UITableViewDataSource, UITableViewDelegate {
             badge.sizeToFit()
             cell.accessoryView = badge
         case 4:
+            cell.textLabel?.text = "Startet im Küchen-Display"
+            cell.selectionStyle = .none
+            let toggle = UISwitch()
+            toggle.isOn = ShopStore.kitchenOpensDisplay(shopId: shopId)
+            toggle.addTarget(self, action: #selector(kitchenDisplayToggled(_:)), for: .valueChanged)
+            cell.accessoryView = toggle
+        case 5:
             cell.textLabel?.text = "Shop entfernen"
             cell.textLabel?.textColor = .systemRed
         default:
@@ -594,7 +615,7 @@ extension ShopDetailViewController: UITableViewDataSource, UITableViewDelegate {
             activate(role: role)
         case 3:
             editPassword(for: Role.staffRoles[indexPath.row])
-        case 4:
+        case 5:
             confirmDelete()
         default:
             break

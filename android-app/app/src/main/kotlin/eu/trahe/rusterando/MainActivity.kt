@@ -2,19 +2,27 @@ package eu.trahe.rusterando
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.DownloadManager
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.os.SystemClock
+import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.webkit.CookieManager
+import android.webkit.URLUtil
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,7 +42,14 @@ import androidx.core.view.WindowCompat
 class MainActivity : AppCompatActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var gearButton: Button
+    private lateinit var reloadButton: Button
     private lateinit var settingsLauncher: androidx.activity.result.ActivityResultLauncher<Intent>
+
+    /** The current page's needs, kept in step with the URL (see [applyPageMode]). */
+    private var pageMode = PageMode()
+    /** `elapsedRealtime` at the last onPause; see [onResume]. */
+    private var pausedAt: Long? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -53,7 +68,8 @@ class MainActivity : AppCompatActivity() {
             settings.userAgentString =
                 "${settings.userAgentString} ${userAgentSuffix()}"
 
-            webViewClient = ShopWebViewClient(BuildConfig.ASSOCIATED_DOMAIN)
+            webViewClient = ShopWebViewClient(BuildConfig.ASSOCIATED_DOMAIN, ::applyPageMode)
+            setDownloadListener(::download)
         }
 
         // Persistent cookies — the whole point of running native instead
@@ -77,7 +93,10 @@ class MainActivity : AppCompatActivity() {
                     ViewGroup.LayoutParams.MATCH_PARENT,
                 ),
             )
-            addView(buildGearButton())
+            gearButton = buildGearButton()
+            reloadButton = buildReloadButton()
+            addView(gearButton)
+            addView(reloadButton)
         }
         setContentView(container)
 
@@ -98,6 +117,9 @@ class MainActivity : AppCompatActivity() {
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
+                    // The kitchen display is a kiosk screen: a stray edge
+                    // swipe must not navigate away from it mid-service.
+                    if (pageMode.isKitchenDisplay) return
                     if (webView.canGoBack()) {
                         webView.goBack()
                     } else {
@@ -112,9 +134,29 @@ class MainActivity : AppCompatActivity() {
     private fun loadInitialUrl() {
         val shop = ShopStore.activeShop(this)
         val base = (shop?.baseUrl ?: BuildConfig.START_URL).trimEnd('/')
-        val role = shop?.activeRole ?: Role.Customer
-        val url = if (role != Role.Customer) base + role.homePath else "$base/"
+        val url = if (shop != null && shop.activeRole != Role.Customer) {
+            base + ShopStore.homePath(this, shop)
+        } else {
+            "$base/"
+        }
         webView.loadUrl(url)
+    }
+
+    /**
+     * Follow the page: keep the screen on for the kitchen pages and the admin
+     * order board, and on the kitchen display let the buttons recede (they
+     * stay — they're the way to settings). Twin of the iOS `applyPageMode`.
+     */
+    private fun applyPageMode(url: String?) {
+        pageMode = pageModeFor(url)
+        if (pageMode.keepAwake) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        val alpha = if (pageMode.isKitchenDisplay) 0.35f else 1f
+        gearButton.alpha = alpha
+        reloadButton.alpha = alpha
     }
 
     /** Build the gear FAB. ~44 dp square, top-right with safe-area inset. */
@@ -146,6 +188,50 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener {
                 settingsLauncher.launch(Intent(this@MainActivity, ShopsActivity::class.java))
             }
+        }
+    }
+
+    /**
+     * Reload FAB, stacked directly under the gear. The app is a chrome-less
+     * WebView (no address bar, no browser reload), so without this a hung or
+     * post-deploy-stale page can't be reloaded. Matches the iOS reload button.
+     */
+    private fun buildReloadButton(): Button {
+        val sizeDp = dp(44)
+        val marginDp = dp(12)
+        val params = FrameLayout.LayoutParams(sizeDp, sizeDp).apply {
+            gravity = Gravity.TOP or Gravity.END
+            // Gear is at (statusBar + 12); sit 44 + 10dp below it.
+            topMargin = marginDp + statusBarHeight() + sizeDp + dp(10)
+            rightMargin = marginDp
+        }
+
+        val bg = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(Color.parseColor("#C61D2EEB"))  // same red as the gear
+        }
+
+        return Button(this).apply {
+            layoutParams = params
+            text = "⟳"
+            textSize = 20f
+            setTextColor(Color.WHITE)
+            background = bg
+            elevation = dp(4).toFloat()
+            contentDescription = getString(R.string.reload_page_content_description)
+            setOnClickListener { reloadPage() }
+        }
+    }
+
+    /**
+     * Reload the current page. Falls back to the active shop's home when the
+     * WebView has no committed URL yet, so the button is never a dead no-op.
+     */
+    private fun reloadPage() {
+        if (webView.url != null) {
+            webView.reload()
+        } else {
+            loadInitialUrl()
         }
     }
 
@@ -181,6 +267,23 @@ class MainActivity : AppCompatActivity() {
         // Flush cookies to disk so a process kill in the background
         // (Doze, low-memory) doesn't lose role sessions.
         CookieManager.getInstance().flush()
+        pausedAt = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * A live board's server stream dies while the app is in the background.
+     * It reconnects on its own, but with a backoff, and the board can show
+     * stale orders until then — so after a longer break, reload outright.
+     */
+    override fun onResume() {
+        super.onResume()
+        val since = pausedAt ?: return
+        pausedAt = null
+        val away = SystemClock.elapsedRealtime() - since
+        if (away > RESUME_RELOAD_AFTER_MS && pageMode.reloadOnResume) {
+            Log.i("MainActivity", "back after ${away / 1000}s on a live board — reloading")
+            webView.reload()
+        }
     }
 
     override fun onDestroy() {
@@ -192,11 +295,78 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
+     * Buchhaltung PDFs / CSV export. The WebView can't show a PDF and
+     * the system browser has no staff session (on purpose), so fetch it
+     * with the WebView's cookies via DownloadManager — the "done"
+     * notification opens it.
+     */
+    private fun download(
+        url: String,
+        userAgent: String,
+        contentDisposition: String?,
+        mimeType: String?,
+        @Suppress("UNUSED_PARAMETER") contentLength: Long,
+    ) {
+        val name = URLUtil.guessFileName(url, contentDisposition, mimeType)
+        val request = DownloadManager.Request(Uri.parse(url)).apply {
+            CookieManager.getInstance().getCookie(url)?.let { addRequestHeader("Cookie", it) }
+            addRequestHeader("User-Agent", userAgent)
+            setMimeType(mimeType)
+            setTitle(name)
+            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            // The public Downloads folder needs no permission from Android 10;
+            // before that, the app's own folder (still opened by the notification).
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name)
+            } else {
+                setDestinationInExternalFilesDir(this@MainActivity, Environment.DIRECTORY_DOWNLOADS, name)
+            }
+        }
+        try {
+            (getSystemService(DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
+            Toast.makeText(this, "Download: $name", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Download fehlgeschlagen: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
      * Tacked onto the WebView user-agent so the server can tell native
      * traffic apart from the browser. Mirrors the iOS app pattern.
      */
     private fun userAgentSuffix(): String =
         "RusterandoAndroid/${BuildConfig.VERSION_NAME}"
+
+    /** What the current page needs from the shell. */
+    private data class PageMode(
+        /** `/kitchen/display`: one full-window touch canvas. */
+        val isKitchenDisplay: Boolean = false,
+        /**
+         * Keep the screen on: the kitchen pages and the admin order board,
+         * the screens left open on a kitchen / counter tablet. Not the
+         * driver board — that's a phone on the road.
+         */
+        val keepAwake: Boolean = false,
+        /** A live list board, reloaded on return (no half-typed drafts there). */
+        val reloadOnResume: Boolean = false,
+    )
+
+    private companion object {
+        /** Away longer than this, a live board reloads on return. */
+        const val RESUME_RELOAD_AFTER_MS = 120_000L
+
+        fun pageModeFor(url: String?): PageMode {
+            val uri = url?.let(Uri::parse) ?: return PageMode()
+            if (uri.scheme?.startsWith("http") != true) return PageMode()
+            val path = (uri.path ?: "/").trimEnd('/').ifEmpty { "/" }
+            return PageMode(
+                isKitchenDisplay = path == "/kitchen/display",
+                keepAwake = path == "/kitchen" || path.startsWith("/kitchen/") ||
+                    path == "/admin/orders" || path.startsWith("/admin/orders/"),
+                reloadOnResume = path in setOf("/kitchen", "/kitchen/display", "/admin/orders", "/driver"),
+            )
+        }
+    }
 }
 
 /**
@@ -204,7 +374,16 @@ class MainActivity : AppCompatActivity() {
  * everything else (mailto:, tel:, off-domain links) is handed to the
  * OS so the user lands in their dialer / mail client.
  */
-private class ShopWebViewClient(private val shopHost: String) : WebViewClient() {
+private class ShopWebViewClient(
+    private val shopHost: String,
+    /** Every URL change, including the web app's own pushState routing. */
+    private val onUrlChanged: (String?) -> Unit,
+) : WebViewClient() {
+
+    override fun doUpdateVisitedHistory(view: WebView, url: String?, isReload: Boolean) {
+        super.doUpdateVisitedHistory(view, url, isReload)
+        onUrlChanged(url)
+    }
 
     override fun shouldOverrideUrlLoading(
         view: WebView,

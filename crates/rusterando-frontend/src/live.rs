@@ -58,9 +58,28 @@ mod ssr {
     /// global events.
     pub async fn broadcast_shop_status(db: &sqlx::SqlitePool, hub: &LiveHub) {
         let (level, reason) = crate::pages::order::ssr::shop_open_state(db).await;
+        // Delivery state travels with the open/closed state: the admin's
+        // "keine Lieferung" click must reach every open page immediately,
+        // not on the customer's next reload.
+        let delivery_paused = crate::pages::settings::ssr::delivery_paused(db).await;
+        let delivery_reason = if delivery_paused {
+            let msg = crate::pages::settings::ssr::delivery_paused_message(db).await;
+            if msg.is_empty() {
+                crate::i18n::t("shop_status.delivery_paused_hint")
+            } else {
+                msg
+            }
+        } else {
+            String::new()
+        };
         hub.send(rusterando_shared::models::LiveEvent {
             order_id: String::new(),
-            kind: rusterando_shared::models::LiveKind::ShopStatus { level, reason },
+            kind: rusterando_shared::models::LiveKind::ShopStatus {
+                level,
+                reason,
+                delivery_paused,
+                delivery_reason,
+            },
         });
     }
 }

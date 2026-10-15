@@ -200,8 +200,14 @@ EOF
 # =============================================================================
 # Helpers
 # =============================================================================
+# Keepalive on every SSH session: the remote backup zips ~1 GB and the
+# server restart waits for the old process to drain, and an idle TCP
+# session through a NAT/VPN can time out meanwhile ("Read from remote
+# host: Operation timed out"), which aborted deploys half-way. Same for
+# rsync (see SSH_OPTS use below).
+SSH_OPTS=(-o ServerAliveInterval=15 -o ServerAliveCountMax=12 -o ConnectTimeout=30)
 ssh_cmd() {
-    ssh "$SSH_HOST" "$@"
+    ssh "${SSH_OPTS[@]}" "$SSH_HOST" "$@"
 }
 
 # First dotted component ("major") of a version string. "2.0.0" → 2,
@@ -618,10 +624,34 @@ cmd_upload() {
     # Davids' .env sets APP_NAME=davidspizzeria-server so the on-server
     # filename + systemd unit don't change across the rusterando rename.
     echo "Uploading binary as $APP_NAME..."
-    rsync -avz --progress "$LOCAL_BUILD_DIR/$CARGO_BIN_NAME" "$SSH_HOST:$REMOTE_BIN_DIR/$APP_NAME"
+    rsync -avz -e "ssh ${SSH_OPTS[*]}" --progress "$LOCAL_BUILD_DIR/$CARGO_BIN_NAME" "$SSH_HOST:$REMOTE_BIN_DIR/$APP_NAME"
     if [[ -f "$LOCAL_BUILD_DIR/hash.txt" ]]; then
         echo "Uploading hash.txt..."
-        rsync -avz --progress "$LOCAL_BUILD_DIR/hash.txt" "$SSH_HOST:$REMOTE_BIN_DIR/"
+        rsync -avz -e "ssh ${SSH_OPTS[*]}" --progress "$LOCAL_BUILD_DIR/hash.txt" "$SSH_HOST:$REMOTE_BIN_DIR/"
+    fi
+    # Local address lookup importer (crates/rusterando-geo). Built by
+    # cross_build_on_mac.sh into the same profile dir; optional so older
+    # builds still deploy. Run on the server: ./geo-import --env-file .env --download
+    if [[ -f "$LOCAL_BUILD_DIR/geo-import" ]]; then
+        echo "Uploading geo-import..."
+        rsync -avz -e "ssh ${SSH_OPTS[*]}" --progress "$LOCAL_BUILD_DIR/geo-import" "$SSH_HOST:$REMOTE_BIN_DIR/geo-import"
+    fi
+
+    # Shop onboarding tooling for the sys-admin wizard (/sysadmin on the apex):
+    # the menu-import binary under the name the server spawns it by, the
+    # Lieferando scraper (runs in the server-side Playwright venv
+    # rusterando-scrape/env_play_pdf_py12, which is NOT shipped — see
+    # INSTALLATION.md), and the migrations dir menu-import migrates new tenant
+    # DBs against. All optional so older builds still deploy.
+    if [[ -f "$LOCAL_BUILD_DIR/menu-import" ]]; then
+        echo "Uploading menu-import as menu-import-linux-x64..."
+        rsync -avz -e "ssh ${SSH_OPTS[*]}" --progress "$LOCAL_BUILD_DIR/menu-import" "$SSH_HOST:$REMOTE_BASE/menu-import-linux-x64"
+    fi
+    if [[ -f rusterando-scrape/scrape_lieferando.py ]]; then
+        echo "Uploading scraper + migrations..."
+        ssh_cmd "mkdir -p $REMOTE_BASE/rusterando-scrape $REMOTE_BASE/migrations"
+        rsync -avz -e "ssh ${SSH_OPTS[*]}" rusterando-scrape/scrape_lieferando.py "$SSH_HOST:$REMOTE_BASE/rusterando-scrape/"
+        rsync -avz -e "ssh ${SSH_OPTS[*]}" --delete migrations/ "$SSH_HOST:$REMOTE_BASE/migrations/"
     fi
 
     # Upload site assets (WASM, JS, CSS, static files)
@@ -635,7 +665,7 @@ cmd_upload() {
     # the build output. Excluding it keeps the previous PDF in place across the
     # deploy so there's no fallback gap before the new process reboots it.
     echo "Uploading site assets..."
-    rsync -avz --delete \
+    rsync -avz -e "ssh ${SSH_OPTS[*]}" --delete \
         --exclude 'img/uploads/' \
         --exclude 'menu.pdf' \
         --exclude 'menu-kompakt.pdf' \

@@ -68,7 +68,16 @@ enum Channel {
 /// Build a representative sample order for the chosen variant. Mirrors a
 /// real mid-size order: two categories, an extra with a price, a voucher,
 /// a delivery fee, a scheduled time.
-fn sample_order(channel: Channel, prepaid: bool, theme: &str) -> OrderForKitchen {
+/// `shop_name` is the CURRENT shop's name, not a constant: this preview used
+/// to hardcode the reference shop ("Davids Pizzeria"), so every tenant's Bon
+/// editor advertised someone else's restaurant. Empty falls back to a neutral
+/// placeholder rather than another shop's name.
+fn sample_order(
+    channel: Channel,
+    prepaid: bool,
+    theme: &str,
+    shop_name: &str,
+) -> OrderForKitchen {
     let order_channel = match channel {
         Channel::Delivery => OrderChannel::Delivery {
             address: DeliveryAddress {
@@ -144,10 +153,16 @@ fn sample_order(channel: Channel, prepaid: bool, theme: &str) -> OrderForKitchen
         total_cents,
         payment,
         note: Some("Bitte klingeln, 2. Stock.".into()),
-        shop_name: "Davids Pizzeria".into(),
+        shop_name: if shop_name.trim().is_empty() {
+            "Mein Restaurant".to_string()
+        } else {
+            shop_name.trim().to_string()
+        },
         accepted_at_unix: None,
         accepted_at_label: Some("18. Juni, 17:42".into()),
-        qr_url: Some("https://davidspizzeria.de/orders/DP-1105-0001".into()),
+        // Sample QR target — a relative path so no real shop's domain is
+        // baked into another tenant's preview.
+        qr_url: Some("/orders/DP-1105-0001".into()),
         is_test_mode: false,
         voucher_code: "WILLKOMMEN".into(),
         voucher_discount_cents,
@@ -383,8 +398,17 @@ pub fn BonEditor(#[prop(default = true)] editable: bool) -> impl IntoView {
         }
     };
 
+    // The real shop name for the preview. `OnceResource` + read-inside-the-memo
+    // is the same hydration-safe pattern the admin shell uses: SSR and the
+    // first hydrate tick both render the placeholder, then the resolved name
+    // swaps in as a text update the walker doesn't see.
+    let shop = OnceResource::new(crate::branding::get_shop_name());
     let lines = Memo::new(move |_| {
-        let order = sample_order(channel.get(), prepaid.get(), &theme());
+        let name = shop
+            .get()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+        let order = sample_order(channel.get(), prepaid.get(), &theme(), &name);
         build_layout(&order, false, &config_now())
     });
 
@@ -439,7 +463,7 @@ pub fn BonEditor(#[prop(default = true)] editable: bool) -> impl IntoView {
             <div class="bon-edit-fields">
                 <label class="bon-field">
                     <span>"Kopfzeile (überschreibt Shop-Name)"</span>
-                    <input type="text" maxlength="60" placeholder="z. B. Davids Pizzeria"
+                    <input type="text" maxlength="60" placeholder="z. B. der Name des Shops"
                         prop:value=move || get("receipt_header_text")
                         on:input=move |ev| set("receipt_header_text", event_target_value(&ev))/>
                 </label>

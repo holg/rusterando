@@ -25,6 +25,14 @@ pub struct CheckoutContext {
     /// Active delivery zones (with name + fee + min order). Empty list is
     /// "delivery currently disabled" — the UI hides the delivery option then.
     pub delivery_zones: Vec<DeliveryZone>,
+    /// Delivery temporarily suspended by the admin (no driver) while the shop
+    /// stays OPEN for pickup. Distinct from an empty `delivery_zones`, which
+    /// means the shop never delivers — the customer gets a different, more
+    /// hopeful message. Carries the admin's caption when one is set.
+    #[serde(default)]
+    pub delivery_paused: bool,
+    #[serde(default)]
+    pub delivery_paused_reason: String,
     /// Cents threshold above which the delivery fee is waived. 0 means
     /// "no free-delivery promo, always charge the zone fee". Edited by
     /// admin from /admin/settings.
@@ -65,6 +73,11 @@ pub struct CheckoutContext {
     /// slot.
     #[serde(default)]
     pub open_now: bool,
+    /// Local address index active for this tenant (admin switch + import):
+    /// the form shows street / house-number suggestions and sends the
+    /// selected street id along.
+    #[serde(default)]
+    pub address_autocomplete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -224,6 +237,14 @@ pub struct AddressValidation {
     /// liefern wir trotzdem" hint. `None` when bypass isn't configured
     /// or the rejection wouldn't be saved by it (e.g. out_of_radius).
     pub bypass_hint_min_cents: Option<i64>,
+    /// The address was resolved exactly by the local cadastre index. False
+    /// for the geocoder path and for an unknown house number.
+    #[serde(default)]
+    pub address_verified: bool,
+    /// Non-blocking notice for the customer (e.g. house number not in the
+    /// cadastre — order still possible, address checked before dispatch).
+    #[serde(default)]
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1049,6 +1070,18 @@ pub mod ssr {
     ///
     /// `db` + the `LiveHub` are pulled from leptos context; no-op if absent.
     pub async fn log_status_change(db: &sqlx::SqlitePool, order_id: &str, status: &str) {
+        let hub = use_context::<crate::live::LiveHub>();
+        log_status_change_with(db, hub.as_ref(), order_id, status).await;
+    }
+
+    /// [`log_status_change`] with an explicit hub, for callers outside a
+    /// leptos request (the kitchen-terminal channel in the server binary).
+    pub async fn log_status_change_with(
+        db: &sqlx::SqlitePool,
+        hub: Option<&crate::live::LiveHub>,
+        order_id: &str,
+        status: &str,
+    ) {
         use super::status_label_de;
         // Log every real status transition (incl. resets/back-steps and
         // the initial "Eingegangen") so the customer sees the full
@@ -1068,7 +1101,7 @@ pub mod ssr {
         let Ok((msg_id, created_at)) = inserted else {
             return;
         };
-        if let Some(hub) = use_context::<crate::live::LiveHub>() {
+        if let Some(hub) = hub {
             hub.send(rusterando_shared::models::LiveEvent {
                 order_id: order_id.to_string(),
                 kind: rusterando_shared::models::LiveKind::Message(
@@ -1254,6 +1287,8 @@ pub mod ssr {
         pub longitude: Option<f64>,
         /// Resolved sub-locality, `Some("")` for "geocoder said none".
         pub suburb: Option<String>,
+        /// Cadastre-verified (local index hit) — stored on the order.
+        pub verified: bool,
     }
 
     /// Borrowed address parts — passed as one struct so callers (and clippy)
@@ -1369,15 +1404,24 @@ pub mod ssr {
 
     // -- Phase 2: geocoding + classification --------------------------------
 
-    /// Pizzeria coordinates — used for the sanity-radius check in
-    /// classify_zone(). Resolution order:
-    ///   1. PIZZERIA_LAT / PIZZERIA_LON env vars (legacy override).
-    ///   2. BrandingHandle.shop_lat / shop_lon (admin-set, in-DB).
+    /// Shop coordinates — used for the sanity-radius check in
+    /// classify_zone(), the tour start point and the "distance from shop"
+    /// journal column. Resolution order:
+    ///   1. BrandingHandle.shop_lat / shop_lon — the value the admin set in
+    ///      the dashboard (app_settings), per tenant.
+    ///   2. PIZZERIA_LAT / PIZZERIA_LON env vars — the deployment default.
     ///   3. (0.0, 0.0) — sentinel meaning "shop hasn't set coords yet".
     ///      classify_zone treats this as "skip the radius check" so
     ///      fresh installs without a configured address still let
     ///      orders through.
     pub fn pizzeria_coords() -> (f64, f64) {
+        if let Some(b) =
+            leptos::prelude::use_context::<crate::branding::BrandingHandle>().map(|h| h.get())
+        {
+            if b.shop_lat != 0.0 || b.shop_lon != 0.0 {
+                return (b.shop_lat, b.shop_lon);
+            }
+        }
         if let (Ok(lat), Ok(lon)) = (
             std::env::var("PIZZERIA_LAT").map(|s| s.parse::<f64>()),
             std::env::var("PIZZERIA_LON").map(|s| s.parse::<f64>()),
@@ -1386,13 +1430,6 @@ pub mod ssr {
                 if lat != 0.0 || lon != 0.0 {
                     return (lat, lon);
                 }
-            }
-        }
-        if let Some(b) =
-            leptos::prelude::use_context::<crate::branding::BrandingHandle>().map(|h| h.get())
-        {
-            if b.shop_lat != 0.0 || b.shop_lon != 0.0 {
-                return (b.shop_lat, b.shop_lon);
             }
         }
         (0.0, 0.0)
@@ -1820,6 +1857,12 @@ pub mod ssr {
             .build()
             .map_err(|e| ServerFnError::new(format!("geocoder client: {e}")))?;
 
+        // One log line per outbound geocoder call — the only way to see from
+        // the server log whether the local address path is doing its job.
+        log::info!(
+            target: "geocoder",
+            "nominatim lookup: {street} {house_number}, {postcode} {city}"
+        );
         let queries = [
             format!(
                 "{} {}, {} {}, Deutschland",
@@ -2168,6 +2211,19 @@ pub async fn load_checkout_context() -> Result<CheckoutContext, ServerFnError> {
         .map(|h| h.get())
         .unwrap_or_default();
 
+    // Delivery suspended (no driver) — the shop is still open for pickup.
+    let delivery_paused = crate::pages::settings::ssr::delivery_paused(&db).await;
+    let delivery_paused_reason = if delivery_paused {
+        let msg = crate::pages::settings::ssr::delivery_paused_message(&db).await;
+        if msg.is_empty() {
+            crate::i18n::t("shop_status.delivery_paused_hint")
+        } else {
+            msg
+        }
+    } else {
+        String::new()
+    };
+
     Ok(CheckoutContext {
         slots,
         asap_minutes: ssr::ASAP_DEFAULT_MIN,
@@ -2175,12 +2231,15 @@ pub async fn load_checkout_context() -> Result<CheckoutContext, ServerFnError> {
         subtotal_cents: cart.subtotal_cents,
         line_count: cart.lines.iter().map(|l| l.quantity).sum(),
         delivery_zones: zones,
+        delivery_paused,
+        delivery_paused_reason,
         free_delivery_threshold_cents,
         shop_address_line: branding.full_address(),
         shop_city: branding.shop_city,
         orders_closed,
         closed_reason,
         open_now,
+        address_autocomplete: crate::pages::geo::ssr::autocomplete_enabled(&db).await,
     })
 }
 
@@ -2208,6 +2267,9 @@ pub async fn place_order(
     city: Option<String>,
     address_notes: Option<String>,
     voucher_code: Option<String>,
+    /// Street id from the local address index (autocomplete selection).
+    #[server(default)]
+    street_id: Option<u32>,
 ) -> Result<PlacedOrder, ServerFnError> {
     use crate::pages::cart::ssr::{current_cart_id, load_cart};
     use crate::pages::order::notify::{NotifierHandle, OrderItemSummary, OrderSummary};
@@ -2257,6 +2319,18 @@ pub async fn place_order(
     let (closed, reason) = ssr::shop_closed_state(&db).await;
     if closed {
         return Err(ServerFnError::new(reason));
+    }
+    // Delivery suspended but the shop is open (no driver): pickup orders must
+    // keep flowing, so this is a per-order-type gate rather than a closure.
+    // Authoritative like the one above — the checkout also hides the option,
+    // but a stale page or a crafted POST must not slip a delivery through.
+    if order_type == "delivery" && crate::pages::settings::ssr::delivery_paused(&db).await {
+        let msg = crate::pages::settings::ssr::delivery_paused_message(&db).await;
+        return Err(ServerFnError::new(if msg.is_empty() {
+            crate::i18n::t("shop_status.delivery_paused")
+        } else {
+            msg
+        }));
     }
     // ASAP is only valid while the shop is open *right now*. When it merely
     // opens later today, pre-orders are fine but must carry a scheduled
@@ -2355,6 +2429,7 @@ pub async fn place_order(
             city_v.clone(),
             Some(payment_method.to_string()),
             Some(subtotal),
+            street_id,
         )
         .await?;
         if !v.ok {
@@ -2399,6 +2474,7 @@ pub async fn place_order(
             "postcode": postcode_v,
             "city": city_v,
             "notes": notes,
+            "verified": v.address_verified,
         })
         .to_string();
         let geo = ssr::AddressGeo {
@@ -2406,11 +2482,18 @@ pub async fn place_order(
             latitude: v.latitude,
             longitude: v.longitude,
             suburb: v.suburb.clone(),
+            verified: v.address_verified,
         };
         (fee_cents, Some(address), zname, Some(geo))
     } else {
         (0_i64, None, None, None)
     };
+    // Resolved point + verified flag go onto the order row itself so the
+    // route optimiser has them even when no customer_addresses row exists.
+    let (order_lat, order_lon, order_verified) = resolved_geo
+        .as_ref()
+        .map(|g| (g.latitude, g.longitude, g.verified))
+        .unwrap_or((None, None, false));
 
     let total = subtotal + delivery_fee;
 
@@ -2560,8 +2643,9 @@ pub async fn place_order(
             delivery_address_json, scheduled_for,
             subtotal_cents, delivery_fee_cents, tax_cents, total_cents,
             payment_status, notes,
-            customer_id, address_id, stripe_mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, NULL, ?14, ?15, ?16)",
+            customer_id, address_id, stripe_mode, lat, lon, address_verified)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, NULL, ?14, ?15, ?16,
+                 ?17, ?18, ?19)",
     )
     .bind(&order_id)
     .bind(&order_number)
@@ -2579,6 +2663,9 @@ pub async fn place_order(
     .bind(&customer_id)
     .bind(address_id.as_deref())
     .bind(&stripe_mode_snapshot)
+    .bind(order_lat)
+    .bind(order_lon)
+    .bind(order_verified as i64)
     .execute(&mut *tx)
     .await
     .map_err(|e| ServerFnError::new(format!("insert order: {e}")))?;
@@ -2865,7 +2952,7 @@ pub async fn place_order(
         if summary.order_type == "delivery" {
             roles.push("driver");
         }
-        sink.notify_roles(&roles, &push_title, &push_body, Some(&summary.public_url));
+        sink.notify_roles_urgent(&roles, &push_title, &push_body, Some(&summary.public_url));
     }
 
     // Cash path: also fire the kitchen-printer broadcast so the Pi
@@ -3335,6 +3422,9 @@ pub async fn list_order_messages(
 /// number or validate an address. Long enough to swallow a typing burst,
 /// short enough that the result is there when the customer looks up.
 const LOOKUP_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(600);
+/// Settle time for the local street / house-number suggestions. Short: the
+/// lookup is an in-memory prefix scan on our own server, no third party.
+const SUGGEST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 
 #[component]
 pub fn StaffOrderChat(order_id: String, #[prop(optional)] compact: bool) -> impl IntoView {
@@ -3531,6 +3621,10 @@ pub async fn validate_address(
     #[server(default)]
     payment_method: Option<String>,
     #[server(default)] cart_total_cents: Option<i64>,
+    /// Street id from the local address index (autocomplete selection). Lets
+    /// the cadastre path resolve exactly instead of by name.
+    #[server(default)]
+    street_id: Option<u32>,
 ) -> Result<AddressValidation, ServerFnError> {
     use sqlx::SqlitePool;
 
@@ -3587,6 +3681,138 @@ pub async fn validate_address(
     // whether the bypass is *configured at all*.
     let bypass_configured = bypass_min_cents > 0 && !bypass_zone_id.trim().is_empty();
 
+    // ---- Local cadastre path -----------------------------------------------
+    // Active only when the admin switched `address_lookup_mode` to `local`
+    // AND an index is loaded (see pages::geo). Fully local — no outbound
+    // request in this mode, ever:
+    //   street known + number known   → exact point, verified
+    //   street known + number unknown → nearest known number on that street
+    //                                   stands in (unverified + warning)
+    //   street unknown / ambiguous    → soft "pick from the suggestions"
+    // The zone comes from geometry / street overrides (rusterando_geo).
+    let local = crate::pages::geo::ssr::LocalLookup::active(&db).await;
+    let mut local_hit: Option<(f64, f64, Option<String>, String, bool)> = None;
+    let mut local_warning: Option<String> = None;
+    if let Some(l) = &local {
+        let st = street_id
+            .and_then(|id| l.index.street(id).cloned())
+            .or_else(|| {
+                l.index
+                    .find_street_by_text(&street, Some(&postcode))
+                    .cloned()
+            });
+        let Some(st) = st else {
+            // Journal only when the text matches nothing at all — a prefix
+            // that still has suggestions is a customer mid-typing.
+            if l.index.suggest_streets(&street).is_empty() {
+                ssr::record_address_attempt(
+                    &db,
+                    &street,
+                    &house_number,
+                    &postcode,
+                    &city_eff,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    "unknown_street",
+                    Some("street not in the local address index"),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+            }
+            let served = l.cities.join(", ");
+            return Ok(AddressValidation {
+                ok: false,
+                reason: Some(format!(
+                    "Straße nicht gefunden – bitte aus den Vorschlägen wählen. Wir liefern nach {served}."
+                )),
+                ..Default::default()
+            });
+        };
+        let (lat, lon, number, verified) = match l.index.resolve(st.id, &house_number) {
+            Some(r) => {
+                let n = rusterando_geo::normalize::parse_house_number(&r.house_number)
+                    .map(|(n, _)| n)
+                    .unwrap_or(0);
+                (r.lat, r.lon, n, true)
+            }
+            None => {
+                let n = rusterando_geo::normalize::parse_house_number(&house_number)
+                    .map(|(n, _)| n)
+                    .unwrap_or(0);
+                let Some(h) = l.index.nearest_house(st.id, n) else {
+                    return Ok(AddressValidation {
+                        ok: false,
+                        reason: Some(
+                            "Straße ohne bekannte Hausnummern – bitte rufen Sie uns an."
+                                .to_string(),
+                        ),
+                        ..Default::default()
+                    });
+                };
+                local_warning = Some(crate::t!("checkout.house_number_not_found"));
+                (h.lat, h.lon, n, false)
+            }
+        };
+        match l.zone_for_resolved(st.id, number, lat, lon) {
+            Some(z) => {
+                local_hit = Some((lat, lon, Some(String::new()), z.zone_id, verified));
+            }
+            None if bypass.would_apply() => {
+                local_hit = Some((
+                    lat,
+                    lon,
+                    Some(String::new()),
+                    bypass.zone_id.clone(),
+                    verified,
+                ));
+            }
+            None => {
+                let detail = format!(
+                    "cadastre {} {} ({:.5},{:.5}) matches no delivery zone",
+                    st.name, house_number, lat, lon
+                );
+                ssr::record_address_attempt(
+                    &db,
+                    &street,
+                    &house_number,
+                    &postcode,
+                    &city_eff,
+                    Some(lat),
+                    Some(lon),
+                    Some(&st.city),
+                    None,
+                    Some(ssr::haversine_km(ssr::pizzeria_coords(), (lat, lon))),
+                    "wrong_municipality",
+                    Some(&detail),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                let msg = if phone.trim().is_empty() {
+                    "Diese Adresse liegt außerhalb unseres Liefergebiets.".to_string()
+                } else {
+                    format!("Diese Adresse liegt außerhalb unseres Liefergebiets. Fragen? Rufen Sie uns an: {phone}.")
+                };
+                return Ok(AddressValidation {
+                    ok: false,
+                    reason: Some(msg),
+                    bypass_hint_min_cents: bypass_configured.then_some(bypass_min_cents),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    // Geocoder path (online mode only from here on): suburb routing as before.
+    let classify = |lat: f64, lon: f64, suburb: Option<&str>, city: Option<&str>| {
+        ssr::classify_zone(lat, lon, suburb, city, &areas, &bypass)
+    };
+
     // Cache-by-DB: if we've already geocoded this (street, house, postcode),
     // reuse the lat/lon/zone we stored last time. We don't scope by customer
     // here — the resolution itself is identical across customers, so first
@@ -3607,37 +3833,68 @@ pub async fn validate_address(
     .await
     .map_err(|e| ServerFnError::new(format!("address cache: {e}")))?;
 
-    let (lat, lon, suburb_out, zone_id) = match cached {
-        // Cache hit: coordinates + sub-locality are stable facts about the
-        // address; the ZONE is not — it follows the admin's routing config,
-        // which changes. Re-classify every time (pure in-memory work) so a
-        // routing fix reaches returning customers too. Rows without a
-        // stored suburb (written before it was persisted) miss the cache,
-        // get geocoded once more below, and are stored complete.
-        Some((Some(lat), Some(lon), Some(suburb), Some(cached_zid))) => {
-            match ssr::classify_zone(
-                lat,
-                lon,
-                Some(suburb.as_str()),
-                Some(city_eff.as_str()),
-                &areas,
-                &bypass,
-            ) {
-                Ok(zid) => (lat, lon, Some(suburb), zid),
-                // Config no longer routes it: keep serving what we served
-                // before rather than rejecting a known-good address.
-                Err(_) => (lat, lon, Some(suburb), cached_zid),
+    let (lat, lon, suburb_out, zone_id, address_verified) = if let Some(hit) = local_hit {
+        hit
+    } else {
+        let (lat, lon, suburb_out, zone_id) = match cached {
+            // Cache hit: coordinates + sub-locality are stable facts about the
+            // address; the ZONE is not — it follows the admin's routing config,
+            // which changes. Re-classify every time (pure in-memory work) so a
+            // routing fix reaches returning customers too. Rows without a
+            // stored suburb (written before it was persisted) miss the cache,
+            // get geocoded once more below, and are stored complete.
+            Some((Some(lat), Some(lon), Some(suburb), Some(cached_zid))) => {
+                match classify(lat, lon, Some(suburb.as_str()), Some(city_eff.as_str())) {
+                    Ok(zid) => (lat, lon, Some(suburb), zid),
+                    // Config no longer routes it: keep serving what we served
+                    // before rather than rejecting a known-good address.
+                    Err(_) => (lat, lon, Some(suburb), cached_zid),
+                }
             }
-        }
-        _ => {
-            // Cache miss — call Nominatim. An error here means the geocoder
-            // itself is unreachable / 5xx; log it as `http_error` and tell
-            // the customer to try again.
-            let hit = match ssr::nominatim_lookup(&street, &house_number, &postcode, &city_eff)
-                .await
-            {
-                Ok(hit) => hit,
-                Err(e) => {
+            _ => {
+                // Cache miss — call Nominatim. An error here means the geocoder
+                // itself is unreachable / 5xx; log it as `http_error` and tell
+                // the customer to try again.
+                let hit = match ssr::nominatim_lookup(&street, &house_number, &postcode, &city_eff)
+                    .await
+                {
+                    Ok(hit) => hit,
+                    Err(e) => {
+                        ssr::record_address_attempt(
+                            &db,
+                            &street,
+                            &house_number,
+                            &postcode,
+                            &city_eff,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            ssr::REJECTION_HTTP_ERROR,
+                            Some(&format!("{e}")),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                        let msg = if phone.trim().is_empty() {
+                            "Adressprüfung gerade nicht möglich, bitte gleich nochmal versuchen."
+                                .to_string()
+                        } else {
+                            format!(
+                            "Adressprüfung gerade nicht möglich. Bitte gleich nochmal versuchen — oder rufen Sie uns an: {phone}."
+                        )
+                        };
+                        return Ok(AddressValidation {
+                            ok: false,
+                            reason: Some(msg),
+                            ..Default::default()
+                        });
+                    }
+                };
+
+                let Some(found) = hit else {
                     ssr::record_address_attempt(
                         &db,
                         &street,
@@ -3649,158 +3906,123 @@ pub async fn validate_address(
                         None,
                         None,
                         None,
-                        ssr::REJECTION_HTTP_ERROR,
-                        Some(&format!("{e}")),
+                        ssr::REJECTION_NO_RESULTS,
+                        Some("Nominatim returned 0 hits"),
                         None,
                         None,
                         None,
                     )
                     .await;
                     let msg = if phone.trim().is_empty() {
-                        "Adressprüfung gerade nicht möglich, bitte gleich nochmal versuchen."
+                        "Adresse konnte nicht gefunden werden. Bitte Straße/Hausnummer prüfen."
                             .to_string()
                     } else {
                         format!(
-                            "Adressprüfung gerade nicht möglich. Bitte gleich nochmal versuchen — oder rufen Sie uns an: {phone}."
-                        )
+                        "Adresse konnte nicht gefunden werden. Bitte Straße und Hausnummer prüfen — oder rufen Sie uns an: {phone}."
+                    )
                     };
                     return Ok(AddressValidation {
                         ok: false,
                         reason: Some(msg),
                         ..Default::default()
                     });
-                }
-            };
-
-            let Some(found) = hit else {
-                ssr::record_address_attempt(
-                    &db,
-                    &street,
-                    &house_number,
-                    &postcode,
-                    &city_eff,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    ssr::REJECTION_NO_RESULTS,
-                    Some("Nominatim returned 0 hits"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-                let msg = if phone.trim().is_empty() {
-                    "Adresse konnte nicht gefunden werden. Bitte Straße/Hausnummer prüfen."
-                        .to_string()
-                } else {
-                    format!(
-                        "Adresse konnte nicht gefunden werden. Bitte Straße und Hausnummer prüfen — oder rufen Sie uns an: {phone}."
-                    )
                 };
-                return Ok(AddressValidation {
-                    ok: false,
-                    reason: Some(msg),
-                    ..Default::default()
-                });
-            };
-            let lat: f64 = found
-                .lat
-                .parse()
-                .map_err(|_| ServerFnError::new("geocoder returned invalid latitude"))?;
-            let lon: f64 = found
-                .lon
-                .parse()
-                .map_err(|_| ServerFnError::new("geocoder returned invalid longitude"))?;
-            let suburb_resolved = found.address.suburb_or_district().map(String::from);
-            let resolved_city = found.address.place().map(String::from);
+                let lat: f64 = found
+                    .lat
+                    .parse()
+                    .map_err(|_| ServerFnError::new("geocoder returned invalid latitude"))?;
+                let lon: f64 = found
+                    .lon
+                    .parse()
+                    .map_err(|_| ServerFnError::new("geocoder returned invalid longitude"))?;
+                let suburb_resolved = found.address.suburb_or_district().map(String::from);
+                let resolved_city = found.address.place().map(String::from);
 
-            // Pass the geocoder's resolved suburb through unchanged.
-            // The old "customer-typed city as Stadtteil hint" trick is
-            // gone: the new served_municipalities config decides what
-            // counts as which suburb, so we don't second-guess
-            // Nominatim. If Nominatim says suburb=Westrup, classify_zone
-            // looks up Westrup in zone_routing (or falls to the "*"
-            // wildcard); if Nominatim says no suburb, the "*" wildcard
-            // (when present) catches the city-proper case.
-            let effective_suburb = suburb_resolved.clone();
+                // Pass the geocoder's resolved suburb through unchanged.
+                // The old "customer-typed city as Stadtteil hint" trick is
+                // gone: the new served_municipalities config decides what
+                // counts as which suburb, so we don't second-guess
+                // Nominatim. If Nominatim says suburb=Westrup, classify_zone
+                // looks up Westrup in zone_routing (or falls to the "*"
+                // wildcard); if Nominatim says no suburb, the "*" wildcard
+                // (when present) catches the city-proper case.
+                let effective_suburb = suburb_resolved.clone();
 
-            let zid = match ssr::classify_zone(
-                lat,
-                lon,
-                effective_suburb.as_deref(),
-                resolved_city.as_deref(),
-                &areas,
-                &bypass,
-            ) {
-                Ok(zid) => zid,
-                Err(reason) => {
-                    let detail = reason.detail();
-                    let raw = serde_json::to_string_pretty(&serde_json::json!({
-                        "lat": found.lat,
-                        "lon": found.lon,
-                        "display_name": found.display_name,
-                        "address": {
-                            "city": found.address.city,
-                            "town": found.address.town,
-                            "village": found.address.village,
-                            "suburb": found.address.suburb,
-                            "city_district": found.address.city_district,
-                            "hamlet": found.address.hamlet,
-                            "postcode": found.address.postcode,
-                        }
-                    }))
-                    .ok();
-                    let distance = if matches!(reason, ssr::RejectionReason::OutOfRadius(_)) {
-                        let shop = ssr::pizzeria_coords();
-                        Some(ssr::haversine_km(shop, (lat, lon)))
-                    } else {
-                        None
-                    };
-                    ssr::record_address_attempt(
-                        &db,
-                        &street,
-                        &house_number,
-                        &postcode,
-                        &city_eff,
-                        Some(lat),
-                        Some(lon),
-                        resolved_city.as_deref(),
-                        suburb_resolved.as_deref(),
-                        distance,
-                        reason.slug(),
-                        Some(&detail),
-                        raw.as_deref(),
-                        None,
-                        None,
-                    )
-                    .await;
-                    // Bypass hint: only show when (a) the shop has it
-                    // configured AND (b) the rejection is the kind
-                    // bypass would actually save. OutOfRadius can't be
-                    // bypassed; NoZone is an admin misconfig, not the
-                    // customer's problem.
-                    let bypass_hint_min_cents = if bypass_configured
-                        && matches!(
-                            &reason,
-                            ssr::RejectionReason::WrongMunicipality { .. }
-                                | ssr::RejectionReason::WrongSuburb { .. }
-                        ) {
-                        Some(bypass_min_cents)
-                    } else {
-                        None
-                    };
-                    return Ok(AddressValidation {
-                        ok: false,
-                        reason: Some(ssr::rejection_message(&reason, &phone)),
-                        bypass_hint_min_cents,
-                        ..Default::default()
-                    });
-                }
-            };
-            (lat, lon, Some(effective_suburb.unwrap_or_default()), zid)
-        }
+                let zid = match classify(
+                    lat,
+                    lon,
+                    effective_suburb.as_deref(),
+                    resolved_city.as_deref(),
+                ) {
+                    Ok(zid) => zid,
+                    Err(reason) => {
+                        let detail = reason.detail();
+                        let raw = serde_json::to_string_pretty(&serde_json::json!({
+                            "lat": found.lat,
+                            "lon": found.lon,
+                            "display_name": found.display_name,
+                            "address": {
+                                "city": found.address.city,
+                                "town": found.address.town,
+                                "village": found.address.village,
+                                "suburb": found.address.suburb,
+                                "city_district": found.address.city_district,
+                                "hamlet": found.address.hamlet,
+                                "postcode": found.address.postcode,
+                            }
+                        }))
+                        .ok();
+                        let distance = if matches!(reason, ssr::RejectionReason::OutOfRadius(_)) {
+                            let shop = ssr::pizzeria_coords();
+                            Some(ssr::haversine_km(shop, (lat, lon)))
+                        } else {
+                            None
+                        };
+                        ssr::record_address_attempt(
+                            &db,
+                            &street,
+                            &house_number,
+                            &postcode,
+                            &city_eff,
+                            Some(lat),
+                            Some(lon),
+                            resolved_city.as_deref(),
+                            suburb_resolved.as_deref(),
+                            distance,
+                            reason.slug(),
+                            Some(&detail),
+                            raw.as_deref(),
+                            None,
+                            None,
+                        )
+                        .await;
+                        // Bypass hint: only show when (a) the shop has it
+                        // configured AND (b) the rejection is the kind
+                        // bypass would actually save. OutOfRadius can't be
+                        // bypassed; NoZone is an admin misconfig, not the
+                        // customer's problem.
+                        let bypass_hint_min_cents = if bypass_configured
+                            && matches!(
+                                &reason,
+                                ssr::RejectionReason::WrongMunicipality { .. }
+                                    | ssr::RejectionReason::WrongSuburb { .. }
+                            ) {
+                            Some(bypass_min_cents)
+                        } else {
+                            None
+                        };
+                        return Ok(AddressValidation {
+                            ok: false,
+                            reason: Some(ssr::rejection_message(&reason, &phone)),
+                            bypass_hint_min_cents,
+                            ..Default::default()
+                        });
+                    }
+                };
+                (lat, lon, Some(effective_suburb.unwrap_or_default()), zid)
+            }
+        };
+        (lat, lon, suburb_out, zone_id, false)
     };
 
     let zone: Option<(String, Option<String>, i64, i64, i64)> = sqlx::query_as(
@@ -3841,6 +4063,8 @@ pub async fn validate_address(
         suburb: suburb_out,
         matched_label: zname,
         bypass_hint_min_cents: None,
+        address_verified,
+        warning: local_warning,
     })
 }
 
@@ -3889,7 +4113,7 @@ pub async fn start_tour(
         "SELECT o.id, o.order_number, o.status, o.payment_status,
                 o.contact_name, o.contact_phone,
                 o.total_cents, o.delivery_address_json, o.created_at,
-                ca.latitude, ca.longitude
+                COALESCE(o.lat, ca.latitude), COALESCE(o.lon, ca.longitude)
          FROM orders o
          LEFT JOIN customer_addresses ca ON ca.id = o.address_id
          WHERE o.id IN ({placeholders})
@@ -4108,7 +4332,8 @@ pub async fn get_tour(id: String) -> Result<TourSummary, ServerFnError> {
         "SELECT s.sequence, s.order_id, s.eta_seconds, s.delivered_at,
                 o.order_number, o.contact_name, o.contact_phone,
                 o.total_cents, o.payment_status,
-                o.delivery_address_json, ca.latitude, ca.longitude
+                o.delivery_address_json,
+                COALESCE(o.lat, ca.latitude), COALESCE(o.lon, ca.longitude)
          FROM delivery_tour_stops s
          JOIN orders o ON o.id = s.order_id
          LEFT JOIN customer_addresses ca ON ca.id = o.address_id
@@ -4590,7 +4815,7 @@ pub fn OrderConfirmationPage() -> impl IntoView {
                 // the spinner before the server fetch returns.
                 move || match cached.get() {
                     Some(o) => view! { <ConfirmationView o/> }.into_any(),
-                    None => view! { <p class="loading">{crate::t!("common.loading")}</p> }.into_any(),
+                    None => view! { <p class="loading">{move || crate::t!("common.loading")}</p> }.into_any(),
                 }
             }>
                 {move || order.get().map(|res| match res {
@@ -4645,7 +4870,7 @@ fn NotifyOptIn() -> impl IntoView {
             class:hidden=move || !show.get()
             on:click=on_click
             title=crate::t!("order_confirm.notify_title")>
-            {crate::t!("order_confirm.notify_btn")}
+            {move || crate::t!("order_confirm.notify_btn")}
         </button>
     }
 }
@@ -4777,8 +5002,8 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
 
     view! {
         <div class="confirm-card">
-            <h1>{crate::t!("order_confirm.thanks")}</h1>
-            <p class="sub">{crate::t!("order_confirm.order_number_inline")} " " <strong>{o.order_number.clone()}</strong></p>
+            <h1>{move || crate::t!("order_confirm.thanks")}</h1>
+            <p class="sub">{move || crate::t!("order_confirm.order_number_inline")} " " <strong>{o.order_number.clone()}</strong></p>
             <div class="status-pills">
                 <div class="status-pill" data-order-type={o.order_type.clone()}>
                     {order_type_chip}
@@ -4801,7 +5026,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                 let msgs = messages.get();
                 (!msgs.is_empty() || is_vip).then(|| view! {
                     <div class="restaurant-message" role="status">
-                        <strong>{crate::t!("order_confirm.messages_heading")}</strong>
+                        <strong>{move || crate::t!("order_confirm.messages_heading")}</strong>
                         <ul class="message-log">
                             {msgs.into_iter().map(|m| {
                                 let mine = m.is_customer();
@@ -4824,7 +5049,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                                     on:input=move |ev| reply_text.set(event_target_value(&ev))></textarea>
                                 <div class="row">
                                     <button class="btn primary" on:click=on_send_reply>
-                                        {crate::t!("order_confirm.reply_send")}
+                                        {move || crate::t!("order_confirm.reply_send")}
                                     </button>
                                     {move || replier.value().get().map(|res| match res {
                                         Ok(_) => view! { <span class="ok">"✓"</span> }.into_any(),
@@ -4839,15 +5064,15 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
 
             <dl class="confirm-meta">
                 <dt>{pickup_label}</dt><dd>{o.pickup_time_label.clone()}</dd>
-                <dt>{crate::t!("order_confirm.name")}</dt><dd>{o.contact_name.clone()}</dd>
-                <dt>{crate::t!("order_confirm.phone")}</dt><dd>{o.contact_phone.clone()}</dd>
-                <dt>{crate::t!("order_confirm.email")}</dt><dd>{o.contact_email.clone()}</dd>
+                <dt>{move || crate::t!("order_confirm.name")}</dt><dd>{o.contact_name.clone()}</dd>
+                <dt>{move || crate::t!("order_confirm.phone")}</dt><dd>{o.contact_phone.clone()}</dd>
+                <dt>{move || crate::t!("order_confirm.email")}</dt><dd>{o.contact_email.clone()}</dd>
                 {o.delivery_address.as_ref().map(|a| {
                     let line = format!("{}, {} {}", a.street_with_number(), a.postcode, a.city);
                     let zone = a.zone_name.clone();
                     let notes = a.notes.clone();
                     view! {
-                        <dt>{crate::t!("order_confirm.delivery_address")}</dt>
+                        <dt>{move || crate::t!("order_confirm.delivery_address")}</dt>
                         <dd>
                             {line}
                             <br/>
@@ -4858,7 +5083,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                 })}
             </dl>
 
-            <h2>{crate::t!("order_confirm.items_heading")}</h2>
+            <h2>{move || crate::t!("order_confirm.items_heading")}</h2>
             <ul class="confirm-items">
                 {o.items.into_iter().map(|it| {
                     let extras = it.extras.clone();
@@ -4895,7 +5120,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                                 {(!removals.is_empty()).then(|| view! {
                                     <ul class="extras removals">
                                         {removals.into_iter().map(|r| view! {
-                                            <li>{crate::t!("menu.removal_prefix")}{r.label}</li>
+                                            <li>{move || crate::t!("menu.removal_prefix")}{r.label}</li>
                                         }).collect_view()}
                                     </ul>
                                 })}
@@ -4907,22 +5132,22 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
             </ul>
 
             {(o.delivery_fee_cents > 0 || o.voucher_discount_cents > 0).then(|| view! {
-                <p class="meta-row">{crate::t!("order_confirm.subtotal")} ": " <strong>{format_eur(o.subtotal_cents)}</strong></p>
+                <p class="meta-row">{move || crate::t!("order_confirm.subtotal")} ": " <strong>{format_eur(o.subtotal_cents)}</strong></p>
                 {(o.delivery_fee_cents > 0).then(|| view! {
-                    <p class="meta-row">{crate::t!("order_confirm.delivery_fee")} ": " <strong>{format_eur(o.delivery_fee_cents)}</strong></p>
+                    <p class="meta-row">{move || crate::t!("order_confirm.delivery_fee")} ": " <strong>{format_eur(o.delivery_fee_cents)}</strong></p>
                 })}
             })}
             {(o.voucher_discount_cents > 0).then(|| {
                 let code = o.voucher_code.clone();
                 view! {
                     <p class="meta-row voucher-line">
-                        {crate::t!("order_confirm.voucher")}
+                        {move || crate::t!("order_confirm.voucher")}
                         {(!code.is_empty()).then(|| view! { " " {code} })}
                         ": " <strong>"−" {format_eur(o.voucher_discount_cents)}</strong>
                     </p>
                 }
             })}
-            <p class="grand-total">{crate::t!("order_confirm.grand_total")} ": " <strong>{format_eur(o.total_cents)}</strong></p>
+            <p class="grand-total">{move || crate::t!("order_confirm.grand_total")} ": " <strong>{format_eur(o.total_cents)}</strong></p>
             <p class="hint">
                 {payment_hint}
                 {o.payment_method_detail.clone().filter(|s| !s.is_empty()).map(|m| view! {
@@ -4930,7 +5155,7 @@ fn ConfirmationView(o: OrderDetail) -> impl IntoView {
                 })}
             </p>
             <p>
-                <a class="btn ghost" href="/menu">{crate::t!("order_confirm.see_menu")}</a>
+                <a class="btn ghost" href="/menu">{move || crate::t!("order_confirm.see_menu")}</a>
             </p>
             {is_pending.then(|| view! {
                 // Soft refresh every 3s so a 'pending' card flips to 'paid' shortly after the webhook lands.
@@ -4979,13 +5204,13 @@ pub fn CheckoutPage() -> impl IntoView {
 
     view! {
         <section class="checkout">
-            <h1>{crate::t!("checkout.title")}</h1>
-            <Suspense fallback=|| view! { <p>{crate::t!("common.loading")}</p> }>
+            <h1>{move || crate::t!("checkout.title")}</h1>
+            <Suspense fallback=|| view! { <p>{move || crate::t!("common.loading")}</p> }>
                 {move || ctx.get().map(|res| match res {
                     Err(e) => view! { <p class="error">{format!("{}: {e}", crate::t!("common.error"))}</p> }.into_any(),
                     Ok(c) if c.line_count == 0 => view! {
-                        <p class="empty">{crate::t!("cart.empty")} " "
-                            <a href="/menu">{crate::t!("checkout.to_menu")}</a></p>
+                        <p class="empty">{move || crate::t!("cart.empty")} " "
+                            <a href="/menu">{move || crate::t!("checkout.to_menu")}</a></p>
                     }.into_any(),
                     Ok(c) => view! {
                         <Form ctx=c placer pickup_choice payment_method order_type delivery_zone_id/>
@@ -5009,12 +5234,12 @@ fn StripePane(order_id: String) -> impl IntoView {
     let return_url = format!("/orders/{order_id}");
     view! {
         <div class="stripe-pane">
-            <h2>{crate::t!("checkout.pay_online")}</h2>
+            <h2>{move || crate::t!("checkout.pay_online")}</h2>
             <div id="payment-element"></div>
             <button id="payment-submit" type="button" class="btn primary"
-                data-return-url=return_url>{crate::t!("checkout.pay_now")}</button>
+                data-return-url=return_url>{move || crate::t!("checkout.pay_now")}</button>
             <p id="payment-message" class="error" style="display:none"></p>
-            <p class="hint">{crate::t!("checkout.stripe_hint")}</p>
+            <p class="hint">{move || crate::t!("checkout.stripe_hint")}</p>
         </div>
     }
 }
@@ -5067,12 +5292,15 @@ fn Form(
         subtotal_cents,
         line_count,
         delivery_zones,
+        delivery_paused,
+        delivery_paused_reason,
         free_delivery_threshold_cents,
         shop_address_line: checkout_address_line,
         shop_city: default_city_from_ctx,
         orders_closed,
         closed_reason,
         open_now,
+        address_autocomplete,
     } = ctx;
 
     let slots_for_dropdown = slots.clone();
@@ -5092,7 +5320,14 @@ fn Form(
     // the validation result. Kept this line as a marker so the diff is clear.
     let _zones_for_select: Vec<DeliveryZone> = Vec::new();
     let zones_for_lookup = delivery_zones.clone();
-    let delivery_available = !delivery_zones.is_empty();
+    // Either reason hides the option; the caption differs so a temporary
+    // pause doesn't read like "this shop never delivers".
+    let delivery_available = !delivery_zones.is_empty() && !delivery_paused;
+    let delivery_off_reason = if delivery_paused {
+        delivery_paused_reason.clone()
+    } else {
+        String::new()
+    };
 
     // Pre-select the cheapest zone so the dropdown isn't blank.
     if delivery_zone_id.get_untracked().is_empty() {
@@ -5188,6 +5423,65 @@ fn Form(
     // hydration once branding had non-empty values.
     let city_sig = RwSignal::new(default_city_from_ctx);
     let address_notes_sig = RwSignal::new(String::new());
+
+    // ---- Local address autocomplete (cadastre index) -----------------------
+    // Only wired when the server said the index is active for this tenant.
+    // The selected street id travels with validation + the order so the
+    // server resolves the exact building instead of re-matching by name.
+    let street_id_sig = RwSignal::new(None::<u32>);
+    let street_suggestions = RwSignal::new(Vec::<crate::pages::geo::StreetSuggestion>::new());
+    let street_open = RwSignal::new(false);
+    let street_active = RwSignal::new(0usize);
+    let street_lookup = Action::new(|q: &String| {
+        let q = q.clone();
+        async move {
+            crate::pages::geo::suggest_streets(q)
+                .await
+                .unwrap_or_default()
+        }
+    });
+    let street_timer = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
+    Effect::new(move |_| {
+        if let Some(list) = street_lookup.value().get() {
+            street_active.set(0);
+            street_open.set(!list.is_empty());
+            street_suggestions.set(list);
+        }
+    });
+    let house_suggestions = RwSignal::new(Vec::<String>::new());
+    let house_open = RwSignal::new(false);
+    let house_active = RwSignal::new(0usize);
+    let house_lookup = Action::new(|(id, q): &(u32, String)| {
+        let (id, q) = (*id, q.clone());
+        async move {
+            crate::pages::geo::suggest_house_numbers(id, q)
+                .await
+                .unwrap_or_default()
+        }
+    });
+    let house_timer = StoredValue::new(None::<leptos::leptos_dom::helpers::TimeoutHandle>);
+    Effect::new(move |_| {
+        if let Some(list) = house_lookup.value().get() {
+            house_active.set(0);
+            house_open.set(!list.is_empty());
+            house_suggestions.set(list);
+        }
+    });
+    let select_street = move |sugg: crate::pages::geo::StreetSuggestion| {
+        street_sig.set(sugg.name.clone());
+        street_id_sig.set(Some(sugg.id));
+        postcode_sig.set(sugg.postcode.clone());
+        city_sig.set(sugg.city.clone());
+        street_open.set(false);
+        street_suggestions.set(Vec::new());
+        // Pre-load the street's numbers so the next field opens with them.
+        house_lookup.dispatch((sugg.id, String::new()));
+    };
+    let select_house = move |n: String| {
+        house_sig.set(n);
+        house_open.set(false);
+        house_suggestions.set(Vec::new());
+    };
     // Pick up ?code=… from the URL via the reactive query map. Reads
     // sync on both SSR and hydrate so the input ships pre-filled —
     // no flash, no DOM mismatch. Subsequent CSR navigations to the
@@ -5218,6 +5512,7 @@ fn Form(
 
     // Apply a saved address into the form fields.
     let apply_address = move |addr: SavedAddress| {
+        street_id_sig.set(None);
         street_sig.set(addr.street);
         house_sig.set(addr.house_number);
         postcode_sig.set(addr.postcode);
@@ -5386,6 +5681,7 @@ fn Form(
         let h = house_sig.get();
         let p = postcode_sig.get();
         let c = city_sig.get();
+        let sid = street_id_sig.get();
         if s.trim().is_empty() || h.trim().is_empty() || p.trim().is_empty() {
             validation.set(None);
             return;
@@ -5410,6 +5706,7 @@ fn Form(
                     city: c,
                     payment_method: None,
                     cart_total_cents: None,
+                    street_id: sid,
                 });
             },
             LOOKUP_DEBOUNCE,
@@ -5508,14 +5805,14 @@ fn Form(
                 </div>
             })}
             <div class="summary-side">
-                <h2>{crate::t!("checkout.summary")}</h2>
-                <p>{line_count} " " {crate::t!("checkout.items")}</p>
-                <p>{crate::t!("cart.subtotal")} ": " <strong>{subtotal_label}</strong></p>
+                <h2>{move || crate::t!("checkout.summary")}</h2>
+                <p>{line_count} " " {move || crate::t!("checkout.items")}</p>
+                <p>{move || crate::t!("cart.subtotal")} ": " <strong>{subtotal_label}</strong></p>
                 {move || (is_delivery.get() && fee_cents.get() > 0).then(|| view! {
-                    <p>{crate::t!("checkout.delivery")} ": " <strong>{format_eur(fee_cents.get())}</strong></p>
+                    <p>{move || crate::t!("checkout.delivery")} ": " <strong>{format_eur(fee_cents.get())}</strong></p>
                 })}
                 {move || (is_delivery.get() && free_delivery.get()).then(|| view! {
-                    <p class="ok">{crate::t!("cart.free_delivery_unlocked")}</p>
+                    <p class="ok">{move || crate::t!("cart.free_delivery_unlocked")}</p>
                 })}
                 {move || (voucher_discount.get() > 0).then(|| {
                     let label = voucher_preview
@@ -5543,7 +5840,7 @@ fn Form(
                             .replace("{min}", &format_eur(min_cents.get()))
                             .replace("{missing}", &format_eur(missing_to_min.get()))}
                         " "
-                        <a href="/menu">{crate::t!("checkout.to_menu")}</a>
+                        <a href="/menu">{move || crate::t!("checkout.to_menu")}</a>
                     </p>
                 })}
                 {{
@@ -5558,12 +5855,12 @@ fn Form(
 
             <ActionForm action=placer attr:class="checkout-form">
                 <fieldset>
-                    <legend>{crate::t!("checkout.order_type")}</legend>
+                    <legend>{move || crate::t!("checkout.order_type")}</legend>
                     <label class="radio">
                         <input type="radio" name="order_type" value="pickup"
                                prop:checked=move || order_type.get() == "pickup"
                                on:change=move |_| order_type.set("pickup".to_string())/>
-                        <span>{crate::t!("checkout.pickup")}</span>
+                        <span>{move || crate::t!("checkout.pickup")}</span>
                     </label>
                     {if delivery_available {
                         view! {
@@ -5571,12 +5868,15 @@ fn Form(
                                 <input type="radio" name="order_type" value="delivery"
                                        prop:checked=move || order_type.get() == "delivery"
                                        on:change=move |_| order_type.set("delivery".to_string())/>
-                                <span>{crate::t!("checkout.delivery")}</span>
+                                <span>{move || crate::t!("checkout.delivery")}</span>
                             </label>
                         }.into_any()
                     } else {
                         view! {
-                            <p class="hint">{crate::t!("checkout.delivery_unavailable")}</p>
+                            <p class="hint pickup-only-hint">{
+                                let r = delivery_off_reason.clone();
+                                if r.is_empty() { crate::t!("checkout.delivery_unavailable") } else { r }
+                            }</p>
                         }.into_any()
                     }}
                 </fieldset>
@@ -5586,27 +5886,27 @@ fn Form(
                 // the address block lets a returning customer type their number
                 // and have the address pre-filled instead of re-typing it.
                 <fieldset>
-                    <legend>{crate::t!("checkout.contact")}</legend>
+                    <legend>{move || crate::t!("checkout.contact")}</legend>
                     {move || recognised.get().then(|| view! {
                         <p class="hint welcome-back">
                             {format!("👋 {}", crate::t!("checkout.welcome_back"))}
                         </p>
                     })}
                     <label>
-                        <span>{crate::t!("checkout.phone")}</span>
+                        <span>{move || crate::t!("checkout.phone")}</span>
                         <input type="tel" name="phone" required autocomplete="tel"
                                placeholder=crate::t!("checkout.phone_placeholder")
                                prop:value=move || phone_sig.get()
                                on:input=move |ev| phone_sig.set(event_target_value(&ev))/>
                     </label>
                     <label>
-                        <span>{crate::t!("checkout.name")}</span>
+                        <span>{move || crate::t!("checkout.name")}</span>
                         <input type="text" name="name" required autocomplete="name"
                                prop:value=move || name_sig.get()
                                on:input=move |ev| name_sig.set(event_target_value(&ev))/>
                     </label>
                     <label>
-                        <span>{crate::t!("checkout.email")}</span>
+                        <span>{move || crate::t!("checkout.email")}</span>
                         <input type="email" name="email" required autocomplete="email"
                                placeholder=crate::t!("checkout.email_placeholder")
                                prop:value=move || email_sig.get()
@@ -5616,12 +5916,18 @@ fn Form(
 
                 <Show when=move || is_delivery.get() fallback=|| ()>
                     <fieldset>
-                        <legend>{crate::t!("checkout.delivery_address")}</legend>
+                        <legend>{move || crate::t!("checkout.delivery_address")}</legend>
                         // Hidden field carries the resolved zone id for legacy
                         // form-submission compatibility. The server re-runs
                         // validate_address regardless, so this is a hint only.
                         <input type="hidden" name="delivery_zone_id"
                                prop:value=move || delivery_zone_id.get()/>
+                        // Selected street from the local index (absent when the
+                        // customer typed freely). Rendered only when set so the
+                        // Option<u32> never receives an empty string.
+                        {move || street_id_sig.get().map(|id| view! {
+                            <input type="hidden" name="street_id" value=id.to_string()/>
+                        })}
 
                         // Zone feedback panel — shows what the geocoder resolved
                         // the address to. Replaces the old manual dropdown.
@@ -5638,14 +5944,18 @@ fn Form(
                                     let fee = av.fee_cents.unwrap_or(0);
                                     let min_o = av.min_order_cents.unwrap_or(0);
                                     let eta = av.eta_minutes.unwrap_or(0);
+                                    let warning = av.warning.clone();
                                     view! {
                                         <p class="zone-status ok">
                                             {format!("✅ {}: ", crate::t!("home.delivery_title"))}
                                             <strong>{label}</strong>
-                                            " — " {crate::t!("home.zone_fee_suffix")} " " <strong>{format_eur(fee)}</strong>
-                                            ", " {crate::t!("home.zone_min_order_prefix")} " " {format_eur(min_o)}
+                                            " — " {move || crate::t!("home.zone_fee_suffix")} " " <strong>{format_eur(fee)}</strong>
+                                            ", " {move || crate::t!("home.zone_min_order_prefix")} " " {format_eur(min_o)}
                                             {format!(" ({}~{}", "", eta)} " min)"
                                         </p>
+                                        {warning.map(|w| view! {
+                                            <p class="zone-status hint">"ℹ️ " {w}</p>
+                                        })}
                                     }.into_any()
                                 } else {
                                     let reason = av.reason.clone()
@@ -5672,27 +5982,145 @@ fn Form(
                             } else {
                                 view! {
                                     <p class="zone-status hint">
-                                        {crate::t!("checkout.address_validation_hint")}
+                                        {move || crate::t!("checkout.address_validation_hint")}
                                     </p>
                                 }.into_any()
                             }
                         }}
-                        <label>
-                            <span>{crate::t!("checkout.street")}</span>
-                            <input type="text" name="street" autocomplete="address-line1"
+                        <label class="addr-field">
+                            <span>{move || crate::t!("checkout.street")}</span>
+                            <input type="text" name="street"
+                                   autocomplete=if address_autocomplete { "off" } else { "address-line1" }
                                    placeholder=crate::t!("checkout.street_placeholder")
+                                   aria-expanded=move || street_open.get().to_string()
                                    prop:value=move || street_sig.get()
-                                   on:input=move |ev| street_sig.set(event_target_value(&ev))/>
+                                   on:input=move |ev| {
+                                       let v = event_target_value(&ev);
+                                       street_sig.set(v.clone());
+                                       // Typing invalidates a previous selection.
+                                       street_id_sig.set(None);
+                                       if !address_autocomplete { return; }
+                                       if let Some(prev) = street_timer.try_update_value(|t| t.take()).flatten() {
+                                           prev.clear();
+                                       }
+                                       if v.trim().is_empty() {
+                                           street_open.set(false);
+                                           return;
+                                       }
+                                       let handle = leptos::leptos_dom::helpers::set_timeout_with_handle(
+                                           move || { street_lookup.dispatch(v); },
+                                           SUGGEST_DEBOUNCE,
+                                       ).ok();
+                                       street_timer.set_value(handle);
+                                   }
+                                   on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                                       if !street_open.get() { return; }
+                                       let n = street_suggestions.with(|l| l.len());
+                                       match ev.key().as_str() {
+                                           "ArrowDown" => { ev.prevent_default(); street_active.update(|a| if *a + 1 < n { *a += 1 }); }
+                                           "ArrowUp" => { ev.prevent_default(); street_active.update(|a| *a = a.saturating_sub(1)); }
+                                           "Enter" => {
+                                               ev.prevent_default();
+                                               let pick = street_suggestions.with(|l| l.get(street_active.get()).cloned());
+                                               if let Some(sugg) = pick { select_street(sugg); }
+                                           }
+                                           "Escape" => { street_open.set(false); }
+                                           _ => {}
+                                       }
+                                   }
+                                   on:blur=move |_| {
+                                       // Let a click on a suggestion land first.
+                                       leptos::leptos_dom::helpers::set_timeout(
+                                           move || street_open.set(false),
+                                           std::time::Duration::from_millis(150),
+                                       );
+                                   }/>
+                            {move || (address_autocomplete && street_open.get()).then(|| view! {
+                                <ul class="addr-suggest" role="listbox" aria-label=crate::t!("checkout.street_suggestions")>
+                                    {street_suggestions.get().into_iter().enumerate().map(|(i, sugg)| {
+                                        let label = format!("{} · {} {}", sugg.name, sugg.postcode, sugg.city);
+                                        let pick = sugg.clone();
+                                        view! {
+                                            <li role="option"
+                                                class=move || if street_active.get() == i { "active" } else { "" }
+                                                aria-selected=move || (street_active.get() == i).to_string()
+                                                on:mousedown=move |ev| { ev.prevent_default(); select_street(pick.clone()); }
+                                                on:mouseenter=move |_| street_active.set(i)>
+                                                {label}
+                                            </li>
+                                        }
+                                    }).collect_view()}
+                                </ul>
+                            })}
                         </label>
-                        <label>
-                            <span>{crate::t!("checkout.house_number")}</span>
+                        <label class="addr-field">
+                            <span>{move || crate::t!("checkout.house_number")}</span>
                             <input type="text" name="house_number"
+                                   autocomplete=if address_autocomplete { "off" } else { "on" }
                                    placeholder=crate::t!("checkout.house_number_placeholder")
+                                   aria-expanded=move || house_open.get().to_string()
                                    prop:value=move || house_sig.get()
-                                   on:input=move |ev| house_sig.set(event_target_value(&ev))/>
+                                   on:focus=move |_| {
+                                       if address_autocomplete && house_sig.get_untracked().trim().is_empty() {
+                                           if let Some(id) = street_id_sig.get_untracked() {
+                                               house_lookup.dispatch((id, String::new()));
+                                           }
+                                       }
+                                   }
+                                   on:input=move |ev| {
+                                       let v = event_target_value(&ev);
+                                       house_sig.set(v.clone());
+                                       if !address_autocomplete { return; }
+                                       let Some(id) = street_id_sig.get_untracked() else { return; };
+                                       if let Some(prev) = house_timer.try_update_value(|t| t.take()).flatten() {
+                                           prev.clear();
+                                       }
+                                       let handle = leptos::leptos_dom::helpers::set_timeout_with_handle(
+                                           move || { house_lookup.dispatch((id, v)); },
+                                           SUGGEST_DEBOUNCE,
+                                       ).ok();
+                                       house_timer.set_value(handle);
+                                   }
+                                   on:keydown=move |ev: leptos::ev::KeyboardEvent| {
+                                       if !house_open.get() { return; }
+                                       let n = house_suggestions.with(|l| l.len());
+                                       match ev.key().as_str() {
+                                           "ArrowDown" => { ev.prevent_default(); house_active.update(|a| if *a + 1 < n { *a += 1 }); }
+                                           "ArrowUp" => { ev.prevent_default(); house_active.update(|a| *a = a.saturating_sub(1)); }
+                                           "Enter" => {
+                                               ev.prevent_default();
+                                               let pick = house_suggestions.with(|l| l.get(house_active.get()).cloned());
+                                               if let Some(n) = pick { select_house(n); }
+                                           }
+                                           "Escape" => { house_open.set(false); }
+                                           _ => {}
+                                       }
+                                   }
+                                   on:blur=move |_| {
+                                       leptos::leptos_dom::helpers::set_timeout(
+                                           move || house_open.set(false),
+                                           std::time::Duration::from_millis(150),
+                                       );
+                                   }/>
+                            {move || (address_autocomplete && house_open.get()).then(|| view! {
+                                <ul class="addr-suggest" role="listbox" aria-label=crate::t!("checkout.house_number_suggestions")>
+                                    {house_suggestions.get().into_iter().enumerate().map(|(i, n)| {
+                                        let pick = n.clone();
+                                        view! {
+                                            <li role="option"
+                                                class=move || if house_active.get() == i { "active" } else { "" }
+                                                aria-selected=move || (house_active.get() == i).to_string()
+                                                on:mousedown=move |ev| { ev.prevent_default(); select_house(pick.clone()); }
+                                                on:mouseenter=move |_| house_active.set(i)>
+                                                {n}
+                                            </li>
+                                        }
+                                    }).collect_view()}
+                                </ul>
+                            })}
                         </label>
                         <label>
-                            <span>{crate::t!("checkout.postcode")}</span>
+                            <span>{move || crate::t!("checkout.postcode")}</span>
                             <input type="text" name="postcode" autocomplete="postal-code"
                                    placeholder=move || {
                                        hints_res.get()
@@ -5700,17 +6128,19 @@ fn Form(
                                            .unwrap_or_else(|| "PLZ".to_string())
                                    }
                                    inputmode="numeric"
+                                   readonly=move || street_id_sig.get().is_some()
                                    prop:value=move || postcode_sig.get()
                                    on:input=move |ev| postcode_sig.set(event_target_value(&ev))/>
                         </label>
                         <label>
-                            <span>{crate::t!("checkout.city")}</span>
+                            <span>{move || crate::t!("checkout.city")}</span>
                             <input type="text" name="city" autocomplete="address-level2"
                                    placeholder=move || {
                                        hints_res.get()
                                            .and_then(|e| e.first().map(|x| x.city.clone()))
                                            .unwrap_or_else(|| "Ort".to_string())
                                    }
+                                   readonly=move || street_id_sig.get().is_some()
                                    prop:value=move || city_sig.get()
                                    on:input=move |ev| city_sig.set(event_target_value(&ev))/>
                         </label>
@@ -5718,7 +6148,7 @@ fn Form(
                             <p class="zone-status hint">"ℹ️ " {h}</p>
                         })}
                         <label>
-                            <span>{crate::t!("checkout.address_note")}</span>
+                            <span>{move || crate::t!("checkout.address_note")}</span>
                             <input type="text" name="address_notes"
                                    placeholder=crate::t!("checkout.address_note_placeholder")
                                    prop:value=move || address_notes_sig.get()
@@ -5732,7 +6162,7 @@ fn Form(
                             if addrs.len() <= 1 { return ().into_any(); }
                             view! {
                                 <div class="saved-addresses">
-                                    <span class="hint">{crate::t!("checkout.saved_addresses")}</span>
+                                    <span class="hint">{move || crate::t!("checkout.saved_addresses")}</span>
                                     {addrs.into_iter().skip(1).map(|a| {
                                         let label = format!("{} {}, {}",
                                             a.street, a.house_number, a.postcode);
@@ -5785,7 +6215,7 @@ fn Form(
                                 <input type="radio" name="pickup_time_mode" value="scheduled"
                                        prop:checked=move || pickup_choice.get() == "scheduled"
                                        on:change=move |_| pickup_choice.set("scheduled".to_string())/>
-                                <span>{crate::t!("checkout.pick_later")}</span>
+                                <span>{move || crate::t!("checkout.pick_later")}</span>
                             </label>
                             <select name="pickup_time"
                                 disabled=move || pickup_choice.get() != "scheduled">
@@ -5795,12 +6225,12 @@ fn Form(
                             </select>
                         }.into_any()
                     } else {
-                        view! { <p class="hint">{crate::t!("checkout.no_slots")}</p> }.into_any()
+                        view! { <p class="hint">{move || crate::t!("checkout.no_slots")}</p> }.into_any()
                     }}
                 </fieldset>
 
                 <fieldset>
-                    <legend>{crate::t!("checkout.payment")}</legend>
+                    <legend>{move || crate::t!("checkout.payment")}</legend>
                     <label class="radio">
                         <input type="radio" name="payment_method" value="cash"
                                prop:checked=move || payment_method.get() == "cash"
@@ -5811,12 +6241,12 @@ fn Form(
                         <input type="radio" name="payment_method" value="card"
                                prop:checked=move || payment_method.get() == "card"
                                on:change=move |_| payment_method.set("card".to_string())/>
-                        <span>{crate::t!("checkout.pay_card_long")}</span>
+                        <span>{move || crate::t!("checkout.pay_card_long")}</span>
                     </label>
                 </fieldset>
 
                 <fieldset class="voucher-fieldset">
-                    <legend>{crate::t!("checkout.voucher_legend")}</legend>
+                    <legend>{move || crate::t!("checkout.voucher_legend")}</legend>
                     <input type="text" name="voucher_code" autocomplete="off"
                            placeholder=crate::t!("checkout.voucher_placeholder")
                            prop:value=move || voucher_sig.get()
@@ -5828,7 +6258,7 @@ fn Form(
                         } else if let Some(e) = voucher_error.get() {
                             view! { <p class="warn">{e}</p> }.into_any()
                         } else {
-                            view! { <p class="hint muted">{crate::t!("checkout.voucher_hint")}</p> }.into_any()
+                            view! { <p class="hint muted">{move || crate::t!("checkout.voucher_hint")}</p> }.into_any()
                         }
                     }}
                 </fieldset>

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use escpos::driver::FileDriver;
+use escpos::driver::{Driver, FileDriver};
 use escpos::printer::Printer as EscposPrinter;
 use escpos::printer_options::PrinterOptions;
 use escpos::utils::{
@@ -10,6 +10,8 @@ use escpos::utils::{
 };
 use kitchen_protocol::bitmap::Bitmap;
 use kitchen_protocol::receipt::{LineStyle, ReceiptLine, ReceiptProgram, RECEIPT_WIDTH};
+
+use crate::usb::{UsbDriver, UsbSelector};
 
 /// ESC/POS receipt printers don't speak UTF-8. They ship with a
 /// firmware-resident table of code pages and we tell them which one
@@ -25,26 +27,79 @@ use kitchen_protocol::receipt::{LineStyle, ReceiptLine, ReceiptProgram, RECEIPT_
 /// rest of the render code stays Unicode.
 const RECEIPT_PAGE_CODE: PageCode = PageCode::ISO8859_15;
 
-/// Thin wrapper around an ESC/POS device file. Opens the device per print
-/// rather than holding the FD open: the kernel `usblp` driver reclaims the
-/// device cleanly on detach/reattach, so re-opening per receipt makes us
+/// Where the ESC/POS bytes go: a device file (`/dev/usb/lp0` via the
+/// kernel `usblp` driver, or a plain file as a mock printer) or the printer's
+/// USB endpoint directly (`PRINTER_PATH=usb[:vid:pid]`, for kernels without
+/// `usblp` such as the STM32MP135F-DK's).
+#[derive(Debug, Clone)]
+enum Target {
+    File(PathBuf),
+    Usb(UsbSelector),
+    /// `PRINTER_PATH=none`: display-only terminal. The client never prints
+    /// or acks, so another printer on the same shop channel (the Pi during
+    /// a rollout) keeps every receipt.
+    None,
+}
+
+/// `PRINTER_PATH` value for a display-only terminal.
+pub const DISPLAY_ONLY: &str = "none";
+
+/// Thin wrapper around the printer device. Opens it per print rather than
+/// holding it open: `usblp` reclaims the device cleanly on detach/reattach
+/// and the USB driver re-enumerates, so re-opening per receipt makes us
 /// resilient to the printer being powered off and back on mid-shift.
 pub struct Printer {
-    path: PathBuf,
+    target: Target,
     /// Serialize prints so we never interleave two receipts.
     write_lock: Mutex<()>,
 }
 
 impl Printer {
+    /// Open and probe: fails fast at startup if the device isn't there
+    /// (printer off, cable unplugged). The headless printer's choice —
+    /// systemd restarts it until the printer shows up.
     pub fn open(path: &Path) -> Result<Self> {
-        // Probe by opening and immediately dropping. If the device isn't
-        // there (printer off, cable unplugged), fail fast at startup.
-        let _probe =
-            FileDriver::open(path).with_context(|| format!("probe open {}", path.display()))?;
-        Ok(Self {
-            path: path.to_path_buf(),
+        let p = Self::new(path);
+        p.probe()?;
+        Ok(p)
+    }
+
+    /// No probe: the kitchen display must come up (and keep showing orders)
+    /// with the printer off. Prints fail and are retried until it's back.
+    pub fn new(path: &Path) -> Self {
+        let target = match path.to_str() {
+            Some(DISPLAY_ONLY) => Target::None,
+            Some(spec) => match UsbSelector::parse(spec) {
+                Some(sel) => Target::Usb(sel),
+                None => Target::File(path.to_path_buf()),
+            },
+            None => Target::File(path.to_path_buf()),
+        };
+        Self {
+            target,
             write_lock: Mutex::new(()),
-        })
+        }
+    }
+
+    /// Open the device once and drop it.
+    pub fn probe(&self) -> Result<()> {
+        if self.is_display_only() {
+            return Ok(());
+        }
+        AnyDriver::open(&self.target).map(drop).context("probe printer")
+    }
+
+    pub fn is_display_only(&self) -> bool {
+        matches!(self.target, Target::None)
+    }
+
+    /// Human-readable target for logs and the display's status line.
+    pub fn describe(&self) -> String {
+        match &self.target {
+            Target::File(p) => p.display().to_string(),
+            Target::Usb(sel) => sel.to_string(),
+            Target::None => DISPLAY_ONLY.to_string(),
+        }
     }
 
     /// Print a fully-composed [`ReceiptProgram`]. The server (the
@@ -57,8 +112,7 @@ impl Printer {
         cache: &mut crate::raster_cache::RasterCache,
     ) -> Result<()> {
         let _guard = self.write_lock.lock().unwrap();
-        let driver = FileDriver::open(&self.path)
-            .with_context(|| format!("open {}", self.path.display()))?;
+        let driver = AnyDriver::open(&self.target)?;
 
         // Configure the printer with our target code page up front: every
         // .writeln below will then go through the table-based UTF-8 →
@@ -88,7 +142,7 @@ impl Printer {
 /// Resets justify/size/bold after each styled line so the next starts
 /// from a known state.
 fn emit_line(
-    p: &mut EscposPrinter<FileDriver>,
+    p: &mut EscposPrinter<AnyDriver>,
     line: &ReceiptLine,
     cache: &mut crate::raster_cache::RasterCache,
 ) -> Result<()> {
@@ -180,7 +234,7 @@ fn gs_v0(bm: &Bitmap) -> Vec<u8> {
 
 /// Translate a [`LineStyle`] into the matching ESC/POS state. The caller
 /// resets afterwards.
-fn apply_style(p: &mut EscposPrinter<FileDriver>, style: LineStyle) -> Result<()> {
+fn apply_style(p: &mut EscposPrinter<AnyDriver>, style: LineStyle) -> Result<()> {
     p.justify(if style.center {
         JustifyMode::CENTER
     } else {
@@ -189,4 +243,49 @@ fn apply_style(p: &mut EscposPrinter<FileDriver>, style: LineStyle) -> Result<()
     p.bold(style.bold)?;
     p.size(style.width, style.height)?;
     Ok(())
+}
+
+/// The concrete escpos driver for one print.
+enum AnyDriver {
+    File(FileDriver),
+    Usb(UsbDriver),
+}
+
+impl AnyDriver {
+    fn open(target: &Target) -> Result<Self> {
+        Ok(match target {
+            Target::File(path) => Self::File(
+                FileDriver::open(path).with_context(|| format!("open {}", path.display()))?,
+            ),
+            Target::Usb(sel) => Self::Usb(UsbDriver::open(*sel)?),
+            Target::None => anyhow::bail!("display-only terminal has no printer"),
+        })
+    }
+}
+
+impl Driver for AnyDriver {
+    fn name(&self) -> String {
+        match self {
+            Self::File(d) => d.name(),
+            Self::Usb(d) => d.name(),
+        }
+    }
+    fn write(&self, data: &[u8]) -> escpos::errors::Result<()> {
+        match self {
+            Self::File(d) => d.write(data),
+            Self::Usb(d) => d.write(data),
+        }
+    }
+    fn read(&self, buf: &mut [u8]) -> escpos::errors::Result<usize> {
+        match self {
+            Self::File(d) => d.read(buf),
+            Self::Usb(d) => d.read(buf),
+        }
+    }
+    fn flush(&self) -> escpos::errors::Result<()> {
+        match self {
+            Self::File(d) => d.flush(),
+            Self::Usb(d) => d.flush(),
+        }
+    }
 }

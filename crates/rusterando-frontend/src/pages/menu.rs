@@ -370,7 +370,7 @@ pub fn MenuPage() -> impl IntoView {
     });
 
     view! {
-        <Suspense fallback=|| view! { <p class="loading">{crate::t!("menu.loading")}</p> }>
+        <Suspense fallback=|| view! { <p class="loading">{move || crate::t!("menu.loading")}</p> }>
             {move || combined.get().map(|(menu_res, extras, shop)| match menu_res {
                 Err(e) => view! {
                     <p class="error">{crate::t!("menu.load_error").replace("{err}", &e.to_string())}</p>
@@ -446,7 +446,7 @@ pub fn MenuCategoryPage() -> impl IntoView {
 
     view! {
         <leptos_meta::Link rel="canonical" href=canonical/>
-        <Suspense fallback=|| view! { <p class="loading">{crate::t!("menu.loading")}</p> }>
+        <Suspense fallback=|| view! { <p class="loading">{move || crate::t!("menu.loading")}</p> }>
             {move || {
                 let ex = extras.get().unwrap_or_default();
                 data.get().map(|res| match res {
@@ -459,7 +459,7 @@ pub fn MenuCategoryPage() -> impl IntoView {
                         if let Some(resp) = use_context::<leptos_axum::ResponseOptions>() {
                             resp.set_status(http::StatusCode::NOT_FOUND);
                         }
-                        view! { <p class="error">{crate::t!("errors.page_not_found")}</p> }.into_any()
+                        view! { <p class="error">{move || crate::t!("errors.page_not_found")}</p> }.into_any()
                     }
                     Ok(Some((cat_name, payload))) => {
                         view! {
@@ -486,6 +486,31 @@ pub async fn shop_status() -> Result<(rusterando_shared::models::ShopLevel, Stri
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
     Ok(crate::pages::order::ssr::shop_open_state(&db).await)
+}
+
+/// Is delivery suspended right now, and with what caption?
+///
+/// Deliberately separate from `shop_status`: the shop is OPEN (pickup works),
+/// so this is not a `ShopLevel`. Returning it on its own lets the badge sit
+/// next to a green "geöffnet" bar instead of overriding it.
+#[server(name = DeliveryPauseStatus, prefix = "/api", endpoint = "delivery_pause_status")]
+pub async fn delivery_pause_status() -> Result<(bool, String), ServerFnError> {
+    use sqlx::SqlitePool;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    let paused = crate::pages::settings::ssr::delivery_paused(&db).await;
+    if !paused {
+        return Ok((false, String::new()));
+    }
+    let msg = crate::pages::settings::ssr::delivery_paused_message(&db).await;
+    Ok((
+        true,
+        if msg.is_empty() {
+            crate::i18n::t("shop_status.delivery_paused_hint")
+        } else {
+            msg
+        },
+    ))
 }
 
 #[component]
@@ -637,7 +662,7 @@ fn MenuView(payload: MenuPayload, extras: Vec<PizzaExtra>) -> impl IntoView {
     view! {
         <div class="menu">
             <header class="menu-header">
-                <h1>{crate::t!("menu.title")}</h1>
+                <h1>{move || crate::t!("menu.title")}</h1>
                 {(!phone.is_empty()).then(|| view! {
                     <p>{crate::t!("menu.phone_hint").replace("{phone}", &phone)}</p>
                 })}
@@ -792,7 +817,7 @@ fn CategorySheet(cats: Vec<MenuCategory>, open: RwSignal<bool>) -> impl IntoView
             aria-hidden=move || (!open.get()).to_string()
             aria-label=crate::t!("menu.category_sheet_aria")>
             <header class="sheet-head">
-                <h2>{crate::t!("menu.category_sheet_title")}</h2>
+                <h2>{move || crate::t!("menu.category_sheet_title")}</h2>
                 <button class="close"
                     aria-label=crate::t!("common.close")
                     on:click=close>
@@ -815,7 +840,7 @@ fn CategorySheet(cats: Vec<MenuCategory>, open: RwSignal<bool>) -> impl IntoView
 fn Legend(allergens: Vec<LegendEntry>, additives: Vec<LegendEntry>) -> impl IntoView {
     view! {
         <section class="legend" id="legend">
-            <h2>{crate::t!("menu.legend_title")}</h2>
+            <h2>{move || crate::t!("menu.legend_title")}</h2>
             <p class="legend-intro">
                 "Gemäß EU-Verordnung 1169/2011. Die Buchstaben hinter den Speisen kennzeichnen \
                  Allergene, die Zahlen Zusatzstoffe."
@@ -823,7 +848,7 @@ fn Legend(allergens: Vec<LegendEntry>, additives: Vec<LegendEntry>) -> impl Into
 
             <div class="legend-grid">
                 <div>
-                    <h3>{crate::t!("menu.allergens_heading")}</h3>
+                    <h3>{move || crate::t!("menu.allergens_heading")}</h3>
                     <dl>
                         {allergens.into_iter().map(|e| {
                             let id = format!("allergen-{}", e.code);
@@ -837,7 +862,7 @@ fn Legend(allergens: Vec<LegendEntry>, additives: Vec<LegendEntry>) -> impl Into
                     </dl>
                 </div>
                 <div>
-                    <h3>{crate::t!("menu.additives_heading")}</h3>
+                    <h3>{move || crate::t!("menu.additives_heading")}</h3>
                     <dl>
                         {additives.into_iter().map(|e| {
                             let id = format!("additive-{}", code_to_anchor(&e.code));
@@ -1095,7 +1120,7 @@ fn Card(it: MenuItem) -> impl IntoView {
             <div class="codes">
                 {allergens.map(|s| view! {
                     <span class="codeset allergens">
-                        <span class="label">{crate::t!("menu.allergens_label")}</span>
+                        <span class="label">{move || crate::t!("menu.allergens_label")}</span>
                         {split_codes(&s).into_iter().map(|c| {
                             let href = format!("#allergen-{c}");
                             view! { <a class="code" href=href>{c}</a> }
@@ -1104,7 +1129,7 @@ fn Card(it: MenuItem) -> impl IntoView {
                 })}
                 {additives.map(|s| view! {
                     <span class="codeset additives">
-                        <span class="label">{crate::t!("menu.additives_label")}</span>
+                        <span class="label">{move || crate::t!("menu.additives_label")}</span>
                         {split_codes(&s).into_iter().map(|c| {
                             let href = format!("#additive-{}", code_to_anchor(&c));
                             view! { <a class="code" href=href>{c}</a> }
@@ -1150,7 +1175,7 @@ fn Card(it: MenuItem) -> impl IntoView {
                         <button class="add wide"
                             disabled=move || unavailable || !options_valid.get()
                             on:click=add_small>
-                            <span class="add-size">{crate::t!("menu.add_to_size")}</span>
+                            <span class="add-size">{move || crate::t!("menu.add_to_size")}</span>
                             <span class="add-price">
                                 {move || format_eur(small_price + extras_sum_cents.get() + options_sum_cents.get())}
                             </span>
@@ -1158,7 +1183,7 @@ fn Card(it: MenuItem) -> impl IntoView {
                     }.into_any()
                 }}
             </div>
-            {unavailable.then(|| view! { <p class="oos">{crate::t!("menu.unavailable")}</p> })}
+            {unavailable.then(|| view! { <p class="oos">{move || crate::t!("menu.unavailable")}</p> })}
         </article>
     }
 }
@@ -1184,7 +1209,7 @@ fn RemovalsPicker(
     }
     view! {
         <details class="removals-picker">
-            <summary>{crate::t!("menu.expand_removals")}</summary>
+            <summary>{move || crate::t!("menu.expand_removals")}</summary>
             <ul class="removals-list">
                 {removable.into_iter().map(|r| {
                     let id = r.id.clone();
@@ -1208,7 +1233,7 @@ fn RemovalsPicker(
                                             }
                                         });
                                     }/>
-                                <span class="removal-label">{crate::t!("menu.removal_prefix")}{label}</span>
+                                <span class="removal-label">{move || crate::t!("menu.removal_prefix")}{label}</span>
                             </label>
                         </li>
                     }
@@ -1251,7 +1276,7 @@ fn ExtrasPicker(
     };
     view! {
         <details class="extras-picker">
-            <summary>{crate::t!("menu.expand_extras")}</summary>
+            <summary>{move || crate::t!("menu.expand_extras")}</summary>
             {hint.map(|h| view! { <p class="extras-hint">{h}</p> })}
             <ul class="extras-list">
                 {list.into_iter().map(|ex| {

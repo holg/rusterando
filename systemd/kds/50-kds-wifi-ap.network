@@ -1,0 +1,18 @@
+# Board WiFi access point (hostapd on wlan0): on-site admin access, and
+# internet for WiFi devices through the board's LAN cable (NAT), like ST's
+# demo image. Anyone with the WiFi password reaches the shop network too —
+# hence its own SSID + strong password in /etc/hostapd.conf.
+[Match]
+Name=wlan0
+
+[Network]
+Address=192.168.72.1/24
+DHCPServer=yes
+IPMasquerade=ipv4
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=40
+# Router + DNS (taken from the uplink, the LAN cable) go out with the lease.
+EmitRouter=yes
+EmitDNS=yes
