@@ -212,6 +212,9 @@ if [ "$DO_SETUP" -eq 1 ]; then
     systemd/kds/tunnel.env.example systemd/kds/wait-online-any.conf \
     systemd/kds/50-kds-wifi-ap.network \
     systemd/kds/rusterando-gong.path systemd/kds/rusterando-gong.service \
+    systemd/kds/convert-tunnel-key.py \
+    systemd/kds/rusterando-bt-keep systemd/kds/rusterando-bt-keep.service \
+    systemd/kds/rusterando-bt-keep.timer \
     crates/rusterando-printer/assets/sounds/gong.wav \
     "${KDS_SSH_HOST}:/tmp/" || { err "scp units failed"; exit 6; }
   ssh "$KDS_SSH_HOST" '
@@ -222,7 +225,16 @@ if [ "$DO_SETUP" -eq 1 ]; then
     # (the Weston session that normally starts it is disabled here).
     install -D -m 0644 /tmp/gong.wav /usr/local/share/rusterando/gong.wav
     loginctl enable-linger root
-    XDG_RUNTIME_DIR=/run/user/0 systemctl --user enable --now pipewire.socket pipewire-pulse.socket wireplumber.service 2>/dev/null || true
+    # pipewire.service itself must start at boot (not only via its socket on
+    # the first gong): WirePlumber, which accepts and keeps the Bluetooth
+    # speaker, only runs alongside it, and a cold start on the first gong
+    # fails with "no target node available".
+    XDG_RUNTIME_DIR=/run/user/0 systemctl --user enable --now pipewire.socket pipewire-pulse.socket pipewire.service wireplumber.service 2>/dev/null || true
+    # Bluetooth: adapter on at start (the board has no main.conf by default),
+    # plus a minute timer that powers it on and reconnects the speaker.
+    [ -f /etc/bluetooth/main.conf ] || printf "# rusterando: power the adapter on when bluetoothd finds it\n[Policy]\nAutoEnable=true\n" > /etc/bluetooth/main.conf
+    install -m 0755 /tmp/rusterando-bt-keep /usr/local/bin/rusterando-bt-keep
+    install -m 0644 /tmp/rusterando-bt-keep.service /tmp/rusterando-bt-keep.timer /etc/systemd/system/
     install -m 0644 /tmp/99-rusterando-printer.rules /etc/udev/rules.d/
     # Unplugged ports must not hold the boot ~2 min in networkd-wait-online.
     install -D -m 0644 /tmp/wait-online-any.conf /etc/systemd/system/systemd-networkd-wait-online.service.d/any.conf
@@ -239,8 +251,17 @@ if [ "$DO_SETUP" -eq 1 ]; then
     if [ -f /etc/netdata/netdata.conf ] && ! grep -q "bind to = 127.0.0.1" /etc/netdata/netdata.conf; then
       printf "\n[web]\n    bind to = 127.0.0.1\n" >> /etc/netdata/netdata.conf; systemctl restart netdata || true
     fi
-    if [ -s /home/root/.ssh/authorized_keys ]; then
+    # Dropbear may be gone (OpenSSH replaces it, e.g. via `apt-get install
+    # autossh`); OpenSSH as shipped is already root key-only.
+    if [ -s /home/root/.ssh/authorized_keys ] && [ -f /etc/default/dropbear ]; then
       sed -i "s/^DROPBEAR_EXTRA_ARGS=.*/DROPBEAR_EXTRA_ARGS=\"-s\"/" /etc/default/dropbear
+    fi
+    # Tunnel key for the OpenSSH client: the unit prefers OpenSSH when it is
+    # installed and tunnel_key.openssh exists (same key, converted on-board).
+    install -m 0755 /tmp/convert-tunnel-key.py /usr/local/bin/convert-tunnel-key.py
+    if [ -x /usr/bin/ssh ] && [ -f /etc/rusterando-printer/tunnel_key ] \
+       && [ ! -f /etc/rusterando-printer/tunnel_key.openssh ]; then
+      python3 /usr/local/bin/convert-tunnel-key.py
     fi
     udevadm control --reload && udevadm trigger --subsystem-match=usb
     install -d -m 0755 /etc/rusterando-printer
@@ -249,8 +270,8 @@ if [ "$DO_SETUP" -eq 1 ]; then
     systemctl daemon-reload
     # The display owns the screen: Weston must not hold DRM master.
     systemctl disable --now weston-launch.service weston-graphical-session.service 2>/dev/null || true
-    systemctl enable rusterando-kds.service rusterando-gong.path
-    systemctl start rusterando-gong.path
+    systemctl enable rusterando-kds.service rusterando-gong.path rusterando-bt-keep.timer
+    systemctl start rusterando-gong.path rusterando-bt-keep.timer
   ' || { err "setup failed"; exit 6; }
   ok "units installed; weston disabled; ${SERVICE} enabled"
   warn "tunnel: put the key at /etc/rusterando-printer/tunnel_key, then"

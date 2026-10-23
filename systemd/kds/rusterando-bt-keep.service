@@ -1,0 +1,8 @@
+[Unit]
+Description=Rusterando kitchen display: keep the gong speaker connected
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rusterando-bt-keep

@@ -9,7 +9,9 @@ server needs nothing new beyond this branch.
 | File | Goes to (on the board) |
 |---|---|
 | `rusterando-kds.service` | `/etc/systemd/system/` — display + printer, stops Weston |
-| `rusterando-tunnel.service` | `/etc/systemd/system/` — Dropbear `dbclient` tunnel |
+| `rusterando-tunnel.service` | `/etc/systemd/system/` — SSH tunnel (OpenSSH if installed, else Dropbear `dbclient`) |
+| `convert-tunnel-key.py` | `/usr/local/bin/` — Dropbear → OpenSSH key conversion, on the board |
+| `rusterando-bt-keep` (+ `.service`, `.timer`) | `/usr/local/bin/`, `/etc/systemd/system/` — keeps the gong speaker connected |
 | `99-rusterando-printer.rules` | `/etc/udev/rules.d/` — USB printer access for group `lp` |
 | `printer.env.example` | `/etc/rusterando-printer/printer.env` |
 | `tunnel.env.example` | `/etc/rusterando-printer/tunnel.env` |
@@ -61,7 +63,12 @@ waking from the screensaver, always go to Küche.
   `rusterando-gong.path` (root) plays `/usr/local/share/rusterando/gong.wav`
   via PipeWire, which runs as a lingering session of root (setup enables
   it). Pair a speaker once: `bluetoothctl` → `scan on` → `pair <MAC>` →
-  `trust <MAC>` → `connect <MAC>`; trusted, it reconnects by itself. Volume:
+  `trust <MAC>` → `connect <MAC>`. `rusterando-bt-keep.timer` checks every
+  minute: it powers the adapter on (after a reboot it sometimes comes up off)
+  and reconnects every trusted audio device that dropped. PipeWire must run
+  from boot (`pipewire.service` enabled in root's user session), otherwise
+  nothing accepts the speaker until the first gong, and that first gong fails
+  with "no target node available". Volume:
   `XDG_RUNTIME_DIR=/run/user/0 wpctl set-volume @DEFAULT_AUDIO_SINK@ 1.0`.
   New sound: `systemd/kds/make_gong.py`.
 - **Screensaver** — after `KDS_SAVER_SECS` (default 5 min) without a touch
@@ -126,7 +133,30 @@ Two ways to give the board an identity the server accepts:
 4. `systemctl enable --now rusterando-tunnel`
 
 Admin SSH into the board then goes through the server (once
-`TUNNEL_ADMIN_PORT` is set): `ssh -p <port> root@127.0.0.1` on the server.
+`TUNNEL_ADMIN_PORT` is set): `ssh -p <port> root@127.0.0.1` on the server,
+or from a laptop `ssh davidspizzeria-kds` (ProxyJump via the server to
+`localhost:2222`, user root).
+
+### OpenSSH instead of Dropbear
+
+Installing OpenSSH on the board (it also comes with `apt-get install
+autossh`) **removes Dropbear, including `dbclient`**. That is what took the
+printer offline on 2026-10-17: the running tunnel survived until the
+router's nightly IP change, then the unit could not restart. The unit now
+uses OpenSSH whenever `/usr/bin/ssh` and `tunnel_key.openssh` exist and
+falls back to `dbclient` otherwise. OpenSSH cannot read Dropbear keys, so
+convert the key once on the board (same key and fingerprint, no server
+change; `deploy_kds.sh --setup` does this automatically):
+
+```sh
+python3 /usr/local/bin/convert-tunnel-key.py     # → tunnel_key.openssh
+ssh-keygen -y -f /etc/rusterando-printer/tunnel_key.openssh | ssh-keygen -lf -
+systemctl restart rusterando-tunnel
+```
+
+autossh adds nothing here: systemd `Restart=` plus the 15 s keepalive
+already reconnect. The board's SSH server is then OpenSSH too, with new host
+keys; refresh the laptop's `known_hosts` entry for `davidspizzeria-kds`.
 
 ## Rollout next to the Pi: display only
 

@@ -1,0 +1,22 @@
+#!/bin/sh
+# Keep the gong speaker connected (rusterando-bt-keep.timer, every minute).
+#
+# - powers the Bluetooth adapter on if it came up off (seen after a reboot:
+#   the BCM43430 on the board is not always auto-enabled)
+# - reconnects every trusted device that offers an audio sink and is not
+#   connected (speaker switched off and on again, link loss)
+#
+# Quiet when nothing changes, so a speaker that is switched off does not
+# fill the journal.
+if ! bluetoothctl show 2>/dev/null | grep -q "Powered: yes"; then
+  bluetoothctl power on >/dev/null 2>&1 && echo "adapter powered on"
+fi
+for mac in $(bluetoothctl devices Trusted 2>/dev/null | awk '{print $2}'); do
+  info=$(bluetoothctl info "$mac" 2>/dev/null)
+  echo "$info" | grep -q "UUID: Audio Sink" || continue
+  echo "$info" | grep -q "Connected: yes" && continue
+  if timeout 15 bluetoothctl connect "$mac" >/dev/null 2>&1; then
+    echo "reconnected $mac ($(echo "$info" | sed -n 's/^[[:space:]]*Alias: //p'))"
+  fi
+done
+exit 0

@@ -1,27 +1,42 @@
 [Unit]
 Description=SSH tunnel: kitchen display -> server kitchen channel
 # Not network-online: wait-online would delay boot ~2 min here (unplugged
-# ports). Without a network dbclient just fails and Restart= retries in 5 s.
+# ports). Without a network the client just fails and Restart= retries in 5 s.
 After=network.target
 
 [Service]
 Type=simple
 EnvironmentFile=/etc/rusterando-printer/tunnel.env
-# Dropbear's client (the board has no OpenSSH). Same forwards as the Pi:
+# Same forwards as the Pi:
 #   -L 9001  the kitchen channel (server loopback only)
 #   -R       admin SSH into this board from the server — only when
-#            TUNNEL_ADMIN_PORT is set (empty while the Pi holds 2222)
-# -K 15: keepalive every 15 s; Dropbear drops the link after a few missed
-# replies, systemd restarts it. -I 0: no idle timeout. The host key is
-# pinned in /home/root/.ssh/known_hosts (first connect, see README.md).
+#            TUNNEL_ADMIN_PORT is set (2222 since the cutover)
+#
+# Client: OpenSSH when it is installed and the key exists in OpenSSH format
+# (tunnel_key.openssh), otherwise Dropbear's dbclient with tunnel_key. The
+# board image ships Dropbear; installing OpenSSH (e.g. via `apt-get install
+# autossh`) REMOVES Dropbear and dbclient — run convert-tunnel-key.py once
+# then (deploy_kds.sh --setup does it). Same key either way.
+#
+# Keepalive every 15 s (ServerAlive / dbclient -K); a dead link drops after a
+# few missed replies and systemd restarts it — no autossh needed. The server
+# host key is pinned in /home/root/.ssh/known_hosts (first connect, see
+# README.md); that entry has no port, hence HostKeyAlias for OpenSSH.
 # `$$` = a literal `$` for sh (systemd would expand `$` itself).
-ExecStart=/bin/sh -c 'exec /usr/bin/dbclient -N -T -K 15 -I 0 \
-    -o ExitOnForwardFailure=yes \
-    -i /etc/rusterando-printer/tunnel_key \
-    -p "$$TUNNEL_PORT" \
-    -L 127.0.0.1:9001:127.0.0.1:9001 \
-    $${TUNNEL_ADMIN_PORT:+-R 127.0.0.1:$$TUNNEL_ADMIN_PORT:127.0.0.1:22} \
-    "$$TUNNEL_TARGET"'
+ExecStart=/bin/sh -c 'R="$${TUNNEL_ADMIN_PORT:+-R 127.0.0.1:$$TUNNEL_ADMIN_PORT:127.0.0.1:22}"; \
+    if [ -x /usr/bin/ssh ] && [ -f /etc/rusterando-printer/tunnel_key.openssh ]; then \
+      exec /usr/bin/ssh -N -T \
+        -o BatchMode=yes -o ExitOnForwardFailure=yes \
+        -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+        -o StrictHostKeyChecking=yes -o HostKeyAlias="$${TUNNEL_TARGET#*@}" \
+        -o UserKnownHostsFile=/home/root/.ssh/known_hosts \
+        -o IdentitiesOnly=yes -i /etc/rusterando-printer/tunnel_key.openssh \
+        -p "$$TUNNEL_PORT" -L 127.0.0.1:9001:127.0.0.1:9001 $$R "$$TUNNEL_TARGET"; \
+    fi; \
+    exec /usr/bin/dbclient -N -T -K 15 -I 0 \
+      -o ExitOnForwardFailure=yes \
+      -i /etc/rusterando-printer/tunnel_key \
+      -p "$$TUNNEL_PORT" -L 127.0.0.1:9001:127.0.0.1:9001 $$R "$$TUNNEL_TARGET"'
 
 Restart=always
 RestartSec=5
