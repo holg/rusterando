@@ -1,0 +1,59 @@
+# M5Stack Tab5: ESP32-P4 rev v1.3, 16 MB flash, 32 MB PSRAM.
+# Build for revisions < 3.0 (v1.x and v3.x silicon need different images).
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+
+# Not M5Stack's memory setup (QIO, PSRAM 200 MHz, XIP from PSRAM, 256 KB L2):
+# with XIP the Rust link puts the app at PSRAM addresses (0x48…) and the
+# bootloader stopped before loading it. ESP-IDF defaults work here.
+# The 32 MB self-test takes ~4 s of full load at every boot: slower start and
+# the biggest current spike (USB dropped there when powered without battery).
+CONFIG_SPIRAM_MEMTEST=n
+
+# Console: ESP-IDF's default — UART0 primary, USB-Serial/JTAG (the USB-C
+# port) as secondary, so logs still show on USB. With USB-Serial/JTAG as the
+# *primary* console the app hung at "cpu_start: Multicore app" after cold
+# starts, and the host could no longer reset the chip into download mode.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
+
+# The UI loop runs on the main task, and Slint's software renderer goes deep
+# on busy pages (the "Zeiten" page crashed the device with 16 KB).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536
+CONFIG_FREERTOS_HZ=1000
+
+# esp-idf-hal links ESP-IDF's legacy I2C driver; the board code (and later
+# Espressif's display/touch BSP) uses the new one. ESP-IDF aborts at boot when
+# both are present unless this is set. Never use esp-idf-hal's I2cDriver.
+CONFIG_I2C_SKIP_LEGACY_CONFLICT_CHECK=y
+
+# Wi-Fi: ESP32-C6 coprocessor over SDIO (esp_hosted + esp_wifi_remote), wired
+# as on the Tab5 (arduino-esp32 variants/m5stack_tab5). The defaults are for
+# Espressif's P4 dev board and an ESP32 coprocessor — both wrong here.
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+CONFIG_ESP_HOSTED_SDIO_PIN_CLK=12
+CONFIG_ESP_HOSTED_SDIO_PIN_CMD=13
+CONFIG_ESP_HOSTED_SDIO_PIN_D0=11
+CONFIG_ESP_HOSTED_SDIO_PRIV_PIN_D1_4BIT_BUS=10
+CONFIG_ESP_HOSTED_SDIO_PIN_D2=9
+CONFIG_ESP_HOSTED_SDIO_PIN_D3=8
+CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=15
+
+# Faster start. No secure boot here, so the SHA check of the whole app at
+# every power-on only guards against a flash defect, and takes ~1 s for 7 MB.
+CONFIG_BOOTLOADER_SKIP_VALIDATE_ON_POWER_ON=y
+# DHCP: ask for the last address straight away, skip the ARP probe of it.
+CONFIG_LWIP_DHCP_RESTORE_LAST_IP=y
+CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
+
+# No power management (CPU frequency scaling): on the Tab5 every change of
+# the CPU clock, even 360 → 180 MHz with unchanged bus clocks, stops the
+# picture stream to the panel (it shows light blue until back at 360 MHz).
+
+# The board package's own error checks abort() by default. Its I/O expander
+# reset is sometimes not acknowledged, and that aborted the boot; with the
+# checks off it returns the error and board.rs retries (the Rust side checks
+# every result anyway).
+CONFIG_BSP_ERROR_CHECK=n

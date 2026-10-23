@@ -1,0 +1,15 @@
+[build]
+target = "riscv32imafc-esp-espidf"
+
+[target.riscv32imafc-esp-espidf]
+linker = "ldproxy"
+# ESP-IDF 5.x has a 64-bit time_t.
+rustflags = ["--cfg", "espidf_time64"]
+
+[unstable]
+build-std = ["std", "panic_abort"]
+
+[env]
+MCU = "esp32p4"
+# The 480x272 kitchen screen on the 1280x720 panel: 720 / 272.
+KDS_UI_SCALE = "2.647"

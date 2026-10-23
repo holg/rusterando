@@ -1,0 +1,82 @@
+[package]
+name = "kds-tab5"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Holger Trahe <trahe@mac.com>"]
+repository = "https://github.com/holg/rusterando"
+description = "Kitchen display and receipt printer client on the M5Stack Tab5 (ESP32-P4)"
+publish = false
+
+# Not a workspace member (see the root Cargo.toml): it builds for
+# riscv32imafc-esp-espidf with its own toolchain settings (.cargo/config.toml).
+# Build, flash and monitor with scripts/build_kds_tab5.sh.
+
+[[bin]]
+name = "kds-tab5"
+harness = false
+
+[profile.release]
+opt-level = "s"
+# Smallest image: whole-program optimisation across all crates.
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+esp-idf-svc = "0.53"
+embedded-svc = "0.29"
+# Software renderer only, in Slint's MCU mode: its "std" feature turns on
+# system fonts (parley → fontique → memmap2), which ESP-IDF can't build and
+# the device doesn't have.
+slint = { version = "1.18", default-features = false, features = ["compat-1-18", "renderer-software", "unsafe-single-threaded", "libm"] }
+# The kitchen screen, shared with the STM32 board and the browser; glyphs
+# pre-rendered for KDS_UI_SCALE (.cargo/config.toml).
+kds-ui = { path = "../kds-ui", default-features = false, features = ["mcu"] }
+# The live feed and the print channel: same wire format as the board and
+# the browser mirror.
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
+# Receipt → ESC/POS bytes, the same code as the board's printer client.
+receipt-escpos = { path = "../receipt-escpos", version = "0.1.0" }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+base64 = "0.22"
+
+[build-dependencies]
+embuild = "0.33"
+
+[package.metadata.esp-idf-sys]
+# 5.4.x: supports the chip's revision v1.x by default (sdkconfig sets
+# CONFIG_ESP32P4_SELECTS_REV_LESS_V3 explicitly; from 5.5 the default is v3.x).
+# 5.4.4 rather than the factory firmware's 5.4.2: the board package's USB
+# host component needs HAL functions 5.4.2 doesn't have.
+esp_idf_version = "tag:v5.4.4"
+esp_idf_tools_install_dir = "global"
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
+
+# Wi-Fi: the P4 has no radio. esp_wifi_remote provides the esp_wifi API and
+# forwards it over SDIO (esp_hosted) to the ESP32-C6 on the board. Same
+# versions as M5Stack's Tab5 project, so they match the C6's firmware
+# (which we never flash).
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_wifi_remote", version = "==0.8.5" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_hosted", version = "==1.4.0" }
+
+# The print channel (/api/kitchen/ws). Used through its C API: the Rust
+# wrapper in esp-idf-svc doesn't say where a frame ends.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_websocket_client", version = "==1.6.1" }
+
+# Espressif's board package for the Tab5, without LVGL: display (all three
+# panel variants, auto-detected), touch, backlight, I/O expanders, audio
+# codec, USB host. Rust bindings for it in esp_idf_svc::sys::bsp.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/m5stack_tab5_noglib", version = "==1.3.2" }
+bindings_header = "src/bsp.h"
+bindings_module = "bsp"
