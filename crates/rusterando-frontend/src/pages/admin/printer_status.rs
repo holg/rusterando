@@ -30,6 +30,9 @@ pub struct PiStatus {
     pub last_update_ok: bool,
     pub last_update_error: String,
     pub last_update_at: i64,
+    /// Kitchen displays (ESP32-P4) report whether a USB printer is plugged
+    /// in; `None` = a tunnel Pi, which always prints.
+    pub has_printer: Option<bool>,
 }
 
 /// SSR-only DB row shape for `kitchen_clients`. Kept separate from the
@@ -46,6 +49,7 @@ struct ClientRow {
     last_update_ok: i64,
     last_update_error: String,
     last_update_at: i64,
+    has_printer: Option<i64>,
 }
 
 #[server(name = ListPiStatus, prefix = "/api", endpoint = "list_pi_status")]
@@ -57,7 +61,7 @@ pub async fn list_pi_status() -> Result<Vec<PiStatus>, ServerFnError> {
 
     let rows: Vec<ClientRow> = sqlx::query_as(
         "SELECT shop_slug, version, arch, last_seen_at, update_armed, \
-                last_update_to, last_update_ok, last_update_error, last_update_at \
+                last_update_to, last_update_ok, last_update_error, last_update_at, has_printer \
          FROM kitchen_clients ORDER BY shop_slug",
     )
     .fetch_all(&db)
@@ -107,6 +111,7 @@ pub async fn list_pi_status() -> Result<Vec<PiStatus>, ServerFnError> {
                 last_update_ok: r.last_update_ok != 0,
                 last_update_error: r.last_update_error,
                 last_update_at: r.last_update_at,
+                has_printer: r.has_printer.map(|v| v != 0),
             }
             // (last_update_at is surfaced in PiStatus for future use.)
         })
@@ -282,6 +287,14 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
                 <dd class=ver_cls>{ver_label}</dd>
                 <dt>"Arch"</dt>
                 <dd class="muted">{p.arch.clone()}</dd>
+                {p.has_printer.map(|present| {
+                    let (cls, txt) = if present {
+                        ("ok", "USB-Drucker angeschlossen — druckt")
+                    } else {
+                        ("muted", "kein Drucker — nur Anzeige")
+                    };
+                    view! { <><dt>"Drucker"</dt><dd class=cls>{txt}</dd></> }
+                })}
                 {(!p.last_update_to.is_empty()).then(|| {
                     let cls = if p.last_update_ok { "ok" } else { "error" };
                     let txt = if p.last_update_ok {

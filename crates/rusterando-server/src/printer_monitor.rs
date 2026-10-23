@@ -70,12 +70,16 @@ async fn poll_once(
     states: &mut HashMap<String, ConnState>,
 ) -> anyhow::Result<()> {
     // (shop_slug, seconds since last heartbeat). A row with last_seen_at = 0
-    // (Hello never recorded a time) is treated as offline.
+    // (Hello never recorded a time) is treated as offline. Only printing
+    // clients: has_printer NULL = a tunnel Pi (always prints), 1 = a display
+    // with a USB printer plugged in. A display without printer (0) going
+    // offline stops no receipts.
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT shop_slug,
                 CASE WHEN last_seen_at = 0 THEN 999999
                      ELSE MAX(strftime('%s','now') - last_seen_at, 0) END AS stale
-         FROM kitchen_clients",
+         FROM kitchen_clients
+         WHERE has_printer IS NULL OR has_printer = 1",
     )
     .fetch_all(db)
     .await?;

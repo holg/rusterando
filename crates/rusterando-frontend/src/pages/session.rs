@@ -7,10 +7,18 @@
 //!   - SysAdmin → SYS_ADMIN_PASSWORD, /sysadmin/login (platform operator:
 //!     tenant import/provisioning on the apex host only — see pages/sysadmin)
 //!
-//! Sessions are cookie-bound. The new cookie is `dp_session` whose value is
-//! the role string ("admin" / "kitchen" / "driver"). The existing
-//! `admin_session=ok` cookie is honored too so live admin sessions survive
-//! the rollout.
+//! Sessions are cookie-bound, two cookies set together at login:
+//!   - `dp_session=<role>` ("admin" / "kitchen" / "driver" / "sysadmin"): the
+//!     role in plain text, which the native apps read (push registration);
+//!   - `dp_auth=<hex>`: HMAC-SHA256 with the server's key over the tenant, the
+//!     role and that role's CURRENT password.
+//!
+//! A role counts only with a matching `dp_auth`, so the role can't be
+//! forged by setting a cookie, a session from one shop is worthless at
+//! another, and changing a role's password logs that role out everywhere.
+//! The key lives in `data/session.key` (`SESSION_KEY_FILE`), created on first
+//! start; deleting it logs everyone out. The old unsigned `admin_session=ok`
+//! is no longer honored (logout still clears it).
 
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +85,8 @@ impl Role {
 }
 
 pub const SESSION_COOKIE: &str = "dp_session";
+/// The session's signature (see the module docs).
+pub const AUTH_COOKIE: &str = "dp_auth";
 pub const LEGACY_ADMIN_COOKIE: &str = "admin_session";
 
 use leptos::prelude::*;
@@ -441,6 +451,9 @@ pub fn RoleSwitcher(
 #[cfg(feature = "ssr")]
 #[derive(Clone, Default)]
 pub struct TenantAuth {
+    /// Whose sessions these are (the tenant slug): signed into `dp_auth`, so
+    /// a session from one shop is worthless at another.
+    pub scope: String,
     pub admin_password: Option<String>,
     pub kitchen_password: Option<String>,
     pub driver_password: Option<String>,
@@ -456,19 +469,23 @@ pub mod ssr {
     /// Look up the expected password for `role`. Prefers the per-request
     /// `TenantAuth` (the current tenant's `.env`); falls back to the process
     /// env when it's absent (Model A / a tenant that didn't set the key).
-    /// Kitchen/Driver keep their dev defaults; Admin has no fallback.
-    fn expected_password(role: Role) -> Option<String> {
-        let tenant = leptos::prelude::use_context::<super::TenantAuth>();
+    /// All three keep their dev defaults, as the login forms do (admin:
+    /// main.rs's boot fallback); only SysAdmin has none.
+    fn expected_password(auth: &TenantAuth, role: Role) -> Option<String> {
         match role {
-            Role::Admin => tenant
-                .and_then(|t| t.admin_password)
-                .or_else(|| std::env::var("ADMIN_PASSWORD").ok()),
-            Role::Kitchen => tenant
-                .and_then(|t| t.kitchen_password)
+            Role::Admin => auth
+                .admin_password
+                .clone()
+                .or_else(|| std::env::var("ADMIN_PASSWORD").ok())
+                .or_else(|| Some("admin".to_string())),
+            Role::Kitchen => auth
+                .kitchen_password
+                .clone()
                 .or_else(|| std::env::var("KITCHEN_PASSWORD").ok())
                 .or_else(|| Some("kueche".to_string())),
-            Role::Driver => tenant
-                .and_then(|t| t.driver_password)
+            Role::Driver => auth
+                .driver_password
+                .clone()
                 .or_else(|| std::env::var("DRIVER_PASSWORD").ok())
                 .or_else(|| Some("fahrer".to_string())),
             // Process env only — never per tenant, never a default.
@@ -478,29 +495,153 @@ pub mod ssr {
         }
     }
 
-    /// Write the modern `dp_session=<role>` cookie (365 days). Shared by every
-    /// role's login path so admin/kitchen/driver all get the same long-lived
-    /// session — no more the old 8h `admin_session` surprise-logout.
+    /// The request's tenant auth (Leptos context), or the env fallback.
+    fn context_auth() -> TenantAuth {
+        leptos::prelude::use_context::<TenantAuth>().unwrap_or_default()
+    }
+
+    static SESSION_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+    /// Load the session key from `path`, or create it there (32 random
+    /// bytes, hex, owner-only). Call once at startup, before serving. If the
+    /// file can't be read or written, a random key for this run is used:
+    /// logins work until the next restart.
+    pub fn init_session_key(path: &std::path::Path) {
+        use rand::RngCore;
+
+        let parse = |text: &str| -> Option<[u8; 32]> {
+            let text = text.trim();
+            if text.len() != 64 {
+                return None;
+            }
+            let mut key = [0u8; 32];
+            for (i, byte) in key.iter_mut().enumerate() {
+                *byte = u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok()?;
+            }
+            Some(key)
+        };
+        let key = match std::fs::read_to_string(path) {
+            Ok(text) => match parse(&text) {
+                Some(key) => {
+                    log::info!("session key loaded from {}", path.display());
+                    key
+                }
+                None => {
+                    log::error!("session key {} is not 64 hex digits — using a temporary key", path.display());
+                    temporary_key()
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let mut key = [0u8; 32];
+                rand::rngs::OsRng.fill_bytes(&mut key);
+                match write_key(path, &hex(&key)) {
+                    Ok(()) => log::info!("session key created at {}", path.display()),
+                    Err(e) => log::error!("session key not saved at {}: {e} — sessions end at restart", path.display()),
+                }
+                key
+            }
+            Err(e) => {
+                log::error!("session key {} unreadable: {e} — using a temporary key", path.display());
+                temporary_key()
+            }
+        };
+        let _ = SESSION_KEY.set(key);
+    }
+
+    fn temporary_key() -> [u8; 32] {
+        use rand::RngCore;
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        key
+    }
+
+    fn write_key(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(path)?;
+        file.write_all(text.as_bytes())?;
+        file.write_all(b"\n")
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The `dp_auth` value for `role` at this tenant: HMAC-SHA256 over the
+    /// tenant, the role and the role's current password. `None` without a
+    /// key or without a password for the role (no session possible).
+    pub fn session_signature(auth: &TenantAuth, role: Role) -> Option<String> {
+        use hmac::{Hmac, Mac};
+        let key = SESSION_KEY.get()?;
+        let password = expected_password(auth, role)?;
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).ok()?;
+        for part in [
+            "dp_session v1",
+            auth.scope.as_str(),
+            role.as_str(),
+            password.as_str(),
+        ] {
+            mac.update(part.as_bytes());
+            mac.update(&[0]);
+        }
+        Some(hex(&mac.finalize().into_bytes()))
+    }
+
+    /// The role a `dp_session` / `dp_auth` pair authenticates as at this
+    /// tenant, if the signature matches.
+    pub fn verify_session(
+        role: Option<&str>,
+        signature: Option<&str>,
+        auth: &TenantAuth,
+    ) -> Option<Role> {
+        let role = Role::parse(role?)?;
+        let expected = session_signature(auth, role)?;
+        let given = signature?.as_bytes();
+        // Constant time: no early exit on the first differing byte.
+        let same = expected.len() == given.len()
+            && expected
+                .as_bytes()
+                .iter()
+                .zip(given)
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0;
+        same.then_some(role)
+    }
+
+    fn session_cookie(name: &'static str, value: String, max_age: Duration) -> Cookie<'static> {
+        let mut c = Cookie::new(name, value);
+        c.set_path("/");
+        c.set_http_only(true);
+        c.set_same_site(SameSite::Lax);
+        c.set_max_age(max_age);
+        c
+    }
+
+    /// Write the session cookies for `role` (365 days): `dp_session=<role>`
+    /// plus its signature `dp_auth`. Shared by every role's login path so
+    /// admin/kitchen/driver all get the same long-lived session — no more
+    /// the old 8h `admin_session` surprise-logout.
     ///
     /// Staff devices (iPad on counter, kitchen tablet, driver phone) should
     /// stay logged in indefinitely between explicit logouts. Apple's WebView
     /// enforces a 7-day cap on *tracking* cookies, but our session cookie is
     /// first-party for the shop domain and exempt from that.
     pub async fn set_session(role: Role) -> Result<(), ServerFnError> {
+        let signature = session_signature(&context_auth(), role)
+            .ok_or_else(|| ServerFnError::new("Anmeldung derzeit nicht möglich (Sitzungsschlüssel)"))?;
         let cookies: Cookies = extract().await?;
-        let mut c = Cookie::new(SESSION_COOKIE, role.as_str().to_string());
-        c.set_path("/");
-        c.set_http_only(true);
-        c.set_same_site(SameSite::Lax);
-        c.set_max_age(Duration::days(365));
-        cookies.add(c);
+        cookies.add(session_cookie(SESSION_COOKIE, role.as_str().to_string(), Duration::days(365)));
+        cookies.add(session_cookie(AUTH_COOKIE, signature, Duration::days(365)));
         Ok(())
     }
 
     /// Verify the password matches and write the role into the session cookie.
     /// Returns `Ok(true)` on success, `Ok(false)` for a wrong password.
     pub async fn try_login(role: Role, password: &str) -> Result<bool, ServerFnError> {
-        let expected = expected_password(role)
+        let expected = expected_password(&context_auth(), role)
             .ok_or_else(|| ServerFnError::new("Passwort für diese Rolle nicht konfiguriert"))?;
         if password != expected {
             return Ok(false);
@@ -509,45 +650,45 @@ pub mod ssr {
         Ok(true)
     }
 
-    /// Clear the session cookies (both the new one and the legacy admin one).
+    /// Clear the session cookies (role, signature and the legacy admin one).
     /// The delete attributes MUST match the ones set at login (Path=/,
     /// HttpOnly, SameSite=Lax) — a browser only overwrites/deletes a cookie
     /// whose key attributes line up; a mismatch leaves the original in place
     /// and the "logout" silently does nothing.
     pub async fn logout() -> Result<(), ServerFnError> {
         let cookies: Cookies = extract().await?;
-        for name in [SESSION_COOKIE, LEGACY_ADMIN_COOKIE] {
-            let mut c = Cookie::new(name, "");
-            c.set_path("/");
-            c.set_http_only(true);
-            c.set_same_site(SameSite::Lax);
-            c.set_max_age(Duration::ZERO);
-            cookies.add(c);
+        for name in [SESSION_COOKIE, AUTH_COOKIE, LEGACY_ADMIN_COOKIE] {
+            cookies.add(session_cookie(name, String::new(), Duration::ZERO));
         }
         Ok(())
     }
 
-    /// What role (if any) does the current request authenticate as? Honors
-    /// the legacy `admin_session=ok` cookie as well.
+    /// What role (if any) does the current request authenticate as?
     pub async fn current_role() -> Option<Role> {
         let cookies: Cookies = extract().await.ok()?;
-        role_from_cookies(&cookies)
+        role_from_cookies(&cookies, &context_auth())
     }
 
-    /// [`current_role`] for plain axum handlers (the staff SSE stream),
-    /// which have the request's `Cookies` but no leptos context.
-    pub fn role_from_cookies(cookies: &Cookies) -> Option<Role> {
-        if let Some(c) = cookies.get(SESSION_COOKIE) {
-            if let Some(r) = Role::parse(c.value()) {
-                return Some(r);
-            }
-        }
-        if let Some(c) = cookies.get(LEGACY_ADMIN_COOKIE) {
-            if c.value() == "ok" {
-                return Some(Role::Admin);
-            }
-        }
-        None
+    /// [`current_role`] for plain axum handlers, which have the request's
+    /// `Cookies` and tenant but no leptos context.
+    pub fn role_from_cookies(cookies: &Cookies, auth: &TenantAuth) -> Option<Role> {
+        verify_session(
+            cookies.get(SESSION_COOKIE).as_ref().map(|c| c.value()),
+            cookies.get(AUTH_COOKIE).as_ref().map(|c| c.value()),
+            auth,
+        )
+    }
+
+    /// [`role_from_cookies`] from a raw `Cookie` header (middleware that runs
+    /// outside the cookie manager).
+    pub fn role_from_cookie_header(header: &str, auth: &TenantAuth) -> Option<Role> {
+        let value = |name: &str| {
+            header.split(';').find_map(|pair| {
+                let (k, v) = pair.trim().split_once('=')?;
+                (k == name).then_some(v)
+            })
+        };
+        verify_session(value(SESSION_COOKIE), value(AUTH_COOKIE), auth)
     }
 
     /// Gate a server fn to one or more roles. Admin always passes — they can
@@ -561,5 +702,52 @@ pub mod ssr {
         } else {
             Err(ServerFnError::new("keine Berechtigung für diese Aktion"))
         }
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod tests {
+    use super::ssr::{init_session_key, role_from_cookie_header, session_signature, verify_session};
+    use super::{Role, TenantAuth};
+
+    fn auth(scope: &str, kitchen: &str) -> TenantAuth {
+        TenantAuth {
+            scope: scope.to_string(),
+            admin_password: Some("admin-pw".to_string()),
+            kitchen_password: Some(kitchen.to_string()),
+            driver_password: Some("driver-pw".to_string()),
+        }
+    }
+
+    fn with_key() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tmp/session-key-test");
+        std::fs::create_dir_all(dir).unwrap();
+        init_session_key(&std::path::Path::new(dir).join("session.key"));
+    }
+
+    #[test]
+    fn only_a_signed_role_counts() {
+        with_key();
+        let davids = auth("davids", "k1");
+        let sig = session_signature(&davids, Role::Kitchen).unwrap();
+        assert_eq!(verify_session(Some("kitchen"), Some(&sig), &davids), Some(Role::Kitchen));
+
+        assert_eq!(verify_session(Some("admin"), None, &davids), None, "bare role cookie");
+        assert_eq!(verify_session(Some("admin"), Some(&sig), &davids), None, "kitchen signature as admin");
+        assert_eq!(verify_session(Some("kitchen"), Some("00"), &davids), None, "garbage signature");
+        assert_eq!(verify_session(Some("kitchen"), Some(&sig), &auth("other-shop", "k1")), None, "other shop");
+        assert_eq!(verify_session(Some("kitchen"), Some(&sig), &auth("davids", "k2")), None, "password changed");
+    }
+
+    #[test]
+    fn cookie_header_parsing() {
+        with_key();
+        let davids = auth("davids", "k1");
+        let sig = session_signature(&davids, Role::Admin).unwrap();
+        let header = format!("cart_id=abc; dp_session=admin; dp_auth={sig}");
+        assert_eq!(role_from_cookie_header(&header, &davids), Some(Role::Admin));
+        assert_eq!(role_from_cookie_header("dp_session=admin", &davids), None);
+        assert_eq!(role_from_cookie_header("admin_session=ok", &davids), None, "legacy cookie no longer counts");
+        assert_eq!(role_from_cookie_header("", &davids), None);
     }
 }

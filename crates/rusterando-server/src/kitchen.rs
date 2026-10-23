@@ -178,6 +178,110 @@ impl KitchenChannel {
         }
     }
 
+    /// The print feed for a WebSocket kitchen device (`/api/kitchen/ws`, the
+    /// ESP32-P4 displays): what a printer client gets over the SSH tunnel —
+    /// unacked outbox events after `last_seen`, then the live broadcast —
+    /// minus the update handshake. `last_seen = None` (a device's very first
+    /// connect) starts from now: a new device must not print every receipt
+    /// that was ever left unacked. The device counts as printing only once it
+    /// reports a printer (`PrinterPresent`), so a display without one never
+    /// raises the printer-offline alarm. The device's row exists once this
+    /// returns, so its first `PrinterPresent` always lands. Runs until the
+    /// receiver is dropped.
+    pub async fn print_feed(
+        &self,
+        shop_slug: String,
+        version: String,
+        arch: String,
+        last_seen: Option<SeqId>,
+    ) -> mpsc::Receiver<ServerMessage> {
+        if let Err(e) = upsert_client(&self.db, &shop_slug, &version, &arch).await {
+            warn!(error = %e, "kitchen_clients upsert failed");
+        }
+        if let Err(e) = sqlx::query(
+            "UPDATE kitchen_clients SET has_printer = COALESCE(has_printer, 0) WHERE shop_slug = ?1",
+        )
+        .bind(&shop_slug)
+        .execute(&self.db)
+        .await
+        {
+            warn!(error = %e, "kitchen_clients has_printer default failed");
+        }
+        let (tx, rx) = mpsc::channel(16);
+        let chan = self.clone();
+        tokio::spawn(async move {
+            // Subscribe before reading the outbox, so nothing slips through
+            // between the query and the live stream.
+            let mut live = chan.subscribe();
+            let backlog = match last_seen {
+                Some(after) => chan.unacked_since(after).await.unwrap_or_else(|e| {
+                    warn!(error = %e, "print feed: outbox replay failed");
+                    Vec::new()
+                }),
+                None => Vec::new(),
+            };
+            info!(%shop_slug, %version, ?last_seen, replay = backlog.len(), "kitchen device print feed");
+            let mut sent = last_seen.unwrap_or(SeqId(0));
+            for msg in backlog {
+                sent = sent.max(msg.seq_id);
+                if tx.send(msg).await.is_err() {
+                    return;
+                }
+            }
+            loop {
+                tokio::select! {
+                    () = tx.closed() => return,
+                    received = live.recv() => match received {
+                        // Live events already sent by the replay.
+                        Ok(msg) if msg.seq_id <= sent && last_seen.is_some() => continue,
+                        Ok(msg) => {
+                            sent = sent.max(msg.seq_id);
+                            if tx.send(msg).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            // Dropping the stream makes the device reconnect
+                            // with its last seq and catch up from the outbox.
+                            warn!(%shop_slug, missed = n, "print feed lagged; closing for a replay");
+                            return;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
+                    },
+                }
+            }
+        });
+        rx
+    }
+
+    /// A WebSocket kitchen device's message (`/api/kitchen/ws`): ack,
+    /// heartbeat or printer presence, handled like the SSH-tunnel clients'.
+    pub async fn device_message(&self, shop_slug: &str, msg: ClientMessage) -> Result<(), String> {
+        match msg {
+            ClientMessage::Ack(seq_id) => self.ack(seq_id).await.map_err(|e| e.to_string())?,
+            ClientMessage::Heartbeat => {}
+            ClientMessage::PrinterPresent(present) => {
+                info!(%shop_slug, present, "kitchen device printer presence");
+                sqlx::query("UPDATE kitchen_clients SET has_printer = ?2 WHERE shop_slug = ?1")
+                    .bind(shop_slug)
+                    .bind(present as i64)
+                    .execute(&self.db)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            _ => return Err("Keine Geräte-Nachricht".to_string()),
+        }
+        // Every message counts as a sign of life (admin panel, offline alarm).
+        sqlx::query(
+            "UPDATE kitchen_clients SET last_seen_at = strftime('%s','now') WHERE shop_slug = ?1",
+        )
+        .bind(shop_slug)
+        .execute(&self.db)
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     async fn unacked_since(&self, after: SeqId) -> anyhow::Result<Vec<ServerMessage>> {
         let rows = sqlx::query(
             "SELECT id, payload FROM kitchen_outbox \
@@ -426,6 +530,11 @@ async fn handle_client(
                 // here means an out-of-band/late frame — ignore it.
                 ClientMessage::FetchArtifact { .. } | ClientMessage::UpdateResult { .. } => {
                     debug!("update-handshake message outside handshake; ignoring");
+                }
+                // WebSocket kitchen devices only (/api/kitchen/ws); a tunnel
+                // client always counts as printing.
+                ClientMessage::PrinterPresent(_) => {
+                    debug!("PrinterPresent over the tunnel; ignoring");
                 }
                 ClientMessage::BoardSubscribe => {
                     if board_feed.is_none() {

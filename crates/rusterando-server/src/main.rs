@@ -220,6 +220,11 @@ async fn main() {
         )
         .init();
 
+    // The key that signs staff sessions (dp_auth, see pages::session);
+    // created on first start. Next to the DB, never in the web root.
+    let session_key = std::env::var("SESSION_KEY_FILE").unwrap_or_else(|_| "data/session.key".into());
+    rusterando_frontend::pages::session::ssr::init_session_key(std::path::Path::new(&session_key));
+
     rusterando_frontend::register_server_fns();
 
     let conf = get_configuration(None).expect("read Leptos config");
@@ -914,6 +919,7 @@ async fn main() {
         .route("/kitchen/display", axum::routing::get(kds_page_handler))
         .route("/api/kds/feed", axum::routing::get(kds_feed_handler))
         .route("/api/kds/action", axum::routing::post(kds_action_handler))
+        .route("/api/kitchen/ws", axum::routing::get(kitchen_ws_handler))
         // Process-health probe — fd usage + uptime. Designed for an
         // external uptime monitor to poll every minute and alert on
         // `status != "ok"`. Unauthenticated, counters only.
@@ -970,6 +976,11 @@ async fn main() {
             tenant_router.clone(),
             rusterando_server::tenant::sysadmin_gate,
         ))
+        // Reject unauthenticated SSR requests to /admin/* (other than
+        // /admin/login). API server-fns enforce auth themselves. Registered
+        // before resolve_tenant so it runs after it inbound: the session is
+        // verified against the request's tenant.
+        .layer(axum::middleware::from_fn(admin_auth_middleware))
         // Tenant routing: resolve the per-request Tenant from X-Tenant/Host and
         // stash it in extensions BEFORE the Leptos handlers AND the i18n guard
         // run (they read it back — the handlers to swap the pool, the guard to
@@ -986,9 +997,6 @@ async fn main() {
         // Rate limit must wrap EVERYTHING so it sees server-fn paths that
         // leptos_axum auto-registers (those bypass our /api/{*fn_name} catch-all).
         .layer(axum::middleware::from_fn(rate_limit_middleware))
-        // Reject unauthenticated SSR requests to /admin/* (other than
-        // /admin/login). API server-fns enforce auth themselves.
-        .layer(axum::middleware::from_fn(admin_auth_middleware))
         .layer(CookieManagerLayer::new())
         .with_state(state);
 
@@ -1566,18 +1574,15 @@ async fn live_shop_sse_handler(
 /// on an open board without a reload.
 async fn live_board_sse_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    cookies: tower_cookies::Cookies,
+    StaffRole(role): StaffRole,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use axum::response::IntoResponse;
     use futures::StreamExt;
-    use rusterando_frontend::pages::session::{ssr::role_from_cookies, Role};
+    use rusterando_frontend::pages::session::Role;
     use rusterando_shared::models::LiveKind;
 
-    if !matches!(
-        role_from_cookies(&cookies),
-        Some(Role::Admin | Role::Kitchen | Role::Driver)
-    ) {
+    if !matches!(role, Some(Role::Admin | Role::Kitchen | Role::Driver)) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
 
@@ -1620,9 +1625,9 @@ async fn live_board_sse_handler(
 }
 
 /// Admin or Küche — who may see and work the kitchen display.
-fn kds_allowed(cookies: &tower_cookies::Cookies) -> bool {
-    use rusterando_frontend::pages::session::{ssr::role_from_cookies, Role};
-    matches!(role_from_cookies(cookies), Some(Role::Admin | Role::Kitchen))
+fn kds_allowed(role: Option<rusterando_frontend::pages::session::Role>) -> bool {
+    use rusterando_frontend::pages::session::Role;
+    matches!(role, Some(Role::Admin | Role::Kitchen))
 }
 
 /// `/kitchen/display` — the kitchen display's screen in the browser: a bare
@@ -1631,12 +1636,12 @@ fn kds_allowed(cookies: &tower_cookies::Cookies) -> bool {
 /// immutable `/pkg/` cache never serves an old build.
 async fn kds_page_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    cookies: tower_cookies::Cookies,
+    StaffRole(role): StaffRole,
 ) -> axum::response::Response {
     use axum::response::{Html, IntoResponse, Redirect};
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-    if !kds_allowed(&cookies) {
+    if !kds_allowed(role) {
         return Redirect::to("/kitchen/login").into_response();
     }
     let v = VERSION.get_or_init(|| {
@@ -1671,14 +1676,14 @@ init({{ module_or_path: "/pkg/kds/kds_web_bg.wasm?v={v}" }});
 /// postcard `KitchenEvent`s (board, shop panel, alert), base64 per message.
 async fn kds_feed_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    cookies: tower_cookies::Cookies,
+    StaffRole(role): StaffRole,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use axum::response::IntoResponse;
     use base64::Engine;
     use futures::StreamExt;
 
-    if !kds_allowed(&cookies) {
+    if !kds_allowed(role) {
         return axum::http::StatusCode::FORBIDDEN.into_response();
     }
     let Some(chan) = state.kitchen.as_ref() else {
@@ -1710,13 +1715,13 @@ async fn kds_feed_handler(
 /// the result), 422 + text = refused, with the reason to show.
 async fn kds_action_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    cookies: tower_cookies::Cookies,
+    StaffRole(role): StaffRole,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    if !kds_allowed(&cookies) {
+    if !kds_allowed(role) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Some(chan) = state.kitchen.as_ref() else {
@@ -1729,6 +1734,122 @@ async fn kds_action_handler(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(reason) => (StatusCode::UNPROCESSABLE_ENTITY, reason).into_response(),
     }
+}
+
+/// A kitchen device's name (`kitchen_clients.shop_slug`), as the Pis use it.
+fn valid_device_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 64
+        && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+#[derive(serde::Deserialize)]
+struct KitchenDeviceQuery {
+    slug: String,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    arch: String,
+    /// The last seq the device received; absent on its very first connect.
+    last_seen: Option<u64>,
+}
+
+/// Server ping interval on a kitchen device's WebSocket.
+const KITCHEN_WS_PING: std::time::Duration = std::time::Duration::from_secs(20);
+/// Nothing heard from the device (pong, heartbeat, ack) for this long =
+/// the connection is dead; close it so the device reconnects.
+const KITCHEN_WS_SILENCE: std::time::Duration = std::time::Duration::from_secs(70);
+
+/// `/api/kitchen/ws` — the kitchen channel for WebSocket devices (the
+/// ESP32-P4 displays, which print over USB while a printer is plugged in).
+/// Binary frames, postcard both ways: `ServerMessage` (print jobs, with their
+/// seq for the ack) to the device, `ClientMessage` (Ack / Heartbeat /
+/// PrinterPresent) back. Same rules as the SSH tunnel's clients (unacked
+/// replay after `last_seen`, then live); without `last_seen` it starts from
+/// now. Küche login like the browser display; through nginx, no tunnel.
+async fn kitchen_ws_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    StaffRole(role): StaffRole,
+    axum::extract::Query(q): axum::extract::Query<KitchenDeviceQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if !kds_allowed(role) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if !valid_device_slug(&q.slug) {
+        return (StatusCode::BAD_REQUEST, "slug").into_response();
+    }
+    let Some(chan) = state.kitchen.clone() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let shutdown = state.shutdown.clone();
+    ws.on_upgrade(move |socket| kitchen_ws_session(socket, chan, q, shutdown))
+}
+
+async fn kitchen_ws_session(
+    mut socket: axum::extract::ws::WebSocket,
+    chan: rusterando_server::kitchen::KitchenChannel,
+    q: KitchenDeviceQuery,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    use axum::extract::ws::Message;
+    use tokio::time::Instant;
+
+    let slug = q.slug;
+    let mut feed = chan
+        .print_feed(slug.clone(), q.version, q.arch, q.last_seen.map(kitchen_protocol::SeqId))
+        .await;
+    let mut ping = tokio::time::interval_at(Instant::now() + KITCHEN_WS_PING, KITCHEN_WS_PING);
+    let mut last_heard = Instant::now();
+    // Close on shutdown so this socket never blocks the graceful drain.
+    let shutdown = wait_for_shutdown(shutdown);
+    tokio::pin!(shutdown);
+
+    let reason = loop {
+        tokio::select! {
+            msg = feed.recv() => {
+                // The feed ends when it lagged: closing makes the device
+                // reconnect with its last seq and catch up from the outbox.
+                let Some(msg) = msg else { break "feed closed" };
+                let Ok(bytes) = postcard::to_allocvec(&msg) else { continue };
+                if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                    break "send failed";
+                }
+            }
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Binary(bytes))) => {
+                    last_heard = Instant::now();
+                    match postcard::from_bytes::<kitchen_protocol::ClientMessage>(&bytes) {
+                        Ok(msg) => {
+                            if let Err(e) = chan.device_message(&slug, msg).await {
+                                tracing::warn!(%slug, reason = %e, "kitchen device message refused");
+                            }
+                        }
+                        Err(e) => tracing::warn!(%slug, error = %e, "kitchen device: undecodable frame"),
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => break "closed by device",
+                Some(Err(_)) => break "read error",
+                Some(Ok(_)) => last_heard = Instant::now(),
+            },
+            _ = ping.tick() => {
+                if last_heard.elapsed() > KITCHEN_WS_SILENCE {
+                    break "device silent";
+                }
+                if socket.send(Message::Ping(Default::default())).await.is_err() {
+                    break "send failed";
+                }
+            }
+            () = &mut shutdown => {
+                let _ = socket.send(Message::Close(None)).await;
+                break "server shutdown";
+            }
+        }
+    };
+    tracing::info!(%slug, reason, "kitchen device disconnected");
 }
 
 /// Max upload size — keeps decompression bombs out and matches what a
@@ -1779,7 +1900,7 @@ async fn kitchen_debug_inject_handler(
 /// linking to.
 async fn upload_image_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
+    StaffRole(role): StaffRole,
     mut multipart: axum::extract::Multipart,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
@@ -1788,7 +1909,7 @@ async fn upload_image_handler(
 
     // Cookie gate. The leptos `require_admin` helper isn't reachable from
     // a non-server-fn route, so we read the same cookie ourselves.
-    let admin_ok = header_has_admin_session(&headers);
+    let admin_ok = is_admin(role);
     if !admin_ok {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -1892,7 +2013,7 @@ async fn pdf_cover_upload_handler(
     // tenant's upload went into rusterando.db and their own PDF showed the
     // baked-default (davids) cover.
     tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
-    headers: axum::http::HeaderMap,
+    StaffRole(role): StaffRole,
     mut multipart: axum::extract::Multipart,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
@@ -1905,7 +2026,7 @@ async fn pdf_cover_upload_handler(
         None => state.db.clone(),
     };
 
-    let admin_ok = header_has_admin_session(&headers);
+    let admin_ok = is_admin(role);
     if !admin_ok {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -2022,13 +2143,13 @@ async fn pdf_cover_upload_handler(
 /// a template change before persisting it.
 async fn pdf_test_render_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
-    headers: axum::http::HeaderMap,
+    StaffRole(role): StaffRole,
     body: String,
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let admin_ok = header_has_admin_session(&headers);
+    let admin_ok = is_admin(role);
     if !admin_ok {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -2128,23 +2249,15 @@ struct HistoryCsvParams {
 async fn history_csv_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Query(p): axum::extract::Query<HistoryCsvParams>,
-    cookies: tower_cookies::Cookies,
+    StaffRole(role): StaffRole,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
     use std::fmt::Write;
 
-    // Cookie auth gate (same as require_admin in server-fn world). Accept the
-    // modern dp_session=admin AND the legacy admin_session=ok.
-    let authed = cookies
-        .get("dp_session")
-        .map(|c| c.value() == "admin")
-        .unwrap_or(false)
-        || cookies
-            .get("admin_session")
-            .map(|c| c.value() == "ok")
-            .unwrap_or(false);
+    // Cookie auth gate (same as require_admin in server-fn world).
+    let authed = is_admin(role);
     if !authed {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -2257,7 +2370,7 @@ async fn history_csv_handler(
 async fn order_beleg_pdf_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(order_id): axum::extract::Path<String>,
-    cookies: tower_cookies::Cookies,
+    StaffRole(role): StaffRole,
     tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
@@ -2265,14 +2378,7 @@ async fn order_beleg_pdf_handler(
     use axum::response::IntoResponse;
 
     // Same admin cookie gate as history_csv_handler.
-    let authed = cookies
-        .get("dp_session")
-        .map(|c| c.value() == "admin")
-        .unwrap_or(false)
-        || cookies
-            .get("admin_session")
-            .map(|c| c.value() == "ok")
-            .unwrap_or(false);
+    let authed = is_admin(role);
     if !authed {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -2332,21 +2438,14 @@ struct BelegeParams {
 async fn order_belege_pdf_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Query(p): axum::extract::Query<BelegeParams>,
-    cookies: tower_cookies::Cookies,
+    StaffRole(role): StaffRole,
     tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let authed = cookies
-        .get("dp_session")
-        .map(|c| c.value() == "admin")
-        .unwrap_or(false)
-        || cookies
-            .get("admin_session")
-            .map(|c| c.value() == "ok")
-            .unwrap_or(false);
+    let authed = is_admin(role);
     if !authed {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -2409,21 +2508,14 @@ async fn order_belege_pdf_handler(
 async fn order_kurzliste_pdf_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Query(p): axum::extract::Query<BelegeParams>,
-    cookies: tower_cookies::Cookies,
+    StaffRole(role): StaffRole,
     tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let authed = cookies
-        .get("dp_session")
-        .map(|c| c.value() == "admin")
-        .unwrap_or(false)
-        || cookies
-            .get("admin_session")
-            .map(|c| c.value() == "ok")
-            .unwrap_or(false);
+    let authed = is_admin(role);
     if !authed {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
@@ -2959,7 +3051,7 @@ async fn menu_pdf_handler(
     // without this it always rendered the global (parent) tenant's menu — e.g.
     // flizza.localhost/menu.pdf returned rusterando's PDF.
     tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
-    headers: axum::http::HeaderMap,
+    StaffRole(role): StaffRole,
 ) -> impl axum::response::IntoResponse {
     use axum::http::header;
     use axum::http::StatusCode;
@@ -2985,7 +3077,7 @@ async fn menu_pdf_handler(
     );
     // Staged prices are an internal working state until activated — only the
     // signed-in admin gets to render them.
-    if use_next_prices && !header_has_admin_session(&headers) {
+    if use_next_prices && !is_admin(role) {
         return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
     }
     let prices_part = if use_next_prices { "-neue-preise" } else { "" };
@@ -3344,6 +3436,48 @@ async fn rate_limit_middleware(
     next.run(req).await
 }
 
+/// The staff role a request's session cookies prove at its tenant
+/// (`dp_session` + its signature `dp_auth`, see `pages::session`). `None` =
+/// not signed in, or a forged / outdated cookie. For the plain axum routes;
+/// server fns use `session::ssr::current_role`, which checks the same way.
+struct StaffRole(Option<rusterando_frontend::pages::session::Role>);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for StaffRole {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(staff_role(&parts.headers, &parts.extensions)))
+    }
+}
+
+/// [`StaffRole`] from a request's headers and extensions (the resolved
+/// tenant; without one — the apex fallback — the process env's passwords).
+fn staff_role(
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> Option<rusterando_frontend::pages::session::Role> {
+    use rusterando_frontend::pages::session::{ssr::role_from_cookie_header, TenantAuth};
+    let fallback = TenantAuth::default();
+    let auth = extensions
+        .get::<rusterando_server::tenant::Tenant>()
+        .map(|t| &t.auth)
+        .unwrap_or(&fallback);
+    let cookie = headers
+        .get_all(axum::http::header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .collect::<Vec<_>>()
+        .join("; ");
+    role_from_cookie_header(&cookie, auth)
+}
+
+fn is_admin(role: Option<rusterando_frontend::pages::session::Role>) -> bool {
+    role == Some(rusterando_frontend::pages::session::Role::Admin)
+}
+
 /// Block any SSR request to `/admin/*` for unauthenticated users.
 /// Without this, a non-logged-in visitor sees the admin shell + tile
 /// grid (just with empty / errored data inside the Suspense), which is
@@ -3356,31 +3490,11 @@ async fn rate_limit_middleware(
 ///                                   POST to an HTML redirect)
 ///   - everything outside /admin    (the public site)
 ///
-/// Auth check is the same `admin_session=ok` cookie that
-/// `require_admin()` reads server-side. Unauthenticated requests get a
+/// Auth check is the same signed admin session that
+/// `require_admin()` checks server-side. Unauthenticated requests get a
 /// 303 redirect to `/admin/login` — 303 is the right status for "your
 /// GET turned into a redirect because of policy", and works on every
 /// browser + the iOS WebView shell.
-/// True if the raw `Cookie` header carries an admin session. Accepts BOTH the
-/// modern `dp_session=admin` cookie (set by admin_login since the 365-day
-/// migration) AND the legacy `admin_session=ok` (sessions in flight from
-/// before the migration). Every non-server-fn admin gate in this file routes
-/// through this so login can't silently mismatch the route guard — the bug
-/// that redirected a freshly-logged-in admin straight back to /admin/login.
-fn header_has_admin_session(headers: &axum::http::HeaderMap) -> bool {
-    headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| {
-            s.split(';').any(|c| {
-                let c = c.trim();
-                c.eq_ignore_ascii_case("admin_session=ok")
-                    || c.eq_ignore_ascii_case("dp_session=admin")
-            })
-        })
-        .unwrap_or(false)
-}
-
 async fn admin_auth_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -3400,10 +3514,9 @@ async fn admin_auth_middleware(
         return next.run(req).await;
     }
 
-    // Cookie sniff (accepts dp_session=admin OR legacy admin_session=ok). We
-    // read the raw header here so we don't need to plumb tower_cookies into
-    // the middleware (layered above the cookie manager for the SSR catch-all).
-    if header_has_admin_session(req.headers()) {
+    // Signed admin session for this request's tenant (resolve_tenant ran
+    // before this middleware). Raw header, so no tower_cookies plumbing.
+    if is_admin(staff_role(req.headers(), req.extensions())) {
         return next.run(req).await;
     }
 

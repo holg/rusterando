@@ -239,6 +239,7 @@ impl Tenant {
         // to env, so leaving these None would work too — but populating them
         // keeps the source of truth on the tenant uniformly.
         let auth = rusterando_frontend::pages::session::TenantAuth {
+            scope: slug.clone(),
             admin_password: std::env::var("ADMIN_PASSWORD").ok(),
             kitchen_password: std::env::var("KITCHEN_PASSWORD").ok(),
             driver_password: std::env::var("DRIVER_PASSWORD").ok(),
@@ -435,6 +436,7 @@ pub async fn build_tenant(slug: &str, env_file: &str) -> anyhow::Result<Tenant> 
     // Auth secrets from THIS tenant's `.env` (parsed into `vars` above) — so
     // logins check the right tenant's password, not the process-global one.
     let auth = rusterando_frontend::pages::session::TenantAuth {
+        scope: slug.to_owned(),
         admin_password: vars.get("ADMIN_PASSWORD").cloned(),
         kitchen_password: vars.get("KITCHEN_PASSWORD").cloned(),
         driver_password: vars.get("DRIVER_PASSWORD").cloned(),

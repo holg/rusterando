@@ -228,9 +228,10 @@ pub fn DatenschutzPage() -> impl IntoView {
                         "Tage."
                     </li>
                     <li>
-                        "<code>dp_session</code> — Login-Cookie für Mitarbeiter "
-                        "(Admin/Küche/Fahrer). Lebensdauer 1 Jahr. Für "
-                        "Besteller-Kunden nicht relevant."
+                        "<code>dp_session</code>, <code>dp_auth</code> — "
+                        "Login-Cookies für Mitarbeiter (Admin/Küche/Fahrer): "
+                        "Rolle und deren fälschungssichere Signatur. "
+                        "Lebensdauer 1 Jahr. Für Besteller-Kunden nicht relevant."
                     </li>
                 </ul>
                 <p>

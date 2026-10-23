@@ -55,6 +55,10 @@ tokio = { workspace = true, optional = true }
 async-stripe = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 async-trait = { version = "0.1", optional = true }
+# Staff session signature (dp_auth cookie): HMAC-SHA256 with a server key.
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+rand = { workspace = true, optional = true }
 
 # WASM-only
 wasm-bindgen = { workspace = true, optional = true }
@@ -140,4 +144,7 @@ ssr = [
     "dep:reqwest",
     "dep:async-trait",
     "dep:rusterando-geo",
+    "dep:hmac",
+    "dep:sha2",
+    "dep:rand",
 ]

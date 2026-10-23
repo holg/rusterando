@@ -294,14 +294,18 @@ pub async fn list_admin_orders() -> Result<AdminOrders, ServerFnError> {
     // monitor's threshold. We take the FRESHEST printer (MAX last_seen_at) so a
     // stale duplicate row can't mask a working one. Computed live here so the
     // banner is right between the background monitor's ticks. Best-effort — a
-    // query error just means no banner, never a failed board.
+    // query error just means no banner, never a failed board. Printing
+    // clients only (as the monitor): a kitchen display without a printer
+    // (has_printer = 0) must not mask an offline printer.
     let printer_alert = {
-        let freshest: Option<i64> =
-            sqlx::query_scalar("SELECT MAX(last_seen_at) FROM kitchen_clients")
-                .fetch_optional(&db)
-                .await
-                .ok()
-                .flatten();
+        let freshest: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(last_seen_at) FROM kitchen_clients \
+             WHERE has_printer IS NULL OR has_printer = 1",
+        )
+        .fetch_optional(&db)
+        .await
+        .ok()
+        .flatten();
         match freshest {
             Some(last) if last > 0 => {
                 let now = chrono::Utc::now().timestamp();
