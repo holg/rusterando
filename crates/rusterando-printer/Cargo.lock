@@ -2366,7 +2366,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "kitchen-protocol"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "serde",
  "sha2",
@@ -3570,6 +3570,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "receipt-escpos"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "escpos",
+ "kitchen-protocol",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3739,7 +3748,7 @@ dependencies = [
 
 [[package]]
 name = "rusterando-printer"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3751,6 +3760,7 @@ dependencies = [
  "kitchen-protocol",
  "nusb",
  "postcard",
+ "receipt-escpos",
  "resvg 0.44.0",
  "serde",
  "serde_json",

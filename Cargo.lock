@@ -1463,6 +1463,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "escpos"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4559471b8f0f237d1599d693029d2cf14f2a7206176666c7934e599c7ccce99"
+dependencies = [
+ "encoding_rs",
+ "log",
+]
+
+[[package]]
 name = "etcetera"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2970,7 +2980,7 @@ dependencies = [
 
 [[package]]
 name = "kitchen-protocol"
-version = "2.1.0"
+version = "2.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4600,6 +4610,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "receipt-escpos"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "escpos",
+ "kitchen-protocol",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4845,6 +4864,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "futures",
+ "hmac",
  "http 1.4.2",
  "js-sys",
  "kitchen-protocol",
@@ -4855,6 +4875,7 @@ dependencies = [
  "lettre",
  "log",
  "qrcode",
+ "rand 0.8.6",
  "reactive_graph",
  "reqwest",
  "rusterando-geo",
@@ -4863,6 +4884,7 @@ dependencies = [
  "send_wrapper",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tokio",
  "tower-cookies",
@@ -5009,7 +5031,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

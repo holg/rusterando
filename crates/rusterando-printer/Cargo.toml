@@ -41,7 +41,9 @@ path = "src/main.rs"
 [dependencies]
 # Protocol crate. Relative path because this crate isn't a workspace
 # member — `{ workspace = true }` is unavailable here.
-kitchen-protocol = { path = "../kitchen-protocol", version = "2.1.0" }
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
+# The receipt → ESC/POS bytes, shared with the ESP32-P4 kitchen displays.
+receipt-escpos = { path = "../receipt-escpos", version = "0.1.0" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "signal"] }
 tokio-util = { version = "0.7", features = ["codec"] }

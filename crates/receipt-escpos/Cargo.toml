@@ -1,0 +1,21 @@
+[package]
+name = "receipt-escpos"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "A composed rusterando kitchen receipt as ESC/POS bytes"
+
+# Pure: no device I/O, no async. Shared by every printing kitchen device —
+# the Pi/STM32 printer client and the ESP32-P4 displays — so the printed
+# bytes are the same everywhere. `escpos` without its driver features is
+# encoding_rs + log only, which builds on ESP-IDF too.
+[dependencies]
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
+escpos = { version = "0.16", default-features = false, features = ["codes_2d"] }
+anyhow = { workspace = true }

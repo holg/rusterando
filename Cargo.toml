@@ -12,7 +12,8 @@ members = [
     "crates/rusterando-i18n-tui",
     "crates/rusterando-wasm-split",
     "crates/menu-import",
-    "crates/rusterando-geo"
+    "crates/rusterando-geo",
+    "crates/receipt-escpos"
 ]
 # Excluded from the workspace:
 #   src-tauri/         legacy Tauri WebView shell, archived in favour of
@@ -26,7 +27,10 @@ members = [
 #                      Kitchen display screen (Slint) for the board and its
 #                      browser mirror (WASM, scripts/build_kds_web.sh). Slint
 #                      stays out of the server's dependency graph.
-exclude = ["src-tauri", "crates/rusterando-printer", "crates/kds-ui", "crates/kds-web"]
+#   crates/kds-tab5/   Kitchen display + receipt printer firmware for the
+#                      ESP32-P4 (M5Stack Tab5): riscv32imafc-esp-espidf with
+#                      its own toolchain, built via scripts/build_kds_tab5.sh.
+exclude = ["src-tauri", "crates/rusterando-printer", "crates/kds-ui", "crates/kds-web", "crates/kds-tab5"]
 
 # Shared package metadata, inherited by every crate via `*.workspace = true`.
 # Required by crates.io (`license`, `description` per crate) — see

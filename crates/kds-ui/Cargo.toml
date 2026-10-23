@@ -13,9 +13,18 @@ publish = false
 # (feature unification): the board linuxkms + software, the browser winit +
 # femtovg (WebGL).
 
+[features]
+default = ["std"]
+# Slint's std mode: the board (linuxkms) and the browser.
+std = ["slint/std"]
+# Slint's MCU mode for microcontroller displays (the Tab5 on ESP-IDF): no
+# system fonts; build.rs pre-renders the glyphs for the scale factor in
+# KDS_UI_SCALE (e.g. 2.647 = 720/272 on the Tab5).
+mcu = ["slint/unsafe-single-threaded", "slint/libm"]
+
 [dependencies]
 kitchen-protocol = { path = "../kitchen-protocol", version = "2.1.0" }
-slint = { version = "1.18", default-features = false, features = ["std", "compat-1-18"] }
+slint = { version = "1.18", default-features = false, features = ["compat-1-18"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 # std::time::Instant / SystemTime panic on wasm32-unknown-unknown.
 web-time = "1"
@@ -26,4 +35,5 @@ tracing = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
 
 [build-dependencies]
-slint-build = "1.18"
+# sdf-fonts: the MCU build stores glyphs as signed distance fields (build.rs).
+slint-build = { version = "1.18", features = ["sdf-fonts"] }

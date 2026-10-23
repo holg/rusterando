@@ -350,6 +350,14 @@ export component KitchenWindow inherits Window {
     default-font-size: 12px;
     default-font-weight: 500;
 
+    // Never shown. With glyphs pre-rendered at build time (kds-ui feature
+    // "mcu"), Slint embeds only ASCII plus the characters written in this
+    // file; order texts need these too.
+    Text {
+        visible: false;
+        text: "äöüÄÖÜß€·×–—„“”‚‘’…→←↑↓✓✗½¼¾°ÉÈÊéèêëáàâíìîïóòôúùûñçÇ";
+    }
+
     // ----- header -----
     in property <string> clock;
     in property <bool> online;

@@ -164,6 +164,14 @@ pub enum ClientMessage {
     /// A quick control from the terminal's "Öffnungszeiten" page — the same
     /// actions as the /admin/hours buttons. Answered by a [`ShopPanel`].
     Shop(ShopAction),
+
+    // ===== WebSocket kitchen devices (2.2+) — APPEND ONLY =====
+    /// Whether a printer is attached right now. Sent by devices that print
+    /// only while a USB printer is plugged in (the ESP32-P4 displays), on
+    /// connect and on every change. The server shows it in the admin panel
+    /// and watches only printing devices for the printer-offline alarm.
+    /// Old Pis never send it: they count as printing whenever connected.
+    PrinterPresent(bool),
 }
 
 // ===== Domain types =====
