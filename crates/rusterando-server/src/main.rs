@@ -1796,14 +1796,27 @@ async fn kitchen_ws_session(
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     use axum::extract::ws::Message;
+    use kitchen_protocol::{ClientMessage, KitchenEvent, SeqId, ServerMessage};
     use tokio::time::Instant;
 
-    let slug = q.slug;
+    // Update frames go out of band (seq 0), like on the tunnel.
+    fn update_frame(event: KitchenEvent) -> Option<Message> {
+        let msg = ServerMessage { seq_id: SeqId(0), event };
+        postcard::to_allocvec(&msg).ok().map(|bytes| Message::Binary(bytes.into()))
+    }
+
+    let (slug, version, arch) = (q.slug, q.version, q.arch);
     let mut feed = chan
-        .print_feed(slug.clone(), q.version, q.arch, q.last_seen.map(kitchen_protocol::SeqId))
+        .print_feed(slug.clone(), version.clone(), arch.clone(), q.last_seen.map(SeqId))
         .await;
     let mut ping = tokio::time::interval_at(Instant::now() + KITCHEN_WS_PING, KITCHEN_WS_PING);
     let mut last_heard = Instant::now();
+    // An admin-armed update is offered once per connection: at connect, or
+    // at a later ping once it's armed.
+    let mut offered = false;
+    if let Some(offer) = chan.update_offer(&slug, &version, &arch).await.and_then(update_frame) {
+        offered = socket.send(offer).await.is_ok();
+    }
     // Close on shutdown so this socket never blocks the graceful drain.
     let shutdown = wait_for_shutdown(shutdown);
     tokio::pin!(shutdown);
@@ -1822,7 +1835,20 @@ async fn kitchen_ws_session(
             incoming = socket.recv() => match incoming {
                 Some(Ok(Message::Binary(bytes))) => {
                     last_heard = Instant::now();
-                    match postcard::from_bytes::<kitchen_protocol::ClientMessage>(&bytes) {
+                    match postcard::from_bytes::<ClientMessage>(&bytes) {
+                        Ok(ClientMessage::FetchArtifact { offset, .. }) => {
+                            match chan.artifact_chunk(&arch, offset).and_then(update_frame) {
+                                Some(chunk) => {
+                                    if socket.send(chunk).await.is_err() {
+                                        break "send failed";
+                                    }
+                                }
+                                None => tracing::warn!(%slug, offset, "update chunk unavailable"),
+                            }
+                        }
+                        Ok(ClientMessage::UpdateResult { to, ok, error, .. }) => {
+                            chan.update_result(&slug, &to, ok, &error).await;
+                        }
                         Ok(msg) => {
                             if let Err(e) = chan.device_message(&slug, msg).await {
                                 tracing::warn!(%slug, reason = %e, "kitchen device message refused");
@@ -1841,6 +1867,14 @@ async fn kitchen_ws_session(
                 }
                 if socket.send(Message::Ping(Default::default())).await.is_err() {
                     break "send failed";
+                }
+                if !offered {
+                    if let Some(offer) = chan.update_offer(&slug, &version, &arch).await.and_then(update_frame) {
+                        offered = true;
+                        if socket.send(offer).await.is_err() {
+                            break "send failed";
+                        }
+                    }
                 }
             }
             () = &mut shutdown => {

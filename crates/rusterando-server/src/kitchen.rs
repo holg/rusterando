@@ -254,6 +254,66 @@ impl KitchenChannel {
         rx
     }
 
+    /// The update offer for a WebSocket device (`/api/kitchen/ws`), as the
+    /// tunnel clients get it (`maybe_serve_update`): when an admin armed the
+    /// update for `shop_slug` and the server holds an image for `arch` that
+    /// differs from `running_version`. An already current device is
+    /// disarmed instead.
+    pub async fn update_offer(&self, shop_slug: &str, running_version: &str, arch: &str) -> Option<KitchenEvent> {
+        let armed: Option<(i64,)> =
+            sqlx::query_as("SELECT update_armed FROM kitchen_clients WHERE shop_slug = ?1")
+                .bind(shop_slug)
+                .fetch_optional(&self.db)
+                .await
+                .ok()
+                .flatten();
+        if armed.map(|(a,)| a).unwrap_or(0) == 0 {
+            return None;
+        }
+        let Some(art) = crate::printer_artifacts::store().artifact(arch) else {
+            info!(%shop_slug, %arch, "update armed but no image for this arch");
+            return None;
+        };
+        if art.version == running_version {
+            info!(%shop_slug, version = %running_version, "update armed but device already current — disarming");
+            disarm(&self.db, shop_slug).await;
+            return None;
+        }
+        info!(%shop_slug, from = %running_version, to = %art.version, size = art.size(), "offering a device update");
+        Some(KitchenEvent::UpdateOffer {
+            component: kitchen_protocol::Component::PrinterBinary,
+            target_version: art.version.clone(),
+            sha256: art.sha256,
+            size: art.size(),
+        })
+    }
+
+    /// One chunk of the staged image for `arch`, for a device's
+    /// `FetchArtifact`. `None` past the end or without an image.
+    pub fn artifact_chunk(&self, arch: &str, offset: u64) -> Option<KitchenEvent> {
+        let art = crate::printer_artifacts::store().artifact(arch)?;
+        let start = usize::try_from(offset).ok().filter(|&s| s <= art.bytes.len())?;
+        let end = (start + crate::printer_artifacts::CHUNK_BYTES).min(art.bytes.len());
+        Some(KitchenEvent::ArtifactChunk {
+            component: kitchen_protocol::Component::PrinterBinary,
+            offset,
+            bytes: art.bytes[start..end].to_vec(),
+            last: end >= art.bytes.len(),
+        })
+    }
+
+    /// A device's update outcome: shown on the admin page, and disarmed
+    /// either way (a failing update must not be re-offered in a loop).
+    pub async fn update_result(&self, shop_slug: &str, to: &str, ok: bool, error: &str) {
+        record_update_result(&self.db, shop_slug, to, ok, error).await;
+        if ok {
+            info!(%shop_slug, %to, "device update installed — it restarts on the new image");
+        } else {
+            warn!(%shop_slug, %to, %error, "device update failed — it keeps its image");
+        }
+        disarm(&self.db, shop_slug).await;
+    }
+
     /// A WebSocket kitchen device's message (`/api/kitchen/ws`): ack,
     /// heartbeat or printer presence, handled like the SSH-tunnel clients'.
     pub async fn device_message(&self, shop_slug: &str, msg: ClientMessage) -> Result<(), String> {
