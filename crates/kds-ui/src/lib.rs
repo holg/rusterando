@@ -66,11 +66,25 @@ pub struct Outcome {
     pub flash: Option<(String, String)>,
 }
 
+impl Core {
+    /// Unix seconds now, by the server's clock (ours until the first
+    /// snapshot).
+    pub fn now(&self) -> i64 {
+        match self.server_clock {
+            Some((at_server, at)) => at_server + at.elapsed().as_secs() as i64,
+            None => local_now(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Core {
     pub board: Option<BoardSnapshot>,
-    /// Server clock minus ours (seconds), from the last snapshot.
-    pub skew: i64,
+    /// The server's clock at the last snapshot, and when (monotonic) it
+    /// arrived. "Now" counts on from there, so a jump of our own clock —
+    /// the Tab5 sets its clock by SNTP only after the first snapshot — can't
+    /// skew waiting times (that showed "seit 29880964 min" = since 1970).
+    pub server_clock: Option<(i64, Instant)>,
     pub online: bool,
     /// Order id of the open detail view.
     pub detail: Option<String>,
@@ -334,7 +348,7 @@ pub fn apply(w: &KitchenWindow, ev: Event, saver_shown: bool) -> Outcome {
             c.shop = Some(panel);
         }
         Event::Board(board) => {
-            c.skew = board.server_now_unix - local_now();
+            c.server_clock = Some((board.server_now_unix, Instant::now()));
             let arrived = board
                 .orders
                 .iter()
@@ -448,7 +462,7 @@ pub fn render(w: &KitchenWindow) {
 }
 
 fn render_core(w: &KitchenWindow, c: &Core) {
-    let now = local_now() + c.skew;
+    let now = c.now();
 
     w.set_clock(Local::now().format("%H:%M").to_string().into());
     w.set_online(c.online);
