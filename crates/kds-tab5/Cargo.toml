@@ -42,8 +42,10 @@ kds-ui = { path = "../kds-ui", default-features = false, features = ["mcu"] }
 # the browser mirror.
 kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
 # Receipt → ESC/POS bytes, the same code as the board's printer client.
-receipt-escpos = { path = "../receipt-escpos", version = "0.1.0" }
+receipt-escpos = { path = "../receipt-escpos", version = "0.2.0", features = ["svg"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+# Update images are checked against the server's SHA-256 before booting them.
+sha2 = "0.10"
 base64 = "0.22"
 
 [build-dependencies]

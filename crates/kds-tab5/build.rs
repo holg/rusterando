@@ -9,4 +9,5 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KITCHEN_PASSWORD");
     println!("cargo:rerun-if-env-changed=SHOP_URL");
     println!("cargo:rerun-if-env-changed=KITCHEN_SLUG");
+    println!("cargo:rerun-if-env-changed=KDS_VERSION");
 }

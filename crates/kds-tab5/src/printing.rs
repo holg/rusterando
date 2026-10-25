@@ -15,21 +15,24 @@
 //! esp-idf-svc wrapper doesn't say where a frame ends, and a receipt with
 //! logos spans several TLS records. Its events come here through a channel.
 
+use std::collections::HashMap;
 use std::ffi::{c_void, CString};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, SyncSender};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Result};
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use esp_idf_svc::sys::{self, esp};
+use kitchen_protocol::bitmap::Bitmap;
 use kitchen_protocol::receipt::{self, ComposedSvg, RasterProvider, RasterSlot, ReceiptConfig, ReceiptProgram};
 use kitchen_protocol::{
-    ClientMessage, Customer, KitchenEvent, LineItem, OrderChannel, OrderForKitchen, OrderId, PaymentStatus,
-    ServerMessage,
+    ClientMessage, Component, Customer, KitchenEvent, LineItem, OrderChannel, OrderForKitchen, OrderId,
+    PaymentStatus, ServerMessage,
 };
 
 use crate::feed::{self, Session};
+use crate::ota;
 use crate::ui::UiMsg;
 use crate::usb_printer::UsbPrinter;
 
@@ -50,6 +53,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_FRAME: usize = 512 * 1024;
 /// A failed print is tried this often while the printer stays plugged in.
 const PRINT_TRIES: u32 = 3;
+/// Rendered logos kept (by content hash): a handful of channel/payment
+/// variants, the same on every receipt.
+const LOGO_CACHE: usize = 16;
+/// The logo renderer's stack (measured: resvg peaks at about 80 KB).
+const RENDER_STACK: usize = 128 * 1024;
 const KEY_SEQ: &str = "kitchen_seq";
 
 /// What the Start page shows about printing.
@@ -90,6 +98,7 @@ pub fn start(
 }
 
 fn run(printer: UsbPrinter, session: Session, nvs: EspDefaultNvsPartition, ui: Sender<UiMsg>, status: SharedStatus) {
+    warm_up_logos();
     let store = EspNvs::new(nvs, feed::NVS_NAMESPACE, true)
         .map_err(|e| log::warn!("printing: NVS: {e}"))
         .ok();
@@ -99,6 +108,7 @@ fn run(printer: UsbPrinter, session: Session, nvs: EspDefaultNvsPartition, ui: S
         status,
         last_seen: store.as_ref().and_then(|s| s.get_u64(KEY_SEQ).ok().flatten()),
         store,
+        download: None,
     };
     let base = feed::SHOP_URL.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
     loop {
@@ -109,7 +119,7 @@ fn run(printer: UsbPrinter, session: Session, nvs: EspDefaultNvsPartition, ui: S
         };
         let mut url = format!(
             "{base}/api/kitchen/ws?slug={SLUG}&version={}&arch=esp32p4",
-            env!("CARGO_PKG_VERSION")
+            ota::VERSION
         );
         if let Some(seq) = channel.last_seen {
             url.push_str(&format!("&last_seen={seq}"));
@@ -140,6 +150,8 @@ struct Channel {
     /// The newest seq handled (printed, or skipped without a printer).
     last_seen: Option<u64>,
     store: Option<EspNvs<NvsDefault>>,
+    /// An update image being received (see ota.rs).
+    download: Option<ota::Download>,
 }
 
 impl Channel {
@@ -155,6 +167,8 @@ impl Channel {
             match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(WsEvent::Connected) => {
                     log::info!("printing: connected as '{SLUG}', last seq {:?}", self.last_seen);
+                    // Wi-Fi, TLS, login and server work: a fresh update stays.
+                    ota::confirm();
                     connected = true;
                     beat = Instant::now();
                     update(&self.status, |s| s.online = true);
@@ -190,6 +204,18 @@ impl Channel {
                 return;
             }
         };
+        // Update frames are out of band (seq 0), never deduplicated.
+        match &msg.event {
+            KitchenEvent::UpdateOffer { component, target_version, sha256, size } => {
+                self.update_offer(conn, *component, target_version.clone(), *sha256, *size);
+                return;
+            }
+            KitchenEvent::ArtifactChunk { component, offset, bytes, last } => {
+                self.update_chunk(conn, *component, *offset, bytes, *last);
+                return;
+            }
+            _ => {}
+        }
         let seq = msg.seq_id.0;
         if self.last_seen.is_some_and(|last| seq <= last) {
             log::info!("printing: seq {seq} already handled");
@@ -227,6 +253,79 @@ impl Channel {
         }
     }
 
+    /// The server offers an image (an admin armed the update): start
+    /// fetching it. A new offer restarts an unfinished download.
+    fn update_offer(&mut self, conn: &Connection, component: Component, target: String, sha256: [u8; 32], size: u64) {
+        self.download = None;
+        let started = ota::Download::begin(target.clone(), size, sha256);
+        match started {
+            Ok(download) => {
+                let _ = self.ui.send(UiMsg::Info(format!("Update auf {target} wird geladen …")));
+                self.download = Some(download);
+                if let Err(e) = conn.send(&ClientMessage::FetchArtifact { component, offset: 0 }) {
+                    log::warn!("ota: request failed: {e:#}");
+                    self.download = None;
+                }
+            }
+            Err(e) => {
+                log::warn!("ota: {target} refused: {e:#}");
+                self.update_result(conn, component, &target, Err(e));
+            }
+        }
+    }
+
+    /// One chunk of the image: store it, ask for the next, or finish.
+    fn update_chunk(&mut self, conn: &Connection, component: Component, offset: u64, bytes: &[u8], last: bool) {
+        let Some(download) = self.download.as_mut() else {
+            log::warn!("ota: chunk without an update in progress");
+            return;
+        };
+        let target = download.target.clone();
+        let outcome = match download.write(offset, bytes) {
+            Ok(false) if last => Err(anyhow!("image ended early at {} B", download.offset())),
+            Ok(false) => {
+                let next = download.offset();
+                if let Err(e) = conn.send(&ClientMessage::FetchArtifact { component, offset: next }) {
+                    log::warn!("ota: request failed: {e:#}");
+                    self.download = None;
+                }
+                return;
+            }
+            Ok(true) => self.download.take().map_or_else(|| Err(anyhow!("no download")), ota::Download::finish),
+            Err(e) => Err(e),
+        };
+        self.download = None;
+        let installed = outcome.is_ok();
+        self.update_result(conn, component, &target, outcome);
+        if installed {
+            let _ = self.ui.send(UiMsg::Info(format!("Update {target} installiert — Neustart")));
+            // Time for the result to go out and the notice to show.
+            std::thread::sleep(Duration::from_secs(3));
+            // SAFETY: plain restart into the new image.
+            unsafe { sys::esp_restart() };
+        }
+    }
+
+    fn update_result(&mut self, conn: &Connection, component: Component, target: &str, outcome: Result<()>) {
+        let (ok, error) = match outcome {
+            Ok(()) => (true, String::new()),
+            Err(e) => {
+                let _ = self.ui.send(UiMsg::Notice(format!("Update fehlgeschlagen: {e:#}")));
+                (false, format!("{e:#}"))
+            }
+        };
+        let result = ClientMessage::UpdateResult {
+            component,
+            from: ota::VERSION.to_string(),
+            to: target.to_string(),
+            ok,
+            error,
+        };
+        if let Err(e) = conn.send(&result) {
+            log::warn!("ota: result not sent: {e:#}");
+        }
+    }
+
     fn remember(&mut self, seq: u64) {
         self.last_seen = Some(seq);
         if let Some(store) = &self.store {
@@ -238,10 +337,9 @@ impl Channel {
 }
 
 /// Print a receipt; a failure is tried again while the printer stays
-/// plugged in. Logos are left out for now (the text banners still carry
-/// channel and payment).
+/// plugged in.
 fn print_program(printer: &UsbPrinter, program: &ReceiptProgram) -> Result<()> {
-    let bytes = receipt_escpos::render(program, &mut |_, _, _| None)?;
+    let bytes = receipt_escpos::render(program, &mut logo)?;
     let mut tries = 1;
     loop {
         match printer.print(bytes.clone()) {
@@ -252,6 +350,130 @@ fn print_program(printer: &UsbPrinter, program: &ReceiptProgram) -> Result<()> {
                 std::thread::sleep(Duration::from_secs(3));
             }
             Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Render a small logo with brand text once at start: loads the font for
+/// the first real receipt and shows in the log that the renderer works.
+fn warm_up_logos() {
+    const SAMPLE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="40"><rect width="200" height="40" fill="white"/><text x="10" y="30" font-family="Poppins" font-size="28">Testdruck</text></svg>"#;
+    let started = Instant::now();
+    match rasterize(SAMPLE, 336) {
+        Ok(bitmap) => {
+            let ink = bitmap.bytes.iter().filter(|&&b| b != 0).count();
+            log::info!(
+                "printing: logo renderer ready ({}×{}, {} ink bytes, {} ms)",
+                bitmap.width,
+                bitmap.height,
+                ink,
+                started.elapsed().as_millis()
+            );
+        }
+        Err(e) => log::warn!("printing: logo renderer: {e:#}"),
+    }
+}
+
+/// A logo render job for the renderer thread.
+struct RenderJob {
+    svg: Vec<u8>,
+    width: u16,
+    reply: SyncSender<Result<Bitmap>>,
+}
+
+/// Render an SVG logo on the renderer thread. resvg needs about 80 KB of
+/// stack; that must not come out of the internal RAM (TLS's SHA engine
+/// needs it — a big internal stack broke every handshake), so the renderer
+/// runs on its own thread with its stack in PSRAM. That thread never touches
+/// flash: a task with a PSRAM stack must not run while the cache is off.
+fn rasterize(svg: &[u8], width: u16) -> Result<Bitmap> {
+    static RENDERER: OnceLock<Option<Mutex<Sender<RenderJob>>>> = OnceLock::new();
+    let renderer = RENDERER
+        .get_or_init(|| match spawn_renderer() {
+            Ok(jobs) => Some(Mutex::new(jobs)),
+            Err(e) => {
+                log::warn!("printing: no logo renderer: {e:#}");
+                None
+            }
+        })
+        .as_ref()
+        .ok_or_else(|| anyhow!("no logo renderer"))?;
+    let (reply, result) = mpsc::sync_channel(1);
+    renderer
+        .lock()
+        .map_err(|_| anyhow!("logo renderer lock"))?
+        .send(RenderJob { svg: svg.to_vec(), width, reply })
+        .map_err(|_| anyhow!("logo renderer gone"))?;
+    result.recv().map_err(|_| anyhow!("logo renderer gone"))?
+}
+
+fn spawn_renderer() -> Result<Sender<RenderJob>> {
+    let (jobs, rx) = mpsc::channel::<RenderJob>();
+    // Threads created by this thread get their stack from PSRAM — only this
+    // one: the default is restored right after.
+    // SAFETY: plain config structs; the pthread layer copies them.
+    unsafe {
+        let mut cfg = sys::esp_pthread_get_default_config();
+        cfg.stack_size = RENDER_STACK;
+        cfg.stack_alloc_caps = sys::MALLOC_CAP_SPIRAM | sys::MALLOC_CAP_8BIT;
+        cfg.inherit_cfg = false;
+        esp!(sys::esp_pthread_set_cfg(&cfg))?;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("logos".into())
+        .stack_size(RENDER_STACK)
+        .spawn(move || {
+            let mut first = true;
+            for job in rx {
+                let _ = job.reply.send(receipt_escpos::svg::rasterize(&job.svg, job.width));
+                if std::mem::take(&mut first) {
+                    // SAFETY: plain query about this task.
+                    let free = unsafe { sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) };
+                    log::info!("printing: logo renderer stack (PSRAM): {free} of {RENDER_STACK} bytes never used");
+                }
+            }
+        });
+    // SAFETY: as above.
+    unsafe {
+        let default = sys::esp_pthread_get_default_config();
+        let _ = sys::esp_pthread_set_cfg(&default);
+    }
+    spawned?;
+    Ok(jobs)
+}
+
+/// A receipt logo as a 1-bit raster: rendered from the server's SVG once,
+/// then from the cache. `None` leaves it out (the text banners still carry
+/// channel and payment).
+fn logo(hash: &[u8; 32], target_width: u16, svg: &[u8]) -> Option<Bitmap> {
+    static CACHE: Mutex<Option<HashMap<[u8; 32], Bitmap>>> = Mutex::new(None);
+    let mut cache = CACHE.lock().ok()?;
+    let cache = cache.get_or_insert_with(HashMap::new);
+    if let Some(bitmap) = cache.get(hash) {
+        return Some(bitmap.clone());
+    }
+    if svg.is_empty() {
+        // A reference to a logo we were never sent.
+        return None;
+    }
+    let started = Instant::now();
+    match rasterize(svg, target_width) {
+        Ok(bitmap) => {
+            log::info!(
+                "printing: logo {}×{} rendered in {} ms",
+                bitmap.width,
+                bitmap.height,
+                started.elapsed().as_millis()
+            );
+            if cache.len() >= LOGO_CACHE {
+                cache.clear();
+            }
+            cache.insert(*hash, bitmap.clone());
+            Some(bitmap)
+        }
+        Err(e) => {
+            log::warn!("printing: logo left out: {e:#}");
+            None
         }
     }
 }

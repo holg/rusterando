@@ -99,8 +99,8 @@ impl kds_ui::Host for Tab5Host {
         // No screensaver on the Tab5.
         w.set_has_saver(false);
         let mut status = self.status.lock().map(|s| s.clone()).unwrap_or_default();
-        if let Some(b) = self.battery.lock().ok().and_then(|b| *b) {
-            status = format!("{} · {status}", b.describe());
+        if let Some(battery) = self.battery.lock().ok().and_then(|b| *b).and_then(|b| b.describe()) {
+            status = format!("{battery} · {status}");
         }
         let info = match &self.crash {
             Some(crash) => format!("{crash} · {status}"),

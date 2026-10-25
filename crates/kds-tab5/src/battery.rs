@@ -63,8 +63,13 @@ impl BatteryStatus {
         self.milliamps < -IDLE_MA && self.millivolts >= PLAUSIBLE_MV
     }
 
-    /// For the Start page: "Akku 78 % · lädt (+640 mA)".
-    pub fn describe(&self) -> String {
+    /// For the Start page: "Akku 72 % · 7.83 V · lädt (+740 mA)"; `None`
+    /// without a pack (the Tab5 without battery, or a pack cut off by its
+    /// protection), so the line doesn't claim an empty battery.
+    pub fn describe(&self) -> Option<String> {
+        if self.millivolts < PLAUSIBLE_MV {
+            return None;
+        }
         let state = if self.charging() {
             format!(" · lädt (+{} mA)", self.milliamps)
         } else if self.milliamps < -IDLE_MA {
@@ -72,7 +77,8 @@ impl BatteryStatus {
         } else {
             String::new()
         };
-        format!("Akku {} %{state}", self.percent)
+        let volts = self.millivolts as f32 / 1000.0;
+        Some(format!("Akku {} % · {volts:.2} V{state}", self.percent))
     }
 }
 

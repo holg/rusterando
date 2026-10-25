@@ -1,5 +1,11 @@
-# Tab5 (16 MB flash). One app for now; OTA slots come with the update path.
+# Tab5 (16 MB flash): two app slots for updates over the network (the
+# bootloader rolls back to the other slot if a new image doesn't confirm
+# itself), the rest reserved for assets. nvs stays where it was, so Wi-Fi,
+# login and the last receipt number survive the change of layout.
 # Name,   Type, SubType, Offset,   Size
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  0x800000,
+otadata,  data, ota,     0x10000,  0x2000,
+ota_0,    app,  ota_0,   0x20000,  0x700000,
+ota_1,    app,  ota_1,   0x720000, 0x700000,
+assets,   data, undefined, 0xE20000, 0x1E0000,

@@ -12,10 +12,11 @@
 //! Password and shop URL are compiled in from tmp/tab5-wifi.env
 //! (`KITCHEN_PASSWORD`, `SHOP_URL`).
 
+use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
@@ -38,6 +39,10 @@ pub const SHOP_URL: &str = match option_env!("SHOP_URL") {
 const RETRY: Duration = Duration::from_secs(5);
 /// After a refused login: don't hammer the server.
 const RETRY_LOGIN: Duration = Duration::from_secs(60);
+/// Board taps made without a connection are sent again this often…
+const RETRY_TAP: Duration = Duration::from_secs(5);
+/// …until they're this old; then the kitchen has moved on.
+const TAP_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// The Küche session (the `Cookie` header value), shared by the feed, the
 /// action sender and the print channel.
@@ -301,10 +306,29 @@ fn read_feed(
     }
 }
 
+/// Before SNTP has answered the clock reads 1970 (header clock, pre-order
+/// times): take the server's from the board snapshot meanwhile. SNTP keeps
+/// running and corrects it to the second.
+fn adopt_server_clock(server_now: i64) {
+    const UNSET_BEFORE: i64 = 1_700_000_000; // 2023: the clock was never set
+    // SAFETY: time() and settimeofday() with plain values.
+    unsafe {
+        if (sys::time(core::ptr::null_mut()) as i64) < UNSET_BEFORE && server_now > UNSET_BEFORE {
+            let tv = sys::timeval { tv_sec: server_now as _, tv_usec: 0 };
+            if sys::settimeofday(&tv, core::ptr::null()) == 0 {
+                log::info!("feed: clock set from the server (SNTP not answered yet)");
+            }
+        }
+    }
+}
+
 fn decode(data: &str) -> Option<kds_ui::Event> {
     let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
     match postcard::from_bytes::<KitchenEvent>(&bytes) {
-        Ok(KitchenEvent::Board(b)) => Some(kds_ui::Event::Board(b)),
+        Ok(KitchenEvent::Board(b)) => {
+            adopt_server_clock(b.server_now_unix);
+            Some(kds_ui::Event::Board(b))
+        }
         Ok(KitchenEvent::Shop(p)) => Some(kds_ui::Event::Shop(p)),
         Ok(KitchenEvent::Alert { title, text }) => Some(kds_ui::Event::Alert { title, text }),
         Ok(_) => None,
@@ -315,23 +339,91 @@ fn decode(data: &str) -> Option<kds_ui::Event> {
     }
 }
 
+/// Send the screen's taps. Board taps ("fertig", …) made without a
+/// connection wait in a queue and go out, in order, once the server is
+/// reachable again: the server checks each against the order's current
+/// status, so a late one can't undo a newer change. Shop switches (pause,
+/// hours) are not queued — a pause arriving minutes late would surprise.
 fn action_loop(actions: Receiver<ClientMessage>, ui: Sender<UiMsg>, session: Session) {
-    for msg in actions {
-        let notice = match session.lock().ok().and_then(|s| s.clone()) {
-            None => Some("Keine Verbindung zum Server".to_string()),
-            Some(cookie) => match send_action(&cookie, &msg) {
-                Ok(None) => None,
-                Ok(Some(reason)) => Some(reason),
-                Err(e) => {
-                    log::warn!("action: {e:#}");
-                    Some("Keine Verbindung zum Server".to_string())
+    let mut queue: VecDeque<(ClientMessage, Instant)> = VecDeque::new();
+    let mut announced = false;
+    loop {
+        let wait = if queue.is_empty() { Duration::from_secs(3600) } else { RETRY_TAP };
+        match actions.recv_timeout(wait) {
+            Ok(msg) if matches!(msg, ClientMessage::BoardAdvance { .. }) => {
+                queue.push_back((msg, Instant::now()));
+            }
+            Ok(msg) => {
+                let notice = match deliver(&session, &msg) {
+                    Ok(None) => None,
+                    Ok(Some(reason)) => Some(reason),
+                    Err(e) => {
+                        log::warn!("action: {e:#}");
+                        Some("Keine Verbindung zum Server".to_string())
+                    }
+                };
+                if let Some(text) = notice {
+                    let _ = ui.send(UiMsg::Notice(text));
                 }
-            },
-        };
-        if let Some(text) = notice {
-            let _ = ui.send(UiMsg::Notice(text));
+                continue;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+
+        // Flush the queue in order; stop at the first network failure.
+        let mut sent_late = 0;
+        while let Some((msg, at)) = queue.front() {
+            if at.elapsed() > TAP_MAX_AGE {
+                log::warn!("action: dropped a tap older than {} min", TAP_MAX_AGE.as_secs() / 60);
+                queue.pop_front();
+                let _ = ui.send(UiMsg::Notice("Offline-Änderung verworfen (zu alt)".into()));
+                continue;
+            }
+            match deliver(&session, msg) {
+                Ok(outcome) => {
+                    queue.pop_front();
+                    if announced {
+                        sent_late += 1;
+                    }
+                    if let Some(reason) = outcome {
+                        let _ = ui.send(UiMsg::Notice(reason));
+                    }
+                }
+                Err(e) => {
+                    log::warn!("action: {e:#} ({} waiting)", queue.len());
+                    if !announced {
+                        announced = true;
+                        let _ = ui.send(UiMsg::Notice(
+                            "Keine Verbindung — wird gesendet, sobald der Server erreichbar ist".into(),
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+        if queue.is_empty() && announced {
+            announced = false;
+            if sent_late > 0 {
+                let what = if sent_late == 1 {
+                    "1 Änderung".to_string()
+                } else {
+                    format!("{sent_late} Änderungen")
+                };
+                let _ = ui.send(UiMsg::Info(format!("Wieder verbunden: {what} nachgesendet")));
+            }
         }
     }
+}
+
+/// One tap to the server; `Err` = not reachable (no session yet counts too).
+fn deliver(session: &Session, msg: &ClientMessage) -> Result<Option<String>> {
+    let cookie = session
+        .lock()
+        .ok()
+        .and_then(|s| s.clone())
+        .ok_or_else(|| anyhow!("no session"))?;
+    send_action(&cookie, msg)
 }
 
 /// `Ok(None)`: done. `Ok(Some(text))`: refused, with the server's reason.

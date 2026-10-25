@@ -14,6 +14,7 @@ mod display;
 mod feed;
 mod gong;
 mod imu;
+mod ota;
 mod printing;
 mod ui;
 mod usb_printer;
@@ -57,6 +58,8 @@ fn main() -> Result<()> {
     sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
     log_chip_info();
+    // A fresh update has to confirm itself (print channel), see ota.rs.
+    ota::init();
     std::env::set_var("TZ", TZ);
     // SAFETY: re-reads TZ for localtime().
     unsafe { sys::tzset() };
@@ -163,7 +166,9 @@ fn network(
     let link = wifi::describe(&wifi);
     set(link.clone());
 
-    // Kept alive for the life of the thread; it re-syncs periodically.
+    // Kept alive for the life of the thread; it re-syncs periodically. The
+    // feed doesn't wait for it: until it answers, the first board snapshot
+    // sets the clock from the server's (feed.rs).
     let _sntp = EspSntp::new_default().map_err(|e| log::warn!("SNTP: {e}")).ok();
     // The feed's login is the server check.
     online();
@@ -199,7 +204,7 @@ fn log_chip_info() {
     };
     log::info!(
         "kds-tab5 {}: ESP32-P4 rev v{}.{}, {} cores, flash {} MB, PSRAM {} MB, internal RAM {} KB, ESP-IDF {}",
-        env!("CARGO_PKG_VERSION"),
+        ota::VERSION,
         chip.revision / 100,
         chip.revision % 100,
         chip.cores,

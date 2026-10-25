@@ -57,3 +57,8 @@ CONFIG_LWIP_DHCP_DOES_NOT_CHECK_OFFERED_IP=y
 # checks off it returns the error and board.rs retries (the Rust side checks
 # every result anyway).
 CONFIG_BSP_ERROR_CHECK=n
+
+# Updates over the network (ota.rs): a new image runs "pending" until it
+# confirms itself (print channel connected); a reset before that boots the
+# previous image again.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
