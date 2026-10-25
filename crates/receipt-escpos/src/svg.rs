@@ -1,17 +1,19 @@
-//! Rasterize a server-composed logo SVG to a 1-bit [`Bitmap`] on the Pi.
+//! Rasterize a server-composed logo SVG to a 1-bit [`Bitmap`] (feature
+//! `svg`), for [`crate::render`]'s logo resolver.
 //!
-//! The server ships the header logo as SVG (vector, editable); the Pi
-//! renders it once at the requested dot-width, Floyd-Steinberg dithers it
-//! to 1-bit (matching the look of the old offline ImageMagick pipeline),
-//! and caches the result by content hash (see `raster_cache`). All
-//! pure-Rust (resvg/usvg/tiny-skia + a bundled Poppins font) so the
-//! aarch64 cross-build stays C-free.
+//! The server ships the header logo as SVG (vector, editable); the device
+//! renders it at the requested dot-width and Floyd-Steinberg dithers it to
+//! 1-bit (matching the look of the old offline ImageMagick pipeline);
+//! devices cache the result by content hash. All pure Rust
+//! (resvg/usvg/tiny-skia + a bundled Poppins font): builds for the
+//! aarch64/armv7 printer client and for ESP-IDF alike.
+
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use kitchen_protocol::bitmap::Bitmap;
 use resvg::tiny_skia;
 use resvg::usvg;
-use std::sync::OnceLock;
 
 /// Bundled font(s) for `<text>` in the brand-mark SVGs (Poppins Bold). The
 /// receipt must render identically regardless of what's installed on the
@@ -144,7 +146,7 @@ mod real_asset_tests {
     /// and assert it produced ink in both halves. Skips if assets absent.
     #[test]
     fn real_header_svg_renders_with_text() {
-        let dir = std::path::Path::new("../../target/site/img");
+        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/site/img"));
         let brand = dir.join("rusterando-printer-rando-brand-mark-paid.svg");
         let chan = dir.join("rusterando-printer-rando-delivery-e-car.svg");
         if !brand.exists() || !chan.exists() {

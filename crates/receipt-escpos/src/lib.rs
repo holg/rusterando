@@ -7,6 +7,9 @@
 //! implementation for every printing kitchen device (the Pi/STM32 printer
 //! client, the ESP32-P4 displays), so the bytes are the same everywhere.
 
+#[cfg(feature = "svg")]
+pub mod svg;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 

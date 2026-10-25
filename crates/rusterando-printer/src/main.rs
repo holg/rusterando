@@ -6,7 +6,6 @@ mod kds;
 mod link;
 mod printer;
 mod raster_cache;
-mod svg_raster;
 mod test_print;
 mod update;
 mod usb;

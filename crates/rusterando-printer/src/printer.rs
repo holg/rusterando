@@ -121,7 +121,7 @@ fn resolve_logo(
         tracing::warn!("logo cache miss with no SVG bytes — skipping (will re-fetch on reconnect)");
         return None;
     }
-    match crate::svg_raster::rasterize(svg, target_width) {
+    match receipt_escpos::svg::rasterize(svg, target_width) {
         Ok(bm) => {
             cache.put(*hash, &bm);
             Some(bm)

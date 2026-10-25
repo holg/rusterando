@@ -1,6 +1,6 @@
 [package]
 name = "receipt-escpos"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -19,3 +19,11 @@ description = "A composed rusterando kitchen receipt as ESC/POS bytes"
 kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
 escpos = { version = "0.16", default-features = false, features = ["codes_2d"] }
 anyhow = { workspace = true }
+# Logos (feature `svg`): the server ships them as SVG; render + dither to
+# 1-bit on the device. Pure Rust; the brand text uses the bundled Poppins
+# (assets/fonts, OFL), never system fonts, so every device prints the same.
+resvg = { version = "0.44", default-features = false, features = ["text", "raster-images"], optional = true }
+
+[features]
+default = []
+svg = ["dep:resvg"]
