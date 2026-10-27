@@ -33,6 +33,14 @@ pub struct PiStatus {
     /// Kitchen displays (ESP32-P4) report whether a USB printer is plugged
     /// in; `None` = a tunnel Pi, which always prints.
     pub has_printer: Option<bool>,
+    /// Seconds since the last receipt was confirmed (`None` = none yet).
+    /// A client confirms a receipt only once it is printed, so this is the
+    /// printer's sign of life for the tunnel clients, which can't report a
+    /// plugged-in printer. Shop-wide: one printing client per shop.
+    pub last_print_secs: Option<i64>,
+    /// Receipts not confirmed yet, and the age of the oldest one.
+    pub waiting: i64,
+    pub oldest_waiting_secs: i64,
 }
 
 /// SSR-only DB row shape for `kitchen_clients`. Kept separate from the
@@ -69,6 +77,18 @@ pub async fn list_pi_status() -> Result<Vec<PiStatus>, ServerFnError> {
     .map_err(|e| ServerFnError::new(format!("load kitchen_clients: {e}")))?;
 
     let now = chrono::Utc::now().timestamp();
+
+    let (last_print_at, waiting, oldest_waiting_at): (Option<i64>, i64, Option<i64>) =
+        sqlx::query_as(
+            "SELECT MAX(acked_at), COUNT(*) - COUNT(acked_at), \
+                    MIN(CASE WHEN acked_at IS NULL THEN created_at END) \
+             FROM kitchen_outbox",
+        )
+        .fetch_one(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("load kitchen_outbox: {e}")))?;
+    let last_print_secs = last_print_at.map(|t| (now - t).max(0));
+    let oldest_waiting_secs = oldest_waiting_at.map_or(0, |t| (now - t).max(0));
 
     // The artifact store lives in the server crate; the frontend (SSR) can't
     // depend on it directly. Read the target version straight from the same
@@ -112,6 +132,9 @@ pub async fn list_pi_status() -> Result<Vec<PiStatus>, ServerFnError> {
                 last_update_error: r.last_update_error,
                 last_update_at: r.last_update_at,
                 has_printer: r.has_printer.map(|v| v != 0),
+                last_print_secs,
+                waiting,
+                oldest_waiting_secs,
             }
             // (last_update_at is surfaced in PiStatus for future use.)
         })
@@ -262,6 +285,39 @@ fn device_model(arch: &str) -> Option<&'static str> {
     }
 }
 
+/// The card's printer line. A display without printer just says so; a
+/// printing client shows its last printed receipt, or a warning once a
+/// receipt has waited a minute without being printed.
+fn printer_line(p: &PiStatus) -> (&'static str, String) {
+    let lead = match p.has_printer {
+        Some(false) => return ("muted", "kein Drucker — nur Anzeige".to_string()),
+        Some(true) => "USB-Drucker angeschlossen — ",
+        None => "",
+    };
+    if p.waiting > 0 && p.oldest_waiting_secs >= 60 {
+        let n = if p.waiting == 1 { "1 Bon wartet".to_string() } else { format!("{} Bons warten", p.waiting) };
+        return (
+            "error",
+            format!("⚠ {n} seit {} — Drucker prüfen (Strom, Kabel, Papier)", ago(p.oldest_waiting_secs)),
+        );
+    }
+    let last = match p.last_print_secs {
+        Some(s) => format!("letzter Bon gedruckt {}", ago(s)),
+        None => "noch kein Bon gedruckt".to_string(),
+    };
+    ("ok", format!("{lead}{last}"))
+}
+
+/// "vor 40 s", "vor 12 min", "vor 19 h", "vor 3 Tagen".
+fn ago(secs: i64) -> String {
+    match secs {
+        s if s < 90 => format!("vor {s} s"),
+        s if s < 90 * 60 => format!("vor {} min", s / 60),
+        s if s < 48 * 3600 => format!("vor {} h", s / 3600),
+        s => format!("vor {} Tagen", s / 86400),
+    }
+}
+
 #[component]
 fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
     // Connection freshness: green <90s, amber <10min, red otherwise.
@@ -306,14 +362,10 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
                 <dd class=ver_cls>{ver_label}</dd>
                 <dt>"Arch"</dt>
                 <dd class="muted">{p.arch.clone()}</dd>
-                {p.has_printer.map(|present| {
-                    let (cls, txt) = if present {
-                        ("ok", "USB-Drucker angeschlossen — druckt")
-                    } else {
-                        ("muted", "kein Drucker — nur Anzeige")
-                    };
+                {
+                    let (cls, txt) = printer_line(&p);
                     view! { <><dt>"Drucker"</dt><dd class=cls>{txt}</dd></> }
-                })}
+                }
                 {(!p.last_update_to.is_empty()).then(|| {
                     let cls = if p.last_update_ok { "ok" } else { "error" };
                     let txt = if p.last_update_ok {
