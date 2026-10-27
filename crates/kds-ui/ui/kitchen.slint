@@ -409,6 +409,9 @@ export component KitchenWindow inherits Window {
     // right, like turning pages), or the shop chip (→ Öffnungszeiten).
     in property <int> page: 1;
     callback go-page(int);
+    // Height of the header row with the tabs. 20px suits the 4.3" board; the
+    // Tab5 raises it, since a fingertip lands about 3 mm below where it aims.
+    in property <length> header-height: 20px;
 
     // ----- Start page -----
     in property <string> date-text;
@@ -515,7 +518,7 @@ export component KitchenWindow inherits Window {
 
         // Header: label + clock on the left, printer / connection state right.
         HorizontalLayout {
-            height: 20px;
+            height: root.header-height;
             padding-left: 4px;
             padding-right: 4px;
             spacing: 6px;
@@ -527,7 +530,7 @@ export component KitchenWindow inherits Window {
                 tab-label := Text {
                     text: tab;
                     color: root.page == i ? Theme.text : Theme.muted;
-                    font-size: 11px;
+                    font-size: root.header-height > 24px ? 13px : 11px;
                     font-weight: 700;
                     horizontal-alignment: center;
                     vertical-alignment: center;

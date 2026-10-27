@@ -45,6 +45,15 @@ const UI_W: u32 = display::HEIGHT as u32;
 const UI_H: u32 = display::WIDTH as u32;
 /// Poll interval for touch and timers.
 const TICK: Duration = Duration::from_millis(20);
+/// A touch that stays within this distance (logical px, ≈ 2.8 mm on the
+/// panel) of where it landed is a tap, pressed and released where it
+/// landed. A fingertip's contact point slides as it lifts, and the header
+/// tabs are only 20 px high: releasing where the finger lifted often missed
+/// them. Moving further makes it a drag (scrolling); every move goes on.
+const TAP_SLOP: f32 = 12.0;
+/// Readings without a touch before the finger counts as lifted: a single
+/// empty reading mid-touch would split one tap into two.
+const LIFT_AFTER: u8 = 2;
 /// Dim the backlight after this long without a touch, a new order or a
 /// message; any of them brings it back (a waking touch presses nothing).
 const DIM_AFTER: Duration = Duration::from_secs(10 * 60);
@@ -131,6 +140,23 @@ fn printer_chip(p: &PrintStatus, demo: bool) -> (bool, String) {
     }
 }
 
+/// A finger on the panel, as handed to Slint.
+struct Contact {
+    /// Where it landed: a tap presses and releases here.
+    landed: LogicalPosition,
+    /// Where Slint last saw it.
+    last: LogicalPosition,
+    /// Moved past `TAP_SLOP`: a drag.
+    dragging: bool,
+    /// Farthest distance from `landed`, for the log.
+    drift: f32,
+    since: Instant,
+}
+
+fn distance(a: LogicalPosition, b: LogicalPosition) -> f32 {
+    ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
+}
+
 /// The touch controller (GT911 or ST712x, chosen by the board package).
 struct Touch(bsp::esp_lcd_touch_handle_t);
 
@@ -207,6 +233,8 @@ pub fn run(
     .map_err(|e| anyhow!("slint platform: {e:?}"))?;
 
     let kitchen = KitchenWindow::new().map_err(|e| anyhow!("slint: {e:?}"))?;
+    // Taller tabs: taps landed below the 20px row (see kitchen.slint).
+    kitchen.set_header_height(32.0);
     let host = Tab5Host {
         status: status.clone(),
         crash,
@@ -276,7 +304,8 @@ pub fn run(
     };
 
     let mut frame = vec![Rgb565Pixel(0); display::WIDTH * display::HEIGHT];
-    let mut pressed: Option<LogicalPosition> = None;
+    let mut contact: Option<Contact> = None;
+    let mut empty_reads: u8 = 0;
     let mut shown_status = String::new();
     let mut shown_print = PrintStatus::default();
     let mut shown_battery: Option<BatteryStatus> = None;
@@ -341,8 +370,8 @@ pub fn run(
         if orientation.flipped() != flipped {
             flipped = !flipped;
             turned = true;
-            if let Some(position) = pressed.take() {
-                window.dispatch_event(WindowEvent::PointerReleased { position, button: PointerEventButton::Left });
+            if let Some(c) = contact.take() {
+                window.dispatch_event(WindowEvent::PointerReleased { position: c.last, button: PointerEventButton::Left });
                 window.dispatch_event(WindowEvent::PointerExited);
             }
             window.request_redraw();
@@ -350,29 +379,61 @@ pub fn run(
 
         match touch.as_ref().and_then(Touch::read) {
             Some((px, py)) => {
+                empty_reads = 0;
                 if dimmed {
                     waking_touch = true;
                 }
                 wake(&mut dimmed, &mut last_activity);
                 if !waking_touch {
                     let position = to_ui(px, py, scale, flipped);
-                    let event = if pressed.is_none() {
-                        WindowEvent::PointerPressed { position, button: PointerEventButton::Left }
-                    } else {
-                        WindowEvent::PointerMoved { position }
-                    };
-                    window.dispatch_event(event);
-                    pressed = Some(position);
+                    match contact.as_mut() {
+                        None => {
+                            window.dispatch_event(WindowEvent::PointerPressed {
+                                position,
+                                button: PointerEventButton::Left,
+                            });
+                            contact = Some(Contact {
+                                landed: position,
+                                last: position,
+                                dragging: false,
+                                drift: 0.0,
+                                since: Instant::now(),
+                            });
+                        }
+                        Some(c) => {
+                            c.drift = c.drift.max(distance(c.landed, position));
+                            c.dragging |= c.drift > TAP_SLOP;
+                            if c.dragging {
+                                window.dispatch_event(WindowEvent::PointerMoved { position });
+                                c.last = position;
+                            }
+                        }
+                    }
                 }
             }
             None => {
-                waking_touch = false;
-                if let Some(position) = pressed.take() {
-                    window.dispatch_event(WindowEvent::PointerReleased {
-                        position,
-                        button: PointerEventButton::Left,
-                    });
-                    window.dispatch_event(WindowEvent::PointerExited);
+                empty_reads = empty_reads.saturating_add(1);
+                if empty_reads >= LIFT_AFTER {
+                    waking_touch = false;
+                    if let Some(c) = contact.take() {
+                        window.dispatch_event(WindowEvent::PointerReleased {
+                            position: c.last,
+                            button: PointerEventButton::Left,
+                        });
+                        window.dispatch_event(WindowEvent::PointerExited);
+                        let ms = c.since.elapsed().as_millis();
+                        if c.dragging {
+                            log::info!(
+                                "touch: drag {:.0},{:.0} → {:.0},{:.0}, {ms} ms",
+                                c.landed.x, c.landed.y, c.last.x, c.last.y
+                            );
+                        } else {
+                            log::info!(
+                                "touch: tap {:.0},{:.0}, slid {:.0} px, {ms} ms",
+                                c.landed.x, c.landed.y, c.drift
+                            );
+                        }
+                    }
                 }
             }
         }
