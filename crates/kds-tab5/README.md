@@ -128,8 +128,40 @@ shows "geschont". Switched off, it charges fast to full — for a day carried
 around.
 
 **External power:** besides USB-C, the Tab5 takes **6–24 V on the M5-Bus
-HVIN pins 25/27/29** (e.g. a PoE splitter with 12 V output: one network
-cable for power and data together with Ethernet).
+HVIN pins 25/27/29** or on **EXT2's HVIN** (below), e.g. a PoE splitter
+with 12 V output: one network cable for power and data together with
+Ethernet.
+
+## EXT2: RS-485 port
+
+The 6-pin socket on the back (HC1.25-6P). The Tab5 comes with a cable for
+it: plug on one end, bare wires on the other.
+
+| Signal | Use |
+|---|---|
+| GND | ground |
+| HVIN | power **in**, 6–24 V |
+| 485A, 485B | RS-485 bus: SIT3088 transceiver, switchable 120 Ω termination |
+| SDA, SCL | I2C |
+
+- **No Ethernet here.** There are no SPI pins for a W5500, and a network
+  plug crimped onto these wires would put the network cable straight on
+  the board's pins (from a PoE switch port: about 48 V). Ethernet goes
+  through a W5500 on the M5-Bus or the side port (below).
+- **Power over the network cable:** a PoE splitter with **12 V** output —
+  its DC plug into a DC jack with screw terminals, two wires to HVIN and
+  GND; its network jack to the LAN module. Check the voltage and polarity
+  with a multimeter first: 5 V splitters exist and are too low for HVIN.
+- **RS-485 for sensors:** two wires, up to about 1 km, several devices on
+  one cable, robust next to compressors and motors. Industrial fridge and
+  freezer thermometers ("Modbus RTU") connect here; better than DS18B20
+  probes for anything across the room or in the cold store. Termination
+  only at the two ends of the bus. ESP32-P4 side, from M5Stack's docs
+  (check against the schematic before use): UART TX G20, RX G21,
+  direction G34.
+- **SDA/SCL:** short cables only. M5Stack's docs don't say which I2C bus
+  this is; if it's the internal one (G31/G32: touch, I/O expanders,
+  battery monitor, IMU), a long or noisy cable disturbs those.
 
 ## Ethernet: W5500 module
 
@@ -233,7 +265,8 @@ G2, G3, G4, G6, G7, G47, G48, G51, G52 — plus 3.3 V / 5 V / GND.
   IMU): no long sensor cables there; give sensors their own bus on two
   free pins (the P4 has a second I2C controller).
 - Fridge / freezer temperatures: DS18B20 probes (waterproof, 1-Wire,
-  several on one free GPIO, 4.7 kΩ pull-up to 3.3 V) are the usual choice.
+  several on one free GPIO, 4.7 kΩ pull-up to 3.3 V) for short runs;
+  RS-485 sensors on EXT2 for long ones.
 
 Sources: [M5Stack Tab5 docs](https://docs.m5stack.com/en/core/Tab5)
 (pin map, charging notes), the
