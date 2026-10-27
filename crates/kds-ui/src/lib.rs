@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::Duration;
 
-use chrono::{Local, NaiveTime, Timelike};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, TimeZone};
 use kitchen_protocol::{
     board_transition_allowed, BoardOrder, BoardSnapshot, BoardStatus, ClientMessage,
     OrderChannel, OrderForKitchen, PaymentStatus, ShopAction, ShopLight, ShopPanel,
@@ -852,28 +852,34 @@ struct Timing {
     waited_min: i64,
 }
 
-/// Waiting time for ASAP orders, time-to-due for pre-orders. The due label
-/// is shop-local "HH:MM" (or "DD.MM. HH:MM" for another day, shown as-is);
-/// compared against the local clock, so the screen runs in the shop's TZ.
+/// Waiting time for ASAP orders, time-to-due for pre-orders and delivery
+/// ETAs. The due label is shop-local "HH:MM" on the order's own day, or
+/// "DD.MM. HH:MM" for another; it is resolved against the order's date, so
+/// an order left over from yesterday reads "fällig" with its date, not
+/// "in 23 min". The screen runs in the shop's TZ.
 fn timing(o: &OrderForKitchen, now: i64) -> Timing {
     let waited_min = (now - o.created_at_unix).max(0) / 60;
     match o.pickup_time_label.as_deref().filter(|l| !l.is_empty()) {
         Some(label) => {
-            let (age, urgency) = match NaiveTime::parse_from_str(label, "%H:%M") {
-                Ok(due) => {
-                    let mins = (due.num_seconds_from_midnight() as i64
-                        - Local::now().time().num_seconds_from_midnight() as i64)
-                        / 60;
+            let due = due_at(label, o.created_at_unix);
+            let (age, urgency) = match due {
+                Some(due) => {
+                    let mins = (due.timestamp() - now) / 60;
                     if mins <= 0 {
                         ("fällig".to_string(), 2)
                     } else {
                         (format!("in {mins} min"), if mins <= 15 { 1 } else { 0 })
                     }
                 }
-                Err(_) => (String::new(), 0),
+                None => (String::new(), 0),
+            };
+            let today = Local.timestamp_opt(now, 0).single().map(|d| d.date_naive());
+            let when = match due {
+                Some(due) if Some(due.date_naive()) != today => due.format("%d.%m. %H:%M").to_string(),
+                _ => label.to_string(),
             };
             Timing {
-                when: label.to_string(),
+                when,
                 age,
                 urgency,
                 scheduled: true,
@@ -894,6 +900,27 @@ fn timing(o: &OrderForKitchen, now: i64) -> Timing {
             waited_min,
         },
     }
+}
+
+/// The server's due label as a shop-local time: "HH:MM" on the order's own
+/// day, "DD.MM. HH:MM" on that day (the order's year, or the next one for a
+/// date before the order, i.e. across New Year).
+fn due_at(label: &str, created_at_unix: i64) -> Option<DateTime<Local>> {
+    let created = Local.timestamp_opt(created_at_unix, 0).single()?.date_naive();
+    let due = match NaiveTime::parse_from_str(label, "%H:%M") {
+        Ok(time) => created.and_time(time),
+        Err(_) => {
+            let (date, time) = label.split_once(' ')?;
+            let time = NaiveTime::parse_from_str(time.trim(), "%H:%M").ok()?;
+            let on = |year: i32| NaiveDate::parse_from_str(&format!("{date}{year}"), "%d.%m.%Y").ok();
+            let mut day = on(created.year())?;
+            if day < created {
+                day = on(created.year() + 1)?;
+            }
+            day.and_time(time)
+        }
+    };
+    Local.from_local_datetime(&due).earliest()
 }
 
 /// The big number on the Bon: the last segment of "DP-1105-0012".
@@ -944,4 +971,32 @@ fn status_from_index(i: i32) -> Option<BoardStatus> {
         5 => BoardStatus::Cancelled,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+        Local.with_ymd_and_hms(y, mo, d, h, mi, 0).unwrap().timestamp()
+    }
+
+    #[test]
+    fn time_only_label_is_on_the_orders_day() {
+        // Yesterday's delivery ETA: due yesterday, not "in 23 min" today.
+        let due = due_at("17:51", local(2026, 10, 26, 17, 23)).unwrap();
+        assert_eq!(due.timestamp(), local(2026, 10, 26, 17, 51));
+    }
+
+    #[test]
+    fn dated_label_across_new_year() {
+        let created = local(2026, 12, 31, 20, 0);
+        assert_eq!(due_at("31.12. 21:30", created).unwrap().timestamp(), local(2026, 12, 31, 21, 30));
+        assert_eq!(due_at("02.01. 12:00", created).unwrap().timestamp(), local(2027, 1, 2, 12, 0));
+    }
+
+    #[test]
+    fn unreadable_label_has_no_due_time() {
+        assert!(due_at("bald", local(2026, 10, 27, 12, 0)).is_none());
+    }
 }
