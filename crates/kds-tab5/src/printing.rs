@@ -31,16 +31,12 @@ use kitchen_protocol::{
     PaymentStatus, ServerMessage,
 };
 
+use crate::board;
 use crate::feed::{self, Session};
 use crate::ota;
 use crate::ui::UiMsg;
 use crate::usb_printer::UsbPrinter;
 
-/// This device's name on the server (`kitchen_clients`, admin printer page).
-const SLUG: &str = match option_env!("KITCHEN_SLUG") {
-    Some(slug) => slug,
-    None => "tab5",
-};
 /// Device → server sign of life (the server pings on its own).
 const HEARTBEAT: Duration = Duration::from_secs(30);
 /// Pause before reconnecting.
@@ -118,7 +114,8 @@ fn run(printer: UsbPrinter, session: Session, nvs: EspDefaultNvsPartition, ui: S
             continue;
         };
         let mut url = format!(
-            "{base}/api/kitchen/ws?slug={SLUG}&version={}&arch=esp32p4",
+            "{base}/api/kitchen/ws?slug={}&version={}&arch=esp32p4",
+            board::device_name(),
             ota::VERSION
         );
         if let Some(seq) = channel.last_seen {
@@ -166,7 +163,7 @@ impl Channel {
         loop {
             match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(WsEvent::Connected) => {
-                    log::info!("printing: connected as '{SLUG}', last seq {:?}", self.last_seen);
+                    log::info!("printing: connected as '{}', last seq {:?}", board::device_name(), self.last_seen);
                     // Wi-Fi, TLS, login and server work: a fresh update stays.
                     ota::confirm();
                     connected = true;

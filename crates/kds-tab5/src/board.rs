@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use esp_idf_svc::sys::{bsp, esp};
+use esp_idf_svc::sys::{self, bsp, esp};
 
 /// E2.P7: battery charging enable.
 const CHARGE_EN: u32 = bsp::esp_io_expander_pin_num_t_IO_EXPANDER_PIN_NUM_7;
@@ -113,6 +113,38 @@ pub fn power_off() {
         }
     }
     std::thread::sleep(Duration::from_secs(2));
+}
+
+/// This device's name on the server and on the Start page: `KITCHEN_SLUG`
+/// if built with one, else `tab5-` and the last three bytes of the chip's
+/// MAC (`tab5-e2d6d8`), so one image fits every Tab5.
+pub fn device_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        if let Some(slug) = option_env!("KITCHEN_SLUG") {
+            return slug.to_string();
+        }
+        let mut mac = [0u8; 6];
+        // SAFETY: the function fills the 6-byte buffer.
+        if unsafe { sys::esp_efuse_mac_get_default(mac.as_mut_ptr()) } != 0 {
+            return "tab5".to_string();
+        }
+        format!("tab5-{:02x}{:02x}{:02x}", mac[3], mac[4], mac[5])
+    })
+}
+
+/// Battery charging on/off (E2.P7) and fast charging on/off (E2.P5,
+/// active low). Both lines are push-pull outputs since init().
+pub fn set_charging(enable: bool, fast: bool) {
+    // SAFETY: the expander was set up in init().
+    unsafe {
+        let e2 = bsp::bsp_io_expander1_init();
+        if e2.is_null() {
+            return;
+        }
+        bsp::esp_io_expander_set_level(e2, FAST_CHARGE_N, u8::from(!fast));
+        bsp::esp_io_expander_set_level(e2, CHARGE_EN, u8::from(enable));
+    }
 }
 
 /// The charger's status line (E2.P6): 1 while charging.

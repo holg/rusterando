@@ -23,7 +23,7 @@ use slint::platform::software_renderer::{
 use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
 
-use crate::battery::{BatteryStatus, SharedBattery};
+use crate::battery::{BatteryStatus, Care, SharedBattery};
 use crate::display::{self, Display};
 use crate::gong::Gong;
 use crate::imu::Orientation;
@@ -82,6 +82,7 @@ struct Tab5Host {
     /// The USB printer and the print channel.
     print: SharedStatus,
     battery: SharedBattery,
+    care: Care,
 }
 
 impl kds_ui::Host for Tab5Host {
@@ -99,12 +100,20 @@ impl kds_ui::Host for Tab5Host {
         // No screensaver on the Tab5.
         w.set_has_saver(false);
         let mut status = self.status.lock().map(|s| s.clone()).unwrap_or_default();
-        if let Some(battery) = self.battery.lock().ok().and_then(|b| *b).and_then(|b| b.describe()) {
+        let battery = self.battery.lock().ok().and_then(|b| *b).and_then(|b| b.describe());
+        // The battery care switch, only with a pack in.
+        let care = match (&battery, self.care.enabled()) {
+            (None, _) => "",
+            (Some(_), true) => "Akku schonen: an",
+            (Some(_), false) => "Akku schonen: aus",
+        };
+        w.set_extra_text(care.into());
+        if let Some(battery) = battery {
             status = format!("{battery} · {status}");
         }
         let info = match &self.crash {
             Some(crash) => format!("{crash} · {status}"),
-            None => format!("Tab5 · {status}"),
+            None => format!("{} · {status}", crate::board::device_name()),
         };
         w.set_info_text(info.into());
     }
@@ -180,6 +189,7 @@ pub fn run(
     print: SharedStatus,
     printer: Option<UsbPrinter>,
     battery: SharedBattery,
+    care: Care,
     events: Receiver<UiMsg>,
     notices: Sender<UiMsg>,
     taps: Sender<ClientMessage>,
@@ -197,7 +207,13 @@ pub fn run(
     .map_err(|e| anyhow!("slint platform: {e:?}"))?;
 
     let kitchen = KitchenWindow::new().map_err(|e| anyhow!("slint: {e:?}"))?;
-    let host = Tab5Host { status: status.clone(), crash, print: print.clone(), battery: battery.clone() };
+    let host = Tab5Host {
+        status: status.clone(),
+        crash,
+        print: print.clone(),
+        battery: battery.clone(),
+        care: care.clone(),
+    };
     kds_ui::wire(&kitchen, Rc::new(host), move |msg| {
         if taps.send(msg).is_err() {
             log::warn!("kitchen: tap dropped, no sender thread");
@@ -231,6 +247,15 @@ pub fn run(
                 kds_ui::flash(&w, "TESTALARM".into(), "Neue Bestellung (Test)".into());
                 test_gong.ring();
             }
+        }
+        // 3 = "Akku schonen": switch the battery care over.
+        3 => {
+            let text = if care.toggle() {
+                "Akku schonen an: lädt bis etwa 85–90 %, langsam"
+            } else {
+                "Akku schonen aus: lädt bis 100 %, schnell"
+            };
+            let _ = notices.send(UiMsg::Info(text.into()));
         }
         _ => {}
     });

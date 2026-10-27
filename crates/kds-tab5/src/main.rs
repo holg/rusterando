@@ -95,7 +95,9 @@ fn main() -> Result<()> {
     // Battery level and charging every 30 s (Start page, log); warns when
     // low and switches the Tab5 off before the pack runs flat.
     let battery = battery::SharedBattery::default();
-    if let Err(e) = battery::start(battery.clone(), ui_tx.clone()) {
+    // "Akku schonen" (Start page): kept on the device, on by default.
+    let care = battery::Care::load(nvs.clone());
+    if let Err(e) = battery::start(battery.clone(), care.clone(), ui_tx.clone()) {
         log::warn!("battery: {e:#}");
     }
     let (tap_tx, tap_rx) = mpsc::channel();
@@ -138,7 +140,7 @@ fn main() -> Result<()> {
     }
 
     let gong = gong::Gong::start()?;
-    ui::run(display, status, print_status, printer, battery, ui_rx, ui_tx, tap_tx, demo, crash, gong, orientation)
+    ui::run(display, status, print_status, printer, battery, care, ui_rx, ui_tx, tap_tx, demo, crash, gong, orientation)
 }
 
 /// Join Wi-Fi, set the clock, start the kitchen feed (`online`), then keep

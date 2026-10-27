@@ -420,7 +420,11 @@ export component KitchenWindow inherits Window {
     in property <string> test-print-text: "Testdruck";
     // Board build with a screensaver program → "Globus" button.
     in property <bool> has-saver;
-    // Utility buttons: 0 Testdruck, 1 Globus (screensaver now), 2 Alarm testen.
+    // A device-specific extra button, labelled by the host; empty = none
+    // (the Tab5's "Akku schonen: an/aus").
+    in property <string> extra-text;
+    // Utility buttons: 0 Testdruck, 1 Globus (screensaver now), 2 Alarm
+    // testen, 3 the extra button.
     callback util(int);
 
     // ----- "Öffnungszeiten" page: /admin/hours quick controls -----
@@ -686,6 +690,14 @@ export component KitchenWindow inherits Window {
                     text: "Globus";
                     clicked => {
                         root.util(1);
+                    }
+                }
+                if root.extra-text != "": BigButton {
+                    horizontal-stretch: 1;
+                    font-size: 13px;
+                    text: root.extra-text;
+                    clicked => {
+                        root.util(3);
                     }
                 }
                 BigButton {

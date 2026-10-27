@@ -20,8 +20,8 @@ workspace.
 #   WIFI_SSID / WIFI_PASS, WIFI2_… … WIFI5_…   up to five networks
 #   KITCHEN_PASSWORD                            the shop's Küche password
 #   SHOP_URL                                    default https://davidspizzeria.de
-#   KITCHEN_SLUG                                device name on the server (default tab5);
-#                                               one per device!
+#   KITCHEN_SLUG                                optional fixed device name; without it each
+#                                               Tab5 names itself tab5-<last 3 MAC bytes>
 PROFILE=release scripts/build_kds_tab5.sh flash     # build + flash + short monitor
 SECS=60 scripts/build_kds_tab5.sh monitor            # log only
 RESET=1 SECS=30 scripts/build_kds_tab5.sh monitor    # restart, then log
@@ -120,6 +120,12 @@ NP-F550 type, 2 cells (6.0–8.4 V), measured by the INA226 at I2C 0x41
 
 The Start page's info line shows `Akku 72 % · 7.83 V · lädt (+740 mA)`;
 without a pack (Tab5 without battery) it shows nothing.
+
+**Akku schonen** (button on the Start page, stored on the device, default
+on) is for a Tab5 that lives on the charger: it charges slowly, stops at
+8.20 V (about 85–90 %) and starts again below 7.95 V; the info line then
+shows "geschont". Switched off, it charges fast to full — for a day carried
+around.
 
 **External power:** besides USB-C, the Tab5 takes **6–24 V on the M5-Bus
 HVIN pins 25/27/29** (e.g. a PoE splitter with 12 V output: one network

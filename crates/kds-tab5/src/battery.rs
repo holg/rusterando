@@ -8,7 +8,13 @@
 //! protection then cuts it off, and the Tab5's charger can't wake it): on
 //! battery, a warning below [`WARN_MV`], and below [`OFF_MV`] the Tab5
 //! announces it and switches itself off.
+//!
+//! Battery care ([`Care`], "Akku schonen" on the Start page): a Tab5 that
+//! stays on power keeps its pack at about 85–90 % instead of 100 %, charged
+//! slowly — Li-ion ages fastest when full and warm. Off: full and fast, for
+//! a day on the move.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,6 +22,7 @@ use std::time::{Duration, Instant};
 use crate::ui::UiMsg;
 
 use anyhow::{ensure, Result};
+use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use esp_idf_svc::sys::{bsp, esp};
 
 const ADDRESS: u16 = 0x41;
@@ -42,6 +49,12 @@ const OFF_GRACE: Duration = Duration::from_secs(20);
 /// Readings below this aren't a connected pack (missing, or cut off by its
 /// protection): the Tab5 runs on USB power then, nothing to guard.
 const PLAUSIBLE_MV: u32 = 5000;
+/// Battery care: pause charging at this voltage — measured while charging
+/// slowly, so about 8.1 V at rest (≈ 85–90 %) — and resume below
+/// CARE_RESUME_MV (≈ 80 %).
+const CARE_STOP_MV: u32 = 8200;
+const CARE_RESUME_MV: u32 = 7950;
+const KEY_CARE: &str = "batt_care";
 
 #[derive(Clone, Copy, Default, PartialEq)]
 pub struct BatteryStatus {
@@ -51,6 +64,8 @@ pub struct BatteryStatus {
     pub milliamps: i32,
     /// Rough charge level from the cell voltage (higher while charging).
     pub percent: u8,
+    /// Battery care holds the pack below full (charging paused).
+    pub held: bool,
 }
 
 impl BatteryStatus {
@@ -72,6 +87,8 @@ impl BatteryStatus {
         }
         let state = if self.charging() {
             format!(" · lädt (+{} mA)", self.milliamps)
+        } else if self.held {
+            " · geschont".to_string()
         } else if self.milliamps < -IDLE_MA {
             format!(" · {} mA", self.milliamps)
         } else {
@@ -84,18 +101,109 @@ impl BatteryStatus {
 
 pub type SharedBattery = Arc<Mutex<Option<BatteryStatus>>>;
 
-/// Start reading and guarding the battery; the status stays `None` if the
-/// monitor doesn't answer. Warnings go to the screen through `ui`.
-pub fn start(status: SharedBattery, ui: Sender<UiMsg>) -> Result<()> {
+/// The battery care setting, kept on the device (NVS); on by default.
+#[derive(Clone)]
+pub struct Care {
+    on: Arc<AtomicBool>,
+    /// Set by a toggle: the battery thread applies it at once.
+    changed: Arc<AtomicBool>,
+    store: Arc<Mutex<Option<EspNvs<NvsDefault>>>>,
+}
+
+impl Care {
+    pub fn load(nvs: EspDefaultNvsPartition) -> Self {
+        let store = EspNvs::new(nvs, crate::feed::NVS_NAMESPACE, true)
+            .map_err(|e| log::warn!("battery: NVS: {e}"))
+            .ok();
+        let on = store
+            .as_ref()
+            .and_then(|s| s.get_u8(KEY_CARE).ok().flatten())
+            .is_none_or(|v| v != 0);
+        Self {
+            on: Arc::new(AtomicBool::new(on)),
+            changed: Arc::new(AtomicBool::new(false)),
+            store: Arc::new(Mutex::new(store)),
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.on.load(Ordering::Relaxed)
+    }
+
+    /// Switch it over; returns the new state.
+    pub fn toggle(&self) -> bool {
+        let on = !self.on.fetch_xor(true, Ordering::Relaxed);
+        self.changed.store(true, Ordering::Relaxed);
+        if let Ok(store) = self.store.lock() {
+            if let Some(store) = store.as_ref() {
+                if let Err(e) = store.set_u8(KEY_CARE, u8::from(on)) {
+                    log::warn!("battery: NVS: {e}");
+                }
+            }
+        }
+        log::info!("battery: care {}", if on { "on" } else { "off" });
+        on
+    }
+}
+
+/// Charging on/off and fast/slow, as battery care wants it.
+#[derive(Default)]
+struct Charger {
+    /// Charging allowed (care pauses it near full).
+    allowed: bool,
+    /// The (enable, fast) last written to the charger's lines.
+    applied: Option<(bool, bool)>,
+}
+
+impl Charger {
+    /// Decide for this reading; returns whether care holds the pack.
+    fn update(&mut self, b: &BatteryStatus, care: bool) -> bool {
+        let (enable, fast) = if b.millivolts < PLAUSIBLE_MV {
+            // No pack: nothing to care for.
+            self.allowed = true;
+            (true, !care)
+        } else if !care {
+            self.allowed = true;
+            (true, true)
+        } else {
+            if self.applied.is_none() {
+                self.allowed = b.millivolts < CARE_STOP_MV;
+            } else if self.allowed && b.millivolts >= CARE_STOP_MV {
+                self.allowed = false;
+            } else if !self.allowed && b.millivolts < CARE_RESUME_MV {
+                self.allowed = true;
+            }
+            (self.allowed, false)
+        };
+        if self.applied != Some((enable, fast)) {
+            log::info!(
+                "battery: charging {}{} at {:.2} V",
+                if enable { "on" } else { "paused" },
+                if enable { if fast { ", fast" } else { ", slow" } } else { "" },
+                b.millivolts as f32 / 1000.0
+            );
+            crate::board::set_charging(enable, fast);
+            self.applied = Some((enable, fast));
+        }
+        care && !enable && b.millivolts >= PLAUSIBLE_MV
+    }
+}
+
+/// Start reading, guarding and caring for the battery; the status stays
+/// `None` if the monitor doesn't answer. Warnings go to the screen through
+/// `ui`.
+pub fn start(status: SharedBattery, care: Care, ui: Sender<UiMsg>) -> Result<()> {
     let monitor = Monitor::open()?;
     std::thread::Builder::new()
         .name("battery".into())
         .stack_size(6 * 1024)
         .spawn(move || {
             let mut guard = Guard::default();
+            let mut charger = Charger::default();
             loop {
                 let pause = match monitor.read() {
-                    Ok(b) => {
+                    Ok(mut b) => {
+                        b.held = charger.update(&b, care.enabled());
                         log::info!(
                             "battery: {:.2} V, {:+} mA, {} %, charger status line {}",
                             b.millivolts as f32 / 1000.0,
@@ -113,7 +221,11 @@ pub fn start(status: SharedBattery, ui: Sender<UiMsg>) -> Result<()> {
                         EVERY
                     }
                 };
-                std::thread::sleep(pause);
+                // Sleep, but wake at once when the care setting changes.
+                let until = Instant::now() + pause;
+                while Instant::now() < until && !care.changed.swap(false, Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
             }
         })?;
     Ok(())
@@ -209,7 +321,7 @@ impl Monitor {
         // Per cell, linear between 3.3 V (empty) and 4.15 V (full).
         let cell = millivolts as i32 / 2;
         let percent = ((cell - 3300) * 100 / (4150 - 3300)).clamp(0, 100) as u8;
-        Ok(BatteryStatus { millivolts, milliamps, percent })
+        Ok(BatteryStatus { millivolts, milliamps, percent, held: false })
     }
 
     fn register(&self, reg: u8) -> Result<u16> {
