@@ -1,9 +1,9 @@
-//! /admin/drucker — kitchen-printer (Pi) status + OTA control.
+//! /admin/drucker — kitchen device status (RPi4, STM32MP135F-DK, Tab5) + OTA control.
 //!
 //! Surfaces what `kitchen_clients` records on every Hello (running
 //! version, arch, last seen) next to the server's target version, with a
 //! compat badge — so a version skew like the one that silently stopped
-//! printing is **visible**, not discovered by SSHing in. The "Pi
+//! printing is **visible**, not discovered by SSHing in. The "<device>
 //! aktualisieren" button arms the in-band self-update for the next Hello.
 
 use leptos::prelude::*;
@@ -202,11 +202,11 @@ pub fn PrinterStatusPage() -> impl IntoView {
     view! {
         <AdminShell>
             <section class="printer-status">
-                <header class="admin-bar"><h1>"Drucker (Pi)"</h1></header>
+                <header class="admin-bar"><h1>"Drucker"</h1></header>
                 <p class="hint">
-                    "Status der Küchen-Drucker. Zeigt die laufende Version gegen die "
+                    "Status der Küchen-Geräte (RPi4, STM32MP135F-DK, Tab5). Zeigt die laufende Version gegen die "
                     "Server-Zielversion — so bleibt ein Versions-Mismatch sichtbar. "
-                    "Updates laufen over-the-air über den bestehenden 9001-Kanal."
+                    "Updates laufen over-the-air über die Druckverbindung."
                 </p>
 
                 <div class="kds-alert">
@@ -250,6 +250,18 @@ pub fn PrinterStatusPage() -> impl IntoView {
     }
 }
 
+/// The kitchen device generations, by the arch each one reports:
+/// Raspberry Pi 4, then the STM32MP135F-DK (touch display, still Linux),
+/// then the all-in-one M5Stack Tab5.
+fn device_model(arch: &str) -> Option<&'static str> {
+    match arch {
+        "aarch64-unknown-linux-gnu" => Some("RPi4"),
+        "armv7-unknown-linux-gnueabihf" => Some("STM32MP135F-DK"),
+        "esp32p4" => Some("Tab5"),
+        _ => None,
+    }
+}
+
 #[component]
 fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
     // Connection freshness: green <90s, amber <10min, red otherwise.
@@ -272,6 +284,11 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
     };
 
     let can_update = p.target_version.is_some() && !p.up_to_date;
+    let model = device_model(&p.arch);
+    let update_label = match model {
+        Some(m) => format!("{m} aktualisieren"),
+        None => "Aktualisieren".to_string(),
+    };
     let shop_for_arm = p.shop_slug.clone();
     let shop_for_disarm = p.shop_slug.clone();
     let armed = p.update_armed;
@@ -283,6 +300,8 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
                 <span class=conn_cls>{conn_label}</span>
             </header>
             <dl class="pi-meta">
+                <dt>"Gerät"</dt>
+                <dd>{model.unwrap_or("unbekannt")}</dd>
                 <dt>"Version"</dt>
                 <dd class=ver_cls>{ver_label}</dd>
                 <dt>"Arch"</dt>
@@ -321,7 +340,7 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
                     view! {
                         <button class="btn primary small"
                             on:click=move |_| { armer.dispatch(SetPiUpdateArmed { shop_slug: shop.clone(), armed: true }); }>
-                            "Pi aktualisieren"
+                            {update_label.clone()}
                         </button>
                     }.into_any()
                 } else {
