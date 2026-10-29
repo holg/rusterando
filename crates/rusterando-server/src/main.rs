@@ -222,7 +222,8 @@ async fn main() {
 
     // The key that signs staff sessions (dp_auth, see pages::session);
     // created on first start. Next to the DB, never in the web root.
-    let session_key = std::env::var("SESSION_KEY_FILE").unwrap_or_else(|_| "data/session.key".into());
+    let session_key =
+        std::env::var("SESSION_KEY_FILE").unwrap_or_else(|_| "data/session.key".into());
     rusterando_frontend::pages::session::ssr::init_session_key(std::path::Path::new(&session_key));
 
     rusterando_frontend::register_server_fns();
@@ -913,7 +914,10 @@ async fn main() {
         // Global shop open/closed channel — home + cart subscribe so the
         // pause/force-open state flips without a reload.
         .route("/api/live/shop", axum::routing::get(live_shop_sse_handler))
-        .route("/api/live/board", axum::routing::get(live_board_sse_handler))
+        .route(
+            "/api/live/board",
+            axum::routing::get(live_board_sse_handler),
+        )
         // Browser mirror of the kitchen display (crates/kds-web): the page,
         // its live feed and its taps. Admin + Küche only.
         .route("/kitchen/display", axum::routing::get(kds_page_handler))
@@ -1646,7 +1650,9 @@ async fn kds_page_handler(
     }
     let v = VERSION.get_or_init(|| {
         let path = format!("{}/pkg/kds/hash.txt", state.leptos_options.site_root);
-        std::fs::read_to_string(&path).map(|s| s.trim().to_string()).unwrap_or_default()
+        std::fs::read_to_string(&path)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
     });
     if v.is_empty() {
         return (
@@ -1692,9 +1698,9 @@ async fn kds_feed_handler(
     let stream = tokio_stream::wrappers::ReceiverStream::new(chan.board_feed())
         .filter_map(|msg| async move {
             let bytes = postcard::to_allocvec(&msg.event).ok()?;
-            Some(Ok::<_, std::convert::Infallible>(
-                Event::default().data(base64::engine::general_purpose::STANDARD.encode(bytes)),
-            ))
+            Some(Ok::<_, std::convert::Infallible>(Event::default().data(
+                base64::engine::general_purpose::STANDARD.encode(bytes),
+            )))
         })
         // Close on shutdown so this stream never blocks the graceful drain.
         .take_until(wait_for_shutdown(state.shutdown.clone()));
@@ -1740,7 +1746,9 @@ async fn kds_action_handler(
 fn valid_device_slug(slug: &str) -> bool {
     !slug.is_empty()
         && slug.len() <= 64
-        && slug.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 #[derive(serde::Deserialize)]
@@ -1801,20 +1809,34 @@ async fn kitchen_ws_session(
 
     // Update frames go out of band (seq 0), like on the tunnel.
     fn update_frame(event: KitchenEvent) -> Option<Message> {
-        let msg = ServerMessage { seq_id: SeqId(0), event };
-        postcard::to_allocvec(&msg).ok().map(|bytes| Message::Binary(bytes.into()))
+        let msg = ServerMessage {
+            seq_id: SeqId(0),
+            event,
+        };
+        postcard::to_allocvec(&msg)
+            .ok()
+            .map(|bytes| Message::Binary(bytes.into()))
     }
 
     let (slug, version, arch) = (q.slug, q.version, q.arch);
     let mut feed = chan
-        .print_feed(slug.clone(), version.clone(), arch.clone(), q.last_seen.map(SeqId))
+        .print_feed(
+            slug.clone(),
+            version.clone(),
+            arch.clone(),
+            q.last_seen.map(SeqId),
+        )
         .await;
     let mut ping = tokio::time::interval_at(Instant::now() + KITCHEN_WS_PING, KITCHEN_WS_PING);
     let mut last_heard = Instant::now();
     // An admin-armed update is offered once per connection: at connect, or
     // at a later ping once it's armed.
     let mut offered = false;
-    if let Some(offer) = chan.update_offer(&slug, &version, &arch).await.and_then(update_frame) {
+    if let Some(offer) = chan
+        .update_offer(&slug, &version, &arch)
+        .await
+        .and_then(update_frame)
+    {
         offered = socket.send(offer).await.is_ok();
     }
     // Close on shutdown so this socket never blocks the graceful drain.

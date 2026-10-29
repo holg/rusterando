@@ -597,7 +597,8 @@ pub async fn build_handles(pool: &SqlitePool, public_url: &str) -> TenantHandles
 
     let theme = ThemeHandle::new(theme_ssr(pool).await);
     let branding = BrandingHandle::new(load_branding(pool).await);
-    let jsonld = JsonLdHandle::new(build_restaurant_jsonld(pool, &branding.get(), public_url).await);
+    let jsonld =
+        JsonLdHandle::new(build_restaurant_jsonld(pool, &branding.get(), public_url).await);
     let stripe_mode = StripeModeHandle::new(load_mode(pool).await);
     let i18n = I18nHandle::new(i18n_enabled(pool).await);
     let orders_paused = OrdersPausedHandle::new(orders_paused(pool).await);
@@ -799,9 +800,8 @@ pub async fn sysadmin_gate(
 ) -> axum::response::Response {
     use axum::http::StatusCode;
     let path = req.uri().path();
-    let is_sysadmin = path == "/sysadmin"
-        || path.starts_with("/sysadmin/")
-        || path.starts_with("/api/sysadmin_");
+    let is_sysadmin =
+        path == "/sysadmin" || path.starts_with("/sysadmin/") || path.starts_with("/api/sysadmin_");
     if !is_sysadmin {
         return next.run(req).await;
     }

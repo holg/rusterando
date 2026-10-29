@@ -17,7 +17,9 @@ use anyhow::{Context, Result};
 use escpos::driver::Driver;
 use escpos::printer::Printer;
 use escpos::printer_options::PrinterOptions;
-use escpos::utils::{JustifyMode, PageCode, Protocol, QRCodeCorrectionLevel, QRCodeModel, QRCodeOption};
+use escpos::utils::{
+    JustifyMode, PageCode, Protocol, QRCodeCorrectionLevel, QRCodeModel, QRCodeOption,
+};
 use kitchen_protocol::bitmap::Bitmap;
 use kitchen_protocol::receipt::{LineStyle, ReceiptLine, ReceiptProgram, RECEIPT_WIDTH};
 
@@ -65,7 +67,11 @@ pub fn render(program: &ReceiptProgram, logos: &mut LogoResolver<'_>) -> Result<
 
 /// Emit one composed [`ReceiptLine`] as ESC/POS. Resets justify/size/bold
 /// after each styled line so the next starts from a known state.
-fn emit_line(p: &mut Printer<Memory>, line: &ReceiptLine, logos: &mut LogoResolver<'_>) -> Result<()> {
+fn emit_line(
+    p: &mut Printer<Memory>,
+    line: &ReceiptLine,
+    logos: &mut LogoResolver<'_>,
+) -> Result<()> {
     match line {
         ReceiptLine::Text { text, style } => {
             apply_style(p, *style)?;
@@ -79,9 +85,14 @@ fn emit_line(p: &mut Printer<Memory>, line: &ReceiptLine, logos: &mut LogoResolv
             }
         }
         ReceiptLine::Rule => {
-            p.justify(JustifyMode::LEFT)?.writeln(&"-".repeat(RECEIPT_WIDTH))?;
+            p.justify(JustifyMode::LEFT)?
+                .writeln(&"-".repeat(RECEIPT_WIDTH))?;
         }
-        ReceiptLine::RasterSvg { hash, target_width, svg } => {
+        ReceiptLine::RasterSvg {
+            hash,
+            target_width,
+            svg,
+        } => {
             if let Some(bm) = logos(hash, *target_width, svg) {
                 p.justify(JustifyMode::CENTER)?
                     .custom(&gs_v0(&bm))?
@@ -95,7 +106,10 @@ fn emit_line(p: &mut Printer<Memory>, line: &ReceiptLine, logos: &mut LogoResolv
             // (code ~22 mm), Model2 = the modern phone standard, correction
             // level H copes with print streaks.
             p.justify(JustifyMode::CENTER)?
-                .qrcode_option(url, QRCodeOption::new(QRCodeModel::Model2, 8, QRCodeCorrectionLevel::H))?
+                .qrcode_option(
+                    url,
+                    QRCodeOption::new(QRCodeModel::Model2, 8, QRCodeCorrectionLevel::H),
+                )?
                 .justify(JustifyMode::LEFT)?;
         }
         ReceiptLine::Cut { feed } => {
@@ -122,7 +136,11 @@ pub fn gs_v0(bm: &Bitmap) -> Vec<u8> {
 /// Translate a [`LineStyle`] into the matching ESC/POS state. The caller
 /// resets afterwards.
 fn apply_style(p: &mut Printer<Memory>, style: LineStyle) -> Result<()> {
-    p.justify(if style.center { JustifyMode::CENTER } else { JustifyMode::LEFT })?;
+    p.justify(if style.center {
+        JustifyMode::CENTER
+    } else {
+        JustifyMode::LEFT
+    })?;
     p.bold(style.bold)?;
     p.size(style.width, style.height)?;
     Ok(())
@@ -159,7 +177,11 @@ mod tests {
     use super::*;
 
     fn program(lines: Vec<ReceiptLine>) -> ReceiptProgram {
-        ReceiptProgram { display_number: 1, is_reprint: false, lines }
+        ReceiptProgram {
+            display_number: 1,
+            is_reprint: false,
+            lines,
+        }
     }
 
     fn contains(hay: &[u8], needle: &[u8]) -> bool {
@@ -169,9 +191,14 @@ mod tests {
     #[test]
     fn german_text_in_latin9_qr_and_cut() {
         let p = program(vec![
-            ReceiptLine::Text { text: "Größe: 1× Käse 7,50 €".into(), style: LineStyle::NORMAL },
+            ReceiptLine::Text {
+                text: "Größe: 1× Käse 7,50 €".into(),
+                style: LineStyle::NORMAL,
+            },
             ReceiptLine::Rule,
-            ReceiptLine::Qr { url: "https://example.org/o/1".into() },
+            ReceiptLine::Qr {
+                url: "https://example.org/o/1".into(),
+            },
             ReceiptLine::Cut { feed: 3 },
         ]);
         let bytes = render(&p, &mut |_, _, _| None).unwrap();
@@ -186,7 +213,11 @@ mod tests {
 
     #[test]
     fn logo_through_resolver_or_left_out() {
-        let logo = ReceiptLine::RasterSvg { hash: [7; 32], target_width: 16, svg: b"<svg/>".to_vec() };
+        let logo = ReceiptLine::RasterSvg {
+            hash: [7; 32],
+            target_width: 16,
+            svg: b"<svg/>".to_vec(),
+        };
         let p = program(vec![logo]);
         let without = render(&p, &mut |_, _, _| None).unwrap();
         assert!(!contains(&without, &[0x1d, b'v', b'0']));
@@ -194,10 +225,17 @@ mod tests {
         let mut asked = None;
         let with = render(&p, &mut |hash, width, svg| {
             asked = Some((*hash, width, svg.len()));
-            Some(Bitmap { width: 16, height: 2, bytes: vec![0xff; 4] })
+            Some(Bitmap {
+                width: 16,
+                height: 2,
+                bytes: vec![0xff; 4],
+            })
         })
         .unwrap();
         assert_eq!(asked, Some(([7; 32], 16, 6)));
-        assert!(contains(&with, &[0x1d, b'v', b'0', 0x00, 2, 0, 2, 0, 0xff, 0xff, 0xff, 0xff]));
+        assert!(contains(
+            &with,
+            &[0x1d, b'v', b'0', 0x00, 2, 0, 2, 0, 0xff, 0xff, 0xff, 0xff]
+        ));
     }
 }

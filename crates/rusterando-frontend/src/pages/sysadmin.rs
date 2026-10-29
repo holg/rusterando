@@ -345,7 +345,10 @@ pub async fn sysadmin_job(id: String) -> Result<Option<ImportJob>, ServerFnError
 #[server(name = SysAdminProvision, prefix = "/api", endpoint = "sysadmin_provision")]
 pub async fn sysadmin_provision(job_id: String, slug: String) -> Result<(), ServerFnError> {
     let ops = ssr::require().await?;
-    let target = match ops.provision(&job_id, slug.trim().to_ascii_lowercase()).await {
+    let target = match ops
+        .provision(&job_id, slug.trim().to_ascii_lowercase())
+        .await
+    {
         Ok(()) => format!("/sysadmin?job={job_id}"),
         Err(e) => format!("/sysadmin?job={job_id}&error={}", urlencoding::encode(&e)),
     };
@@ -381,7 +384,10 @@ pub async fn sysadmin_delete(slug: String, confirm: String) -> Result<(), Server
 pub async fn sysadmin_reload(slug: String) -> Result<(), ServerFnError> {
     let ops = ssr::require().await?;
     let target = match ops.reload_tenant(slug.trim()).await {
-        Ok(()) => format!("/sysadmin?msg={}", urlencoding::encode(&format!("Mandant '{}' neu geladen", slug.trim()))),
+        Ok(()) => format!(
+            "/sysadmin?msg={}",
+            urlencoding::encode(&format!("Mandant '{}' neu geladen", slug.trim()))
+        ),
         Err(e) => format!("/sysadmin?error={}", urlencoding::encode(&e)),
     };
     leptos_axum::redirect(&target);
@@ -537,13 +543,19 @@ fn job_panel(j: ImportJob, slug_prefill: String, active: bool) -> AnyView {
     let log = j.log.join("\n");
     let jid = j.id.clone();
     let refresh_href = format!("/sysadmin?job={}", j.id);
-    let chip_cls = format!("job-state {}", match state {
-        JobState::Done => "done",
-        JobState::Failed => "failed",
-        _ => "active",
-    });
+    let chip_cls = format!(
+        "job-state {}",
+        match state {
+            JobState::Done => "done",
+            JobState::Failed => "failed",
+            _ => "active",
+        }
+    );
     let json_path = j.json_path.clone();
-    let preview = j.preview.clone().map(|p| preview_card(p, state, jid, slug_prefill, json_path));
+    let preview = j
+        .preview
+        .clone()
+        .map(|p| preview_card(p, state, jid, slug_prefill, json_path));
     let result = j.result.clone().map(result_card);
     view! {
         <div class="sysadmin-job">
@@ -562,27 +574,50 @@ fn job_panel(j: ImportJob, slug_prefill: String, active: bool) -> AnyView {
     .into_any()
 }
 
-fn preview_card(p: ImportPreview, state: JobState, jid: String, slug_prefill: String, json_path: String) -> AnyView {
+fn preview_card(
+    p: ImportPreview,
+    state: JobState,
+    jid: String,
+    slug_prefill: String,
+    json_path: String,
+) -> AnyView {
     let provision = ServerAction::<SysAdminProvision>::new();
-    let addr = format!("{}, {} {} {}", p.address_street, p.postcode, p.city, p.country);
+    let addr = format!(
+        "{}, {} {} {}",
+        p.address_street, p.postcode, p.city, p.country
+    );
     let coords = match (p.lat, p.lon) {
         (Some(a), Some(b)) => format!("{a:.5}, {b:.5}"),
         _ => "—".to_string(),
     };
-    let dash = |s: &str| if s.is_empty() { "—".to_string() } else { s.to_string() };
+    let dash = |s: &str| {
+        if s.is_empty() {
+            "—".to_string()
+        } else {
+            s.to_string()
+        }
+    };
     let menu_line = format!(
         "{} Kategorien · {} Artikel · {} Größen ({})",
         p.categories.len(),
         p.n_items,
         p.n_sizes,
-        if p.size_labels.is_empty() { "ohne Label".to_string() } else { p.size_labels.join(", ") }
+        if p.size_labels.is_empty() {
+            "ohne Label".to_string()
+        } else {
+            p.size_labels.join(", ")
+        }
     );
     let geo_line = if p.nrw_geo {
         "NRW-Kataster wird vorkonfiguriert (GEO_BACKEND=cadastre_nrw)"
     } else {
         "nicht vorkonfiguriert (kein NRW-Ort erkannt)"
     };
-    let action_label = if p.existing_tenant { "Menü dieses Mandanten ersetzen" } else { "Shop anlegen" };
+    let action_label = if p.existing_tenant {
+        "Menü dieses Mandanten ersetzen"
+    } else {
+        "Shop anlegen"
+    };
     let can_provision = state == JobState::Scraped || state == JobState::Failed;
     let cats = p.categories.clone();
     let existing = p.existing_tenant;
@@ -622,9 +657,11 @@ fn preview_card(p: ImportPreview, state: JobState, jid: String, slug_prefill: St
 }
 
 fn result_card(r: ProvisionResult) -> AnyView {
-    let staff = (!r.kitchen_password.is_empty()).then(|| view! {
-        <dt>"Küche"</dt><dd><code>{r.kitchen_password.clone()}</code></dd>
-        <dt>"Fahrer"</dt><dd><code>{r.driver_password.clone()}</code></dd>
+    let staff = (!r.kitchen_password.is_empty()).then(|| {
+        view! {
+            <dt>"Küche"</dt><dd><code>{r.kitchen_password.clone()}</code></dd>
+            <dt>"Fahrer"</dt><dd><code>{r.driver_password.clone()}</code></dd>
+        }
     });
     let note = r.env_created.then(|| view! {
         <p class="muted">
@@ -767,14 +804,20 @@ fn tenant_row(t: TenantInfo, active: bool) -> AnyView {
     let delete = ServerAction::<SysAdminDelete>::new();
     let (s_code, s_re, s_reload) = (t.slug.clone(), t.slug.clone(), t.slug.clone());
     let s_del = t.slug.clone();
-    let import_at = if t.import_at.is_empty() { "—".to_string() } else { t.import_at.clone() };
+    let import_at = if t.import_at.is_empty() {
+        "—".to_string()
+    } else {
+        t.import_at.clone()
+    };
     let src_link = has_src.then(|| {
         let (href, text) = (src.clone(), src.clone());
         view! { <br/><a class="muted" href=href target="_blank">{text}</a> }
     });
     let pw = |label: &'static str, value: String| {
-        (!value.is_empty()).then(|| view! {
-            <div class="pw"><span class="muted">{label}</span><code>{value}</code></div>
+        (!value.is_empty()).then(|| {
+            view! {
+                <div class="pw"><span class="muted">{label}</span><code>{value}</code></div>
+            }
         })
     };
     let passwords = view! {
@@ -782,12 +825,14 @@ fn tenant_row(t: TenantInfo, active: bool) -> AnyView {
         {pw("K", t.kitchen_password.clone())}
         {pw("F", t.driver_password.clone())}
     };
-    let reimport_form = has_src.then(|| view! {
-        <ActionForm action=reimport>
-            <input type="hidden" name="url" value=src.clone()/>
-            <input type="hidden" name="slug" value=s_re.clone()/>
-            <button type="submit" class="btn small" disabled=active>"Neu importieren"</button>
-        </ActionForm>
+    let reimport_form = has_src.then(|| {
+        view! {
+            <ActionForm action=reimport>
+                <input type="hidden" name="url" value=src.clone()/>
+                <input type="hidden" name="slug" value=s_re.clone()/>
+                <button type="submit" class="btn small" disabled=active>"Neu importieren"</button>
+            </ActionForm>
+        }
     });
     view! {
         <tr class:apex=t.is_apex>

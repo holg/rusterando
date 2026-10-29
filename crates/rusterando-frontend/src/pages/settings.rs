@@ -409,9 +409,7 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
         ));
     }
     if key == "delivery_paused" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
-        return Err(ServerFnError::new(
-            "delivery_paused muss 0 oder 1 sein",
-        ));
+        return Err(ServerFnError::new("delivery_paused muss 0 oder 1 sein"));
     }
     if key == "delivery_paused_message" && value.trim().chars().count() > 200 {
         return Err(ServerFnError::new(

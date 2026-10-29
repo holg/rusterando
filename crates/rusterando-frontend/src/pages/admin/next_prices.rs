@@ -189,8 +189,8 @@ pub async fn list_next_prices() -> Result<NextPricesView, ServerFnError> {
 /// `list_next_prices` so a slow/absent sibling tenant can never delay or
 /// break the price list itself.
 #[server(name = PriceBenchmarks, prefix = "/api", endpoint = "price_benchmarks")]
-pub async fn price_benchmarks() -> Result<Vec<crate::pages::sysadmin::CategoryBenchmark>, ServerFnError>
-{
+pub async fn price_benchmarks(
+) -> Result<Vec<crate::pages::sysadmin::CategoryBenchmark>, ServerFnError> {
     use sqlx::SqlitePool;
     crate::pages::admin::require_admin().await?;
     // Multi-tenant only: without the handle there are no sibling shops.

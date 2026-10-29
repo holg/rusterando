@@ -66,22 +66,29 @@ impl SysAdminConfig {
                 .find(|p| p.exists())
                 .unwrap_or_else(|| PathBuf::from(fallback))
         }
-        let python = std::env::var("SCRAPER_PYTHON").map(PathBuf::from).unwrap_or_else(|_| {
-            first_existing(&["rusterando-scrape/env_play_pdf_py12/bin/python"], "python3")
-        });
+        let python = std::env::var("SCRAPER_PYTHON")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                first_existing(
+                    &["rusterando-scrape/env_play_pdf_py12/bin/python"],
+                    "python3",
+                )
+            });
         let script = std::env::var("SCRAPER_SCRIPT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("rusterando-scrape/scrape_lieferando.py"));
-        let menu_import = std::env::var("MENU_IMPORT_BIN").map(PathBuf::from).unwrap_or_else(|_| {
-            first_existing(
-                &[
-                    "./menu-import-linux-x64",
-                    "./target/release/menu-import",
-                    "./target/debug/menu-import",
-                ],
-                "menu-import",
-            )
-        });
+        let menu_import = std::env::var("MENU_IMPORT_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                first_existing(
+                    &[
+                        "./menu-import-linux-x64",
+                        "./target/release/menu-import",
+                        "./target/debug/menu-import",
+                    ],
+                    "menu-import",
+                )
+            });
         let tmp_dir = std::env::var("IMPORT_TMP_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("tmp/imports"));
@@ -90,17 +97,33 @@ impl SysAdminConfig {
             .unwrap_or_else(|_| PathBuf::from("rusterando-scrape/menu-json"));
         let parent = {
             let s = slug_from_filename(&std::env::var("ENV_FILE").unwrap_or_default());
-            if s.is_empty() || s == ".env" { "rusterando".to_string() } else { s }
+            if s.is_empty() || s == ".env" {
+                "rusterando".to_string()
+            } else {
+                s
+            }
         };
         let domain = std::env::var("PUBLIC_URL")
             .ok()
             .and_then(|u| {
                 let no_scheme = u.split("://").nth(1).unwrap_or(&u).to_string();
-                let host = no_scheme.split('/').next().unwrap_or("").trim_start_matches("www.");
+                let host = no_scheme
+                    .split('/')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start_matches("www.");
                 (!host.is_empty()).then(|| host.to_string())
             })
             .unwrap_or_else(|| format!("{parent}.de"));
-        Self { python, script, menu_import, tmp_dir, menu_json_dir, parent, domain }
+        Self {
+            python,
+            script,
+            menu_import,
+            tmp_dir,
+            menu_json_dir,
+            parent,
+            domain,
+        }
     }
 }
 
@@ -168,7 +191,10 @@ impl SysAdmin {
         if tail.is_empty() {
             tracing::warn!("sysadmin job {id}: {msg}");
         } else {
-            tracing::warn!("sysadmin job {id}: {msg} — letzte Ausgabe: {}", tail.join(" | "));
+            tracing::warn!(
+                "sysadmin job {id}: {msg} — letzte Ausgabe: {}",
+                tail.join(" | ")
+            );
         }
         let full = if tail.is_empty() {
             msg
@@ -192,8 +218,12 @@ impl SysAdmin {
     ) -> Result<(), String> {
         let shown = format!("$ {:?}", cmd.as_std());
         Self::push_log(&self.jobs, id, shown).await;
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-        let mut child = cmd.spawn().map_err(|e| format!("Start fehlgeschlagen: {e}"))?;
+        cmd.stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Start fehlgeschlagen: {e}"))?;
         let mut pumps = Vec::new();
         if let Some(out) = child.stdout.take() {
             let me = Arc::clone(self);
@@ -235,7 +265,11 @@ impl SysAdmin {
 
     /// Build the preview out of the scraper's JSON (serde_json::Value — the
     /// importer owns the strict schema; here we only read what's shown).
-    async fn preview_from_json(&self, path: &Path, slug_override: Option<&str>) -> Result<ImportPreview, String> {
+    async fn preview_from_json(
+        &self,
+        path: &Path,
+        slug_override: Option<&str>,
+    ) -> Result<ImportPreview, String> {
         let raw = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| format!("JSON nicht lesbar ({}): {e}", path.display()))?;
@@ -260,23 +294,53 @@ impl SysAdmin {
         let slug = slug_override
             .map(|x| x.to_string())
             .filter(|x| !x.is_empty())
-            .unwrap_or_else(|| slugify(if source_slug.is_empty() { &name } else { &source_slug }));
+            .unwrap_or_else(|| {
+                slugify(if source_slug.is_empty() {
+                    &name
+                } else {
+                    &source_slug
+                })
+            });
         let mut categories = Vec::new();
         let mut n_items = 0usize;
         let mut n_sizes = 0usize;
         let mut labels: Vec<String> = Vec::new();
-        for cat in v.get("categories").and_then(|c| c.as_array()).into_iter().flatten() {
-            let items = cat.get("items").and_then(|i| i.as_array()).cloned().unwrap_or_default();
-            let name = cat.get("name").and_then(|n| n.as_str()).unwrap_or("").trim().to_string();
+        for cat in v
+            .get("categories")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let items = cat
+                .get("items")
+                .and_then(|i| i.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let name = cat
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if items.is_empty() {
                 continue;
             }
             categories.push((name, items.len()));
             n_items += items.len();
             for it in &items {
-                for sz in it.get("sizes").and_then(|x| x.as_array()).into_iter().flatten() {
+                for sz in it
+                    .get("sizes")
+                    .and_then(|x| x.as_array())
+                    .into_iter()
+                    .flatten()
+                {
                     n_sizes += 1;
-                    let l = sz.get("label").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+                    let l = sz
+                        .get("label")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     if !l.is_empty() && !labels.contains(&l) && labels.len() < 8 {
                         labels.push(l);
                     }
@@ -290,7 +354,11 @@ impl SysAdmin {
             .get("meta")
             .and_then(|m| m.get("hours"))
             .and_then(|h| h.as_object())
-            .map(|h| h.values().filter(|d| d.as_array().map(|a| !a.is_empty()).unwrap_or(false)).count())
+            .map(|h| {
+                h.values()
+                    .filter(|d| d.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+                    .count()
+            })
             .unwrap_or(0);
         let postcode = s(&["meta", "postcode"]);
         let country = s(&["meta", "country"]);
@@ -352,7 +420,8 @@ impl SysAdmin {
             } else {
                 ""
             };
-            self.fail(&id, format!("Scrape fehlgeschlagen{hint}: {e}")).await;
+            self.fail(&id, format!("Scrape fehlgeschlagen{hint}: {e}"))
+                .await;
             return;
         }
         match self.preview_from_json(&out, slug_override.as_deref()).await {
@@ -360,13 +429,22 @@ impl SysAdmin {
                 // Keep the scrape where the CLI workflow keeps it, named by the
                 // Lieferando slug (re-scraping the same shop overwrites in
                 // place, like the CLI). Provisioning imports from THERE.
-                let name = if p.source_slug.is_empty() { p.slug.clone() } else { p.source_slug.clone() };
+                let name = if p.source_slug.is_empty() {
+                    p.slug.clone()
+                } else {
+                    p.source_slug.clone()
+                };
                 let dest = self.cfg.menu_json_dir.join(format!("menu-{name}.json"));
                 let json_path = match tokio::fs::create_dir_all(&self.cfg.menu_json_dir).await {
                     Ok(()) => match tokio::fs::copy(&out, &dest).await {
                         Ok(_) => {
                             let _ = tokio::fs::remove_file(&out).await;
-                            Self::push_log(&self.jobs, &id, format!("[sysadmin] JSON gespeichert: {}", dest.display())).await;
+                            Self::push_log(
+                                &self.jobs,
+                                &id,
+                                format!("[sysadmin] JSON gespeichert: {}", dest.display()),
+                            )
+                            .await;
                             dest
                         }
                         Err(e) => {
@@ -404,10 +482,25 @@ impl SysAdmin {
 
     async fn run_provision(self: Arc<Self>, id: String, slug: String) {
         let json = {
-            let stored = self.jobs.read().await.get(&id).map(|j| j.json_path.clone()).unwrap_or_default();
-            if stored.is_empty() { self.json_path(&id) } else { PathBuf::from(stored) }
+            let stored = self
+                .jobs
+                .read()
+                .await
+                .get(&id)
+                .map(|j| j.json_path.clone())
+                .unwrap_or_default();
+            if stored.is_empty() {
+                self.json_path(&id)
+            } else {
+                PathBuf::from(stored)
+            }
         };
-        Self::push_log(&self.jobs, &id, format!("[sysadmin] importiere {}", json.display())).await;
+        Self::push_log(
+            &self.jobs,
+            &id,
+            format!("[sysadmin] importiere {}", json.display()),
+        )
+        .await;
         let env_file = self.env_file_for(&slug);
         let env_created = !Path::new(&env_file).exists();
         let (admin_pw, kitchen_pw, driver_pw) = (gen_password(), gen_password(), gen_password());
@@ -434,13 +527,23 @@ impl SysAdmin {
         }
         cmd.env("RUST_LOG", "info,sqlx=warn").env("NO_COLOR", "1");
         if let Err(e) = self.run_logged(&id, cmd, IMPORT_TIMEOUT).await {
-            self.fail(&id, format!("menu-import fehlgeschlagen: {e}")).await;
+            self.fail(&id, format!("menu-import fehlgeschlagen: {e}"))
+                .await;
             return;
         }
 
-        Self::push_log(&self.jobs, &id, format!("[sysadmin] lade Mandant '{slug}'…")).await;
+        Self::push_log(
+            &self.jobs,
+            &id,
+            format!("[sysadmin] lade Mandant '{slug}'…"),
+        )
+        .await;
         if let Err(e) = self.tenants.load_by_slug(&slug).await {
-            self.fail(&id, format!("Mandant importiert, aber Laden fehlgeschlagen: {e:#}")).await;
+            self.fail(
+                &id,
+                format!("Mandant importiert, aber Laden fehlgeschlagen: {e:#}"),
+            )
+            .await;
             return;
         }
         let tenant = self.tenants.get(&slug).await;
@@ -453,14 +556,30 @@ impl SysAdmin {
             admin_password: if env_created {
                 admin_pw
             } else {
-                tenant.as_ref().and_then(|t| t.auth.admin_password.clone()).unwrap_or_default()
+                tenant
+                    .as_ref()
+                    .and_then(|t| t.auth.admin_password.clone())
+                    .unwrap_or_default()
             },
-            kitchen_password: if env_created { kitchen_pw } else { String::new() },
-            driver_password: if env_created { driver_pw } else { String::new() },
+            kitchen_password: if env_created {
+                kitchen_pw
+            } else {
+                String::new()
+            },
+            driver_password: if env_created {
+                driver_pw
+            } else {
+                String::new()
+            },
             env_created,
             env_file,
         };
-        Self::push_log(&self.jobs, &id, format!("[sysadmin] fertig: {}", result.public_url)).await;
+        Self::push_log(
+            &self.jobs,
+            &id,
+            format!("[sysadmin] fertig: {}", result.public_url),
+        )
+        .await;
         if let Some(j) = self.jobs.write().await.get_mut(&id) {
             j.result = Some(result);
             j.state = JobState::Done;
@@ -480,7 +599,9 @@ impl SysAdminOps for SysAdmin {
         slugs.sort();
         let mut out = Vec::with_capacity(slugs.len());
         for slug in slugs {
-            let Some(t) = self.tenants.get(&slug).await else { continue };
+            let Some(t) = self.tenants.get(&slug).await else {
+                continue;
+            };
             let setting = |key: &'static str| {
                 let pool = t.pool.clone();
                 async move {
@@ -583,10 +704,16 @@ impl SysAdminOps for SysAdmin {
         }
         {
             let map = self.jobs.read().await;
-            let j = map.get(job_id).ok_or_else(|| "Job nicht gefunden".to_string())?;
+            let j = map
+                .get(job_id)
+                .ok_or_else(|| "Job nicht gefunden".to_string())?;
             // Scraped, or a failed provisioning whose scrape JSON is still on
             // disk (e.g. importer error fixed / slug corrected) → retry.
-            let json_ok = if j.json_path.is_empty() { self.json_path(job_id).exists() } else { Path::new(&j.json_path).exists() };
+            let json_ok = if j.json_path.is_empty() {
+                self.json_path(job_id).exists()
+            } else {
+                Path::new(&j.json_path).exists()
+            };
             let retryable = j.state == JobState::Failed && j.preview.is_some() && json_ok;
             if j.state != JobState::Scraped && !retryable {
                 return Err(format!("Job ist im Zustand {:?}, nicht bereit", j.state));
@@ -679,7 +806,10 @@ impl SysAdminOps for SysAdmin {
         if !valid_slug(slug) {
             return Err(format!("Ungültiger Slug '{slug}'"));
         }
-        self.tenants.load_by_slug(slug).await.map_err(|e| format!("{e:#}"))
+        self.tenants
+            .load_by_slug(slug)
+            .await
+            .map_err(|e| format!("{e:#}"))
     }
 
     async fn delete_tenant(&self, slug: &str) -> Result<String, String> {
@@ -687,7 +817,9 @@ impl SysAdminOps for SysAdmin {
             return Err(format!("Ungültiger Slug '{slug}'"));
         }
         if slug == self.apex_slug || slug == self.cfg.parent {
-            return Err(format!("'{slug}' ist der Apex-Mandant und kann nicht gelöscht werden"));
+            return Err(format!(
+                "'{slug}' ist der Apex-Mandant und kann nicht gelöscht werden"
+            ));
         }
         // Resolve the paths from the LIVE tenant (its real env_file +
         // DATABASE_URL) before unloading — never from a reconstructed name,
@@ -701,7 +833,13 @@ impl SysAdminOps for SysAdmin {
         let db_path = tenant
             .database_url
             .strip_prefix("sqlite:")
-            .map(|p| p.trim_start_matches("//").split('?').next().unwrap_or("").to_string())
+            .map(|p| {
+                p.trim_start_matches("//")
+                    .split('?')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
             .filter(|p| !p.is_empty());
         drop(tenant);
 
@@ -805,12 +943,13 @@ async fn zone_stats(pool: &sqlx::SqlitePool) -> ZoneStats {
     for (id, name, postcode, fee_cents, min_order_cents, eta_minutes, is_active, geometry_kind) in
         rows
     {
-        let street_overrides =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM geo_zone_streets WHERE zone_id = ?1")
-                .bind(&id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or(0);
+        let street_overrides = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM geo_zone_streets WHERE zone_id = ?1",
+        )
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
         // Unambiguous fee → count its delivery orders; otherwise report none.
         let (orders, revenue_cents) = if fee_counts.get(&fee_cents).copied().unwrap_or(0) == 1 {
             sqlx::query_as::<_, (i64, Option<i64>)>(
@@ -827,7 +966,9 @@ async fn zone_stats(pool: &sqlx::SqlitePool) -> ZoneStats {
             (0, 0)
         };
         zones.push(ZoneInfo {
-            name: name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| postcode.clone()),
+            name: name
+                .filter(|n| !n.trim().is_empty())
+                .unwrap_or_else(|| postcode.clone()),
             id,
             postcode,
             fee_cents,
@@ -841,9 +982,10 @@ async fn zone_stats(pool: &sqlx::SqlitePool) -> ZoneStats {
         });
     }
 
-    let delivery_orders =
-        scalar("SELECT COUNT(*) FROM orders WHERE order_type = 'delivery' AND status != 'cancelled'")
-            .await;
+    let delivery_orders = scalar(
+        "SELECT COUNT(*) FROM orders WHERE order_type = 'delivery' AND status != 'cancelled'",
+    )
+    .await;
     let fees_collected_cents = scalar(
         "SELECT COALESCE(SUM(delivery_fee_cents), 0) FROM orders
          WHERE order_type = 'delivery' AND status != 'cancelled'",
@@ -899,7 +1041,11 @@ fn validate_source_url(url: &str) -> Result<(), String> {
         || host.ends_with(".lieferando.at")
         || host.ends_with(".takeaway.com")
         || host.ends_with(".thuisbezorgd.nl");
-    if ok { Ok(()) } else { Err(format!("Nicht unterstützte Quelle: {host}")) }
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("Nicht unterstützte Quelle: {host}"))
+    }
 }
 
 /// Same rule as menu-import's `slugify` so the preview shows the slug the
@@ -946,13 +1092,19 @@ mod tests {
 
     #[test]
     fn slugify_matches_importer() {
-        assert_eq!(slugify("Pizzeria Rimini Lüdinghausen"), "pizzeria-rimini-l-dinghausen");
+        assert_eq!(
+            slugify("Pizzeria Rimini Lüdinghausen"),
+            "pizzeria-rimini-l-dinghausen"
+        );
         assert_eq!(slugify("--a--b--"), "a-b");
     }
 
     #[test]
     fn strips_ansi_and_control_chars() {
-        assert_eq!(strip_ansi("\u{1b}[2m2026\u{1b}[0m INFO\u{1b}[32m ok\u{1b}[0m\r"), "2026 INFO ok");
+        assert_eq!(
+            strip_ansi("\u{1b}[2m2026\u{1b}[0m INFO\u{1b}[32m ok\u{1b}[0m\r"),
+            "2026 INFO ok"
+        );
         assert_eq!(strip_ansi("plain\ttab"), "plain\ttab");
     }
 

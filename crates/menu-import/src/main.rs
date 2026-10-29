@@ -310,8 +310,14 @@ async fn main() -> Result<()> {
     } else {
         download_hero_image(&menu.meta, &root.join(&args.uploads_dir), &shop)
     };
-    let (n_cats, n_items, n_sizes) =
-        import_menu(&pool, &menu, &shop_name, &names.public_url, hero_image.as_deref()).await?;
+    let (n_cats, n_items, n_sizes) = import_menu(
+        &pool,
+        &menu,
+        &shop_name,
+        &names.public_url,
+        hero_image.as_deref(),
+    )
+    .await?;
     pool.close().await;
 
     tracing::info!(
@@ -599,7 +605,9 @@ fn rewrite_env(template: &str, n: &Names, overrides: &[(String, String)]) -> Str
         .filter(|(k, v)| !seen.contains(k.as_str()) && !v.is_empty())
         .collect();
     if !missing.is_empty() {
-        body.push_str("\n# ----- Set by menu-import ------------------------------------------------------\n");
+        body.push_str(
+            "\n# ----- Set by menu-import ------------------------------------------------------\n",
+        );
         for (k, v) in missing {
             body.push_str(&quote_env_line_if_needed(&format!("{k}={v}")));
             body.push('\n');
@@ -919,7 +927,12 @@ async fn import_menu(
     // that tenant's env, so without this it fell back to the process
     // PUBLIC_URL — the apex showroom — for the receipt QR.
     if !public_url.trim().is_empty() {
-        upsert_setting(&mut tx, "shop_public_url", public_url.trim().trim_end_matches('/')).await?;
+        upsert_setting(
+            &mut tx,
+            "shop_public_url",
+            public_url.trim().trim_end_matches('/'),
+        )
+        .await?;
     }
     let n_zones = localise_delivery_zones(&mut tx, &menu.meta).await?;
 
@@ -1209,12 +1222,14 @@ async fn write_branding(
     .await?
     .rows_affected();
     if n == 0 {
-        sqlx::query("INSERT INTO home_hero (id, title, subtitle, image_path) VALUES (1, ?1, ?2, ?3)")
-            .bind(shop_name)
-            .bind(&subtitle)
-            .bind(hero_image)
-            .execute(&mut **tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO home_hero (id, title, subtitle, image_path) VALUES (1, ?1, ?2, ?3)",
+        )
+        .bind(shop_name)
+        .bind(&subtitle)
+        .bind(hero_image)
+        .execute(&mut **tx)
+        .await?;
     }
 
     // The seeded gallery is three photos of the reference shop, captioned with
@@ -1268,11 +1283,17 @@ fn download_hero_image(meta: &Meta, uploads_dir: &Path, shop: &str) -> Option<St
         .into_iter()
         .find(|u| u.starts_with("https://"))?;
     if url.contains('{') {
-        tracing::warn!(url, "image URL still has an unsubstituted placeholder — skipped");
+        tracing::warn!(
+            url,
+            "image URL still has an unsubstituted placeholder — skipped"
+        );
         return None;
     }
 
-    let resp = match ureq::get(url).timeout(std::time::Duration::from_secs(20)).call() {
+    let resp = match ureq::get(url)
+        .timeout(std::time::Duration::from_secs(20))
+        .call()
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(url, error = %e, "hero image download failed — keeping the current image");
@@ -1286,12 +1307,20 @@ fn download_hero_image(meta: &Meta, uploads_dir: &Path, shop: &str) -> Option<St
     };
     use std::io::Read as _;
     let mut bytes = Vec::new();
-    if let Err(e) = resp.into_reader().take(8 * 1024 * 1024).read_to_end(&mut bytes) {
+    if let Err(e) = resp
+        .into_reader()
+        .take(8 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+    {
         tracing::warn!(url, error = %e, "hero image read failed");
         return None;
     }
     if bytes.len() < 1024 {
-        tracing::warn!(url, bytes = bytes.len(), "hero image suspiciously small — skipped");
+        tracing::warn!(
+            url,
+            bytes = bytes.len(),
+            "hero image suspiciously small — skipped"
+        );
         return None;
     }
     if let Err(e) = std::fs::create_dir_all(uploads_dir) {
@@ -1697,14 +1726,24 @@ mod tests {
     fn hero_subtitle_names_the_shops_own_town() {
         let mut m = Meta::default();
         m.city = "Aachen".into();
-        m.cuisines = vec!["Italienische Pizza".into(), "Döner".into(), "Schnitzel".into()];
+        m.cuisines = vec![
+            "Italienische Pizza".into(),
+            "Döner".into(),
+            "Schnitzel".into(),
+        ];
         let sub = hero_subtitle(&m);
-        assert_eq!(sub, "Italienische Pizza, Döner & Schnitzel — frisch aus Aachen.");
+        assert_eq!(
+            sub,
+            "Italienische Pizza, Döner & Schnitzel — frisch aus Aachen."
+        );
         // Never the reference shop's town.
         assert!(!sub.contains("Lüdinghausen"));
 
         // City only.
-        let m2 = Meta { city: "Aachen".into(), ..Default::default() };
+        let m2 = Meta {
+            city: "Aachen".into(),
+            ..Default::default()
+        };
         assert_eq!(hero_subtitle(&m2), "Frisch zubereitet — direkt aus Aachen.");
         // Nothing known → empty, so the existing subtitle is kept.
         assert_eq!(hero_subtitle(&Meta::default()), "");
@@ -1722,10 +1761,22 @@ mod tests {
         // Aachen, 10 km: ~0.09° lat, ~0.14° lon (cos(50.77°) ≈ 0.63).
         let b = bbox_around(Some(50.771763), Some(6.113469), 10.0).unwrap();
         let v: Vec<f64> = b.split(',').map(|x| x.parse().unwrap()).collect();
-        assert!((v[0]..=v[1]).contains(&50.771763), "lat band must contain the shop");
-        assert!((v[2]..=v[3]).contains(&6.113469), "lon band must contain the shop");
-        assert!((v[1] - v[0] - 0.1796).abs() < 0.01, "lat span ≈ 2×10km: {b}");
-        assert!((v[3] - v[2] - 0.2836).abs() < 0.02, "lon span widens with latitude: {b}");
+        assert!(
+            (v[0]..=v[1]).contains(&50.771763),
+            "lat band must contain the shop"
+        );
+        assert!(
+            (v[2]..=v[3]).contains(&6.113469),
+            "lon band must contain the shop"
+        );
+        assert!(
+            (v[1] - v[0] - 0.1796).abs() < 0.01,
+            "lat span ≈ 2×10km: {b}"
+        );
+        assert!(
+            (v[3] - v[2] - 0.2836).abs() < 0.02,
+            "lon span widens with latitude: {b}"
+        );
         // Lüdinghausen must NOT be inside an Aachen shop's box (the bug).
         assert!(!(v[0]..=v[1]).contains(&51.7701));
         assert_eq!(bbox_around(Some(0.0), Some(0.0), 10.0), None);
@@ -1750,7 +1801,10 @@ mod tests {
         // Standalone shops keep MULTI_TENANT=0.
         let ov = env_overrides(&[], &m, false).unwrap();
         assert_eq!(
-            ov.iter().find(|(a, _)| a == "MULTI_TENANT").map(|(_, v)| v.clone()).as_deref(),
+            ov.iter()
+                .find(|(a, _)| a == "MULTI_TENANT")
+                .map(|(_, v)| v.clone())
+                .as_deref(),
             Some("0")
         );
     }
@@ -1765,8 +1819,14 @@ mod tests {
             ("GEO_POSTCODE_MAP".to_string(), String::new()),
         ];
         let out = rewrite_env(tmpl, &n, &ov);
-        assert!(out.contains("#GEO_AGS="), "stale value must be commented out: {out}");
-        assert!(!out.contains("\nGEO_AGS=05558024"), "Lüdinghausen AGS must be gone: {out}");
+        assert!(
+            out.contains("#GEO_AGS="),
+            "stale value must be commented out: {out}"
+        );
+        assert!(
+            !out.contains("\nGEO_AGS=05558024"),
+            "Lüdinghausen AGS must be gone: {out}"
+        );
         assert!(!out.contains("59348"), "no inherited postcode map: {out}");
     }
 

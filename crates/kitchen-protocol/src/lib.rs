@@ -795,7 +795,14 @@ mod tests {
     #[test]
     fn board_status_db_round_trip() {
         use BoardStatus::*;
-        for st in [Received, Preparing, Ready, PickedUp, OutForDelivery, Cancelled] {
+        for st in [
+            Received,
+            Preparing,
+            Ready,
+            PickedUp,
+            OutForDelivery,
+            Cancelled,
+        ] {
             assert_eq!(BoardStatus::from_db(st.as_db()), Some(st));
         }
         assert_eq!(BoardStatus::from_db("pending_payment"), None);

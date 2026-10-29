@@ -26,8 +26,7 @@ pub fn ShopStatusBar(
     /// server so SSR and hydrate render the SAME DOM.
     #[prop(default = false)]
     init_delivery_paused: bool,
-    #[prop(default = String::new())]
-    init_delivery_reason: String,
+    #[prop(default = String::new())] init_delivery_reason: String,
 ) -> impl IntoView {
     // Live override from SSE; `None` until a ShopStatus event arrives.
     let (shop_override, set_shop_override) = signal::<Option<(ShopLevel, String)>>(None);

@@ -435,7 +435,10 @@ pub async fn set_orders_schedule() -> Result<(), ServerFnError> {
 pub async fn snooze_orders(minutes: i64) -> Result<(), ServerFnError> {
     crate::pages::admin::require_admin().await?;
     let h = handles()?;
-    h.control().snooze(minutes).await.map_err(ServerFnError::new)
+    h.control()
+        .snooze(minutes)
+        .await
+        .map_err(ServerFnError::new)
 }
 
 // ---------------------------------------------------------------------------
@@ -502,8 +505,9 @@ pub mod ssr {
         // has slots) while the customer banner correctly shows closed — and
         // clicking it would force-close instead of clearing the snooze.
         let snoozed = !snooze_until_label.is_empty();
-        let effective_open =
-            !orders_paused && !snoozed && !crate::pages::order::ssr::today_slots(db).await.is_empty();
+        let effective_open = !orders_paused
+            && !snoozed
+            && !crate::pages::order::ssr::today_slots(db).await.is_empty();
 
         // The exact customer view (green/amber/red + reason). The admin status
         // line is driven by this so it can never show green while the customer
@@ -766,10 +770,13 @@ pub mod ssr {
                 .clone()
                 .or_else(|| cur_open.clone())
                 .unwrap_or_else(|| now_hhmm.clone());
-            let close_time = new_close.clone().or_else(|| cur_close.clone()).ok_or_else(|| {
-                "Heute ist kein regulärer Betrieb — bitte auch eine Schließzeit angeben."
-                    .to_string()
-            })?;
+            let close_time = new_close
+                .clone()
+                .or_else(|| cur_close.clone())
+                .ok_or_else(|| {
+                    "Heute ist kein regulärer Betrieb — bitte auch eine Schließzeit angeben."
+                        .to_string()
+                })?;
             // Earlier-only on open: refuse moving the open LATER than it is now.
             if let (Some(req), Some(cur)) = (&new_open, &cur_open) {
                 if req > cur {
@@ -811,7 +818,10 @@ pub mod ssr {
             .execute(db)
             .await
             .map_err(|e| format!("set today hours: {e}"))?;
-            log::info!("[orders] today's hours set to {open_time}–{close_time} by {}", self.by);
+            log::info!(
+                "[orders] today's hours set to {open_time}–{close_time} by {}",
+                self.by
+            );
             // Customer banners + cart flip live (today's hours changed).
             self.broadcast().await;
             Ok(())

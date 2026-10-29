@@ -72,12 +72,7 @@ enum Channel {
 /// to hardcode the reference shop ("Davids Pizzeria"), so every tenant's Bon
 /// editor advertised someone else's restaurant. Empty falls back to a neutral
 /// placeholder rather than another shop's name.
-fn sample_order(
-    channel: Channel,
-    prepaid: bool,
-    theme: &str,
-    shop_name: &str,
-) -> OrderForKitchen {
+fn sample_order(channel: Channel, prepaid: bool, theme: &str, shop_name: &str) -> OrderForKitchen {
     let order_channel = match channel {
         Channel::Delivery => OrderChannel::Delivery {
             address: DeliveryAddress {
@@ -404,10 +399,7 @@ pub fn BonEditor(#[prop(default = true)] editable: bool) -> impl IntoView {
     // swaps in as a text update the walker doesn't see.
     let shop = OnceResource::new(crate::branding::get_shop_name());
     let lines = Memo::new(move |_| {
-        let name = shop
-            .get()
-            .and_then(|r| r.ok())
-            .unwrap_or_default();
+        let name = shop.get().and_then(|r| r.ok()).unwrap_or_default();
         let order = sample_order(channel.get(), prepaid.get(), &theme(), &name);
         build_layout(&order, false, &config_now())
     });

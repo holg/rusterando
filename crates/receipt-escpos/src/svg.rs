@@ -146,7 +146,10 @@ mod real_asset_tests {
     /// and assert it produced ink in both halves. Skips if assets absent.
     #[test]
     fn real_header_svg_renders_with_text() {
-        let dir = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/site/img"));
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/site/img"
+        ));
         let brand = dir.join("rusterando-printer-rando-brand-mark-paid.svg");
         let chan = dir.join("rusterando-printer-rando-delivery-e-car.svg");
         if !brand.exists() || !chan.exists() {

@@ -295,10 +295,17 @@ fn printer_line(p: &PiStatus) -> (&'static str, String) {
         None => "",
     };
     if p.waiting > 0 && p.oldest_waiting_secs >= 60 {
-        let n = if p.waiting == 1 { "1 Bon wartet".to_string() } else { format!("{} Bons warten", p.waiting) };
+        let n = if p.waiting == 1 {
+            "1 Bon wartet".to_string()
+        } else {
+            format!("{} Bons warten", p.waiting)
+        };
         return (
             "error",
-            format!("⚠ {n} seit {} — Drucker prüfen (Strom, Kabel, Papier)", ago(p.oldest_waiting_secs)),
+            format!(
+                "⚠ {n} seit {} — Drucker prüfen (Strom, Kabel, Papier)",
+                ago(p.oldest_waiting_secs)
+            ),
         );
     }
     let last = match p.last_print_secs {

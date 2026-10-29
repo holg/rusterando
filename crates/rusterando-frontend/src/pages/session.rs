@@ -527,7 +527,10 @@ pub mod ssr {
                     key
                 }
                 None => {
-                    log::error!("session key {} is not 64 hex digits — using a temporary key", path.display());
+                    log::error!(
+                        "session key {} is not 64 hex digits — using a temporary key",
+                        path.display()
+                    );
                     temporary_key()
                 }
             },
@@ -536,12 +539,18 @@ pub mod ssr {
                 rand::rngs::OsRng.fill_bytes(&mut key);
                 match write_key(path, &hex(&key)) {
                     Ok(()) => log::info!("session key created at {}", path.display()),
-                    Err(e) => log::error!("session key not saved at {}: {e} — sessions end at restart", path.display()),
+                    Err(e) => log::error!(
+                        "session key not saved at {}: {e} — sessions end at restart",
+                        path.display()
+                    ),
                 }
                 key
             }
             Err(e) => {
-                log::error!("session key {} unreadable: {e} — using a temporary key", path.display());
+                log::error!(
+                    "session key {} unreadable: {e} — using a temporary key",
+                    path.display()
+                );
                 temporary_key()
             }
         };
@@ -630,10 +639,15 @@ pub mod ssr {
     /// enforces a 7-day cap on *tracking* cookies, but our session cookie is
     /// first-party for the shop domain and exempt from that.
     pub async fn set_session(role: Role) -> Result<(), ServerFnError> {
-        let signature = session_signature(&context_auth(), role)
-            .ok_or_else(|| ServerFnError::new("Anmeldung derzeit nicht möglich (Sitzungsschlüssel)"))?;
+        let signature = session_signature(&context_auth(), role).ok_or_else(|| {
+            ServerFnError::new("Anmeldung derzeit nicht möglich (Sitzungsschlüssel)")
+        })?;
         let cookies: Cookies = extract().await?;
-        cookies.add(session_cookie(SESSION_COOKIE, role.as_str().to_string(), Duration::days(365)));
+        cookies.add(session_cookie(
+            SESSION_COOKIE,
+            role.as_str().to_string(),
+            Duration::days(365),
+        ));
         cookies.add(session_cookie(AUTH_COOKIE, signature, Duration::days(365)));
         Ok(())
     }
@@ -707,7 +721,9 @@ pub mod ssr {
 
 #[cfg(all(test, feature = "ssr"))]
 mod tests {
-    use super::ssr::{init_session_key, role_from_cookie_header, session_signature, verify_session};
+    use super::ssr::{
+        init_session_key, role_from_cookie_header, session_signature, verify_session,
+    };
     use super::{Role, TenantAuth};
 
     fn auth(scope: &str, kitchen: &str) -> TenantAuth {
@@ -730,13 +746,36 @@ mod tests {
         with_key();
         let davids = auth("davids", "k1");
         let sig = session_signature(&davids, Role::Kitchen).unwrap();
-        assert_eq!(verify_session(Some("kitchen"), Some(&sig), &davids), Some(Role::Kitchen));
+        assert_eq!(
+            verify_session(Some("kitchen"), Some(&sig), &davids),
+            Some(Role::Kitchen)
+        );
 
-        assert_eq!(verify_session(Some("admin"), None, &davids), None, "bare role cookie");
-        assert_eq!(verify_session(Some("admin"), Some(&sig), &davids), None, "kitchen signature as admin");
-        assert_eq!(verify_session(Some("kitchen"), Some("00"), &davids), None, "garbage signature");
-        assert_eq!(verify_session(Some("kitchen"), Some(&sig), &auth("other-shop", "k1")), None, "other shop");
-        assert_eq!(verify_session(Some("kitchen"), Some(&sig), &auth("davids", "k2")), None, "password changed");
+        assert_eq!(
+            verify_session(Some("admin"), None, &davids),
+            None,
+            "bare role cookie"
+        );
+        assert_eq!(
+            verify_session(Some("admin"), Some(&sig), &davids),
+            None,
+            "kitchen signature as admin"
+        );
+        assert_eq!(
+            verify_session(Some("kitchen"), Some("00"), &davids),
+            None,
+            "garbage signature"
+        );
+        assert_eq!(
+            verify_session(Some("kitchen"), Some(&sig), &auth("other-shop", "k1")),
+            None,
+            "other shop"
+        );
+        assert_eq!(
+            verify_session(Some("kitchen"), Some(&sig), &auth("davids", "k2")),
+            None,
+            "password changed"
+        );
     }
 
     #[test]
@@ -747,7 +786,11 @@ mod tests {
         let header = format!("cart_id=abc; dp_session=admin; dp_auth={sig}");
         assert_eq!(role_from_cookie_header(&header, &davids), Some(Role::Admin));
         assert_eq!(role_from_cookie_header("dp_session=admin", &davids), None);
-        assert_eq!(role_from_cookie_header("admin_session=ok", &davids), None, "legacy cookie no longer counts");
+        assert_eq!(
+            role_from_cookie_header("admin_session=ok", &davids),
+            None,
+            "legacy cookie no longer counts"
+        );
         assert_eq!(role_from_cookie_header("", &davids), None);
     }
 }

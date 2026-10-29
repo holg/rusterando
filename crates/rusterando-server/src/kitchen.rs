@@ -31,8 +31,8 @@ use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use kitchen_protocol::{ClientMessage, KitchenEvent, SeqId, ServerMessage, FRAME_MAX_BYTES};
 use sqlx::{Row, SqlitePool};
-use tokio::net::{TcpListener, TcpStream};
 use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
 
 use tokio::sync::{broadcast, mpsc, Notify};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
@@ -145,7 +145,15 @@ impl KitchenChannel {
     pub async fn board_action(&self, msg: ClientMessage) -> Result<(), String> {
         match msg {
             ClientMessage::BoardAdvance { order_id, from, to } => {
-                match crate::kitchen_board::advance(&self.db, self.live.as_ref(), &order_id, from, to).await {
+                match crate::kitchen_board::advance(
+                    &self.db,
+                    self.live.as_ref(),
+                    &order_id,
+                    from,
+                    to,
+                )
+                .await
+                {
                     Ok(true) => {
                         info!(%order_id, ?from, ?to, "board move applied (browser)");
                         Ok(())
@@ -259,7 +267,12 @@ impl KitchenChannel {
     /// update for `shop_slug` and the server holds an image for `arch` that
     /// differs from `running_version`. An already current device is
     /// disarmed instead.
-    pub async fn update_offer(&self, shop_slug: &str, running_version: &str, arch: &str) -> Option<KitchenEvent> {
+    pub async fn update_offer(
+        &self,
+        shop_slug: &str,
+        running_version: &str,
+        arch: &str,
+    ) -> Option<KitchenEvent> {
         let armed: Option<(i64,)> =
             sqlx::query_as("SELECT update_armed FROM kitchen_clients WHERE shop_slug = ?1")
                 .bind(shop_slug)
@@ -292,7 +305,9 @@ impl KitchenChannel {
     /// `FetchArtifact`. `None` past the end or without an image.
     pub fn artifact_chunk(&self, arch: &str, offset: u64) -> Option<KitchenEvent> {
         let art = crate::printer_artifacts::store().artifact(arch)?;
-        let start = usize::try_from(offset).ok().filter(|&s| s <= art.bytes.len())?;
+        let start = usize::try_from(offset)
+            .ok()
+            .filter(|&s| s <= art.bytes.len())?;
         let end = (start + crate::printer_artifacts::CHUNK_BYTES).min(art.bytes.len());
         Some(KitchenEvent::ArtifactChunk {
             component: kitchen_protocol::Component::PrinterBinary,
