@@ -1,10 +1,50 @@
 # Kitchen display — M5Stack Tab5 (ESP32-P4)
 
-The kitchen screen (`kds-ui`, the same Slint screen as the STM32 board and
-`/kitchen/display`) and the receipt printer client on an M5Stack Tab5:
+The kitchen screen and the receipt printer client on an M5Stack Tab5:
 5" 1280×720 touch panel, speaker, battery, USB-A host for the Epson.
 Rust std on ESP-IDF 5.4.4 (`riscv32imafc-esp-espidf`), outside the cargo
 workspace.
+
+**The screen is built with [Slint](https://slint.dev).** One `.slint` file,
+[`crates/kds-ui/ui/kitchen.slint`](../kds-ui/ui/kitchen.slint), with the
+shared logic in `kds-ui`, runs on three devices:
+
+| Device | Slint setup |
+|---|---|
+| M5Stack Tab5 (ESP32-P4) | MCU mode, software renderer, fonts pre-rendered as signed distance fields |
+| STM32MP135F-DK (Linux) | software renderer on KMS, the board's 480×272 touch screen |
+| Browser (`/kitchen/display`) | WebAssembly, WebGL |
+
+### Start
+
+Clock, opening state, the three columns at a glance, and the Tab5's own
+buttons: test print, battery care, alarm test.
+
+![Start page: clock, opening state, order counts, test print, battery care](screenshots/start.png)
+
+### Küche
+
+The board: new, in progress, ready. A tap moves an order on; waiting times
+turn amber and red, pre-orders count down to their time.
+
+![Küche page: three columns of order cards](screenshots/kueche.png)
+
+### Zeiten
+
+The shop's opening hours from the kitchen: open now, delivery off, pause
+when overloaded, emergency mode, today's hours earlier or later.
+
+![Zeiten page: opening hours quick controls](screenshots/zeiten.png)
+
+The pictures show the demo orders, drawn by the same renderer and fonts as
+on the device:
+
+```bash
+cd crates/kds-ui
+KDS_UI_SCALE=2.647 cargo run --release --features mcu --example screenshots -- ../kds-tab5/screenshots
+```
+
+## Overview
 
 | Part | How |
 |---|---|

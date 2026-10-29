@@ -37,3 +37,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 [build-dependencies]
 # sdf-fonts: the MCU build stores glyphs as signed distance fields (build.rs).
 slint-build = { version = "1.18", features = ["sdf-fonts"] }
+
+[dev-dependencies]
+# examples/screenshots.rs: the software renderer, as on the Tab5, into PNGs.
+slint = { version = "1.18", default-features = false, features = ["compat-1-18", "renderer-software"] }
+png = "0.18"
