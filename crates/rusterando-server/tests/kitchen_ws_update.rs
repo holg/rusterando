@@ -50,14 +50,21 @@ async fn armed(db: &sqlx::SqlitePool) -> i64 {
 #[tokio::test]
 async fn armed_update_is_offered_streamed_and_recorded() {
     let image: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 251) as u8).collect();
-    stage("0.2.0-test", &image);
+    stage("0.2.0-test-20261029-1200", &image);
     let (chan, db) = channel().await;
     let _feed = chan
-        .print_feed("tab5".into(), "0.1.0".into(), ARCH.into(), None)
+        .print_feed(
+            "tab5".into(),
+            "0.1.0-old-20261027-1140".into(),
+            ARCH.into(),
+            None,
+        )
         .await;
 
     assert!(
-        chan.update_offer("tab5", "0.1.0", ARCH).await.is_none(),
+        chan.update_offer("tab5", "0.1.0-old-20261027-1140", ARCH)
+            .await
+            .is_none(),
         "not armed: no offer"
     );
 
@@ -67,15 +74,17 @@ async fn armed_update_is_offered_streamed_and_recorded() {
         sha256,
         size,
         ..
-    }) = chan.update_offer("tab5", "0.1.0", ARCH).await
+    }) = chan
+        .update_offer("tab5", "0.1.0-old-20261027-1140", ARCH)
+        .await
     else {
         panic!("armed: offer expected");
     };
-    assert_eq!(target_version, "0.2.0-test");
+    assert_eq!(target_version, "0.2.0-test-20261029-1200");
     assert_eq!(size, image.len() as u64);
     assert_eq!(sha256, <[u8; 32]>::from(Sha256::digest(&image)));
     assert!(
-        chan.update_offer("tab5", "0.1.0", "aarch64")
+        chan.update_offer("tab5", "0.1.0-old-20261027-1140", "aarch64")
             .await
             .is_none(),
         "no image for that arch"
@@ -106,7 +115,8 @@ async fn armed_update_is_offered_streamed_and_recorded() {
     );
 
     // The reported result is recorded and disarms.
-    chan.update_result("tab5", "0.2.0-test", true, "").await;
+    chan.update_result("tab5", "0.2.0-test-20261029-1200", true, "")
+        .await;
     assert_eq!(armed(&db).await, 0);
     let (to, ok): (String, i64) = sqlx::query_as(
         "SELECT last_update_to, last_update_ok FROM kitchen_clients WHERE shop_slug = 'tab5'",
@@ -114,12 +124,21 @@ async fn armed_update_is_offered_streamed_and_recorded() {
     .fetch_one(&db)
     .await
     .unwrap();
-    assert_eq!((to.as_str(), ok), ("0.2.0-test", 1));
+    assert_eq!((to.as_str(), ok), ("0.2.0-test-20261029-1200", 1));
 
     // A device already on the staged version gets no offer and is disarmed.
     arm(&db, true).await;
     assert!(chan
-        .update_offer("tab5", "0.2.0-test", ARCH)
+        .update_offer("tab5", "0.2.0-test-20261029-1200", ARCH)
+        .await
+        .is_none());
+    assert_eq!(armed(&db).await, 0);
+
+    // Flashed over USB after the staging: the staged image is older, so it
+    // is no update — no offer (no downgrade), disarmed.
+    arm(&db, true).await;
+    assert!(chan
+        .update_offer("tab5", "0.2.0-usb-dirty-20261029-1745", ARCH)
         .await
         .is_none());
     assert_eq!(armed(&db).await, 0);

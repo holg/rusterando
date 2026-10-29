@@ -24,7 +24,8 @@ pub struct PiStatus {
     pub update_armed: bool,
     /// Server's target version for this Pi's arch, if an artifact is staged.
     pub target_version: Option<String>,
-    /// True when running == target (or no target staged → nothing to do).
+    /// True when the staged target isn't an update for this device: the same
+    /// version, an older build, or nothing staged ([`update_wanted`]).
     pub up_to_date: bool,
     pub last_update_to: String,
     pub last_update_ok: bool,
@@ -109,7 +110,7 @@ pub async fn list_pi_status() -> Result<Vec<PiStatus>, ServerFnError> {
             .filter(|s| !s.is_empty());
 
             let up_to_date = match &target_version {
-                Some(t) => *t == r.version,
+                Some(t) => !update_wanted(&r.version, t),
                 None => true, // nothing staged → nothing to push
             };
             let seconds_since_seen = if r.last_seen_at == 0 {
@@ -285,6 +286,32 @@ fn device_model(arch: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether a device running `running` should get the staged image `staged`.
+/// Tab5 versions end in their build time ("0.1.0-44db834-20261029-1130");
+/// when both carry one, only a newer build is an update. One image is staged
+/// for all devices of an arch, so a Tab5 flashed over USB after the last
+/// staging would otherwise be "updated" back to the older image. Versions
+/// without a build time (the Linux boards: "0.3.0") differ → update.
+pub fn update_wanted(running: &str, staged: &str) -> bool {
+    if running == staged {
+        return false;
+    }
+    match (build_time(running), build_time(staged)) {
+        (Some(running), Some(staged)) => staged >= running,
+        _ => true,
+    }
+}
+
+/// A version's trailing build time, "YYYYMMDD-HHMM", if it has one.
+fn build_time(version: &str) -> Option<&str> {
+    let start = version.len().checked_sub(14)?;
+    let tail = version.get(start..)?;
+    let stamp = tail.strip_prefix('-')?;
+    let (date, time) = stamp.split_once('-')?;
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    (digits(date, 8) && digits(time, 4)).then_some(stamp)
+}
+
 /// The card's printer line. A display without printer just says so; a
 /// printing client shows its last printed receipt, or a warning once a
 /// receipt has waited a minute without being printed.
@@ -343,6 +370,10 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
 
     let (ver_cls, ver_label) = match &p.target_version {
         Some(t) if !p.up_to_date => ("pi-ver mismatch", format!("{} → Ziel {}", p.version, t)),
+        Some(t) if *t != p.version => (
+            "pi-ver ok",
+            format!("{} (neuer als bereitgestellt: {})", p.version, t),
+        ),
         _ => ("pi-ver ok", format!("{} (aktuell)", p.version)),
     };
 
@@ -407,5 +438,27 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
                 }}
             </div>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::update_wanted;
+
+    #[test]
+    fn only_a_newer_build_is_an_update() {
+        let staged = "0.1.0-deee4f2-dirty-20261027-1140";
+        // Flashed over USB after staging: newer than the staged image.
+        assert!(!update_wanted("0.1.0-872de01-dirty-20261027-1745", staged));
+        assert!(update_wanted("0.1.0-ba14735-20261025-1706", staged));
+        assert!(!update_wanted(staged, staged));
+        // A build without a time (before this rule) still gets the update.
+        assert!(update_wanted("0.1.0-872de01-dirty", staged));
+    }
+
+    #[test]
+    fn linux_boards_update_whenever_the_version_differs() {
+        assert!(update_wanted("0.3.0", "0.3.1"));
+        assert!(!update_wanted("0.3.1", "0.3.1"));
     }
 }

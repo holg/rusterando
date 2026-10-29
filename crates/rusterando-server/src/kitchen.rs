@@ -30,6 +30,7 @@ use anyhow::Context;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use kitchen_protocol::{ClientMessage, KitchenEvent, SeqId, ServerMessage, FRAME_MAX_BYTES};
+use rusterando_frontend::pages::admin::printer_status::update_wanted;
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -287,8 +288,9 @@ impl KitchenChannel {
             info!(%shop_slug, %arch, "update armed but no image for this arch");
             return None;
         };
-        if art.version == running_version {
-            info!(%shop_slug, version = %running_version, "update armed but device already current — disarming");
+        if !update_wanted(running_version, &art.version) {
+            info!(%shop_slug, version = %running_version, staged = %art.version,
+                "update armed but the staged image is not newer — disarming");
             disarm(&self.db, shop_slug).await;
             return None;
         }
@@ -809,8 +811,9 @@ async fn maybe_serve_update(
         info!(%arch, "update armed but no artifact for arch — skipping");
         return Ok(());
     };
-    if art.version == running_version {
-        info!(version = %running_version, "update armed but Pi already on target — disarming");
+    if !update_wanted(running_version, &art.version) {
+        info!(version = %running_version, staged = %art.version,
+            "update armed but the staged image is not newer — disarming");
         disarm(db, shop_slug).await;
         return Ok(());
     }

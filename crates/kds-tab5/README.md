@@ -71,8 +71,9 @@ Always flash the release build (≈4.9 MB image with the logo renderer, SDF
 fonts + LTO). Changing `sdkconfig.defaults` or the components in
 `Cargo.toml` needs `cargo clean -p esp-idf-sys --release` first.
 
-The firmware reports its version as `<crate version>-<commit>[-dirty]`
-(`ota::VERSION`, set by the script); `stage` adds the time.
+The firmware reports its version as
+`<crate version>-<commit>[-dirty]-<YYYYMMDD-HHMM>` (`ota::VERSION`, set by
+the script): every build carries its build time, USB builds too.
 
 ## Updates over the network
 
@@ -88,6 +89,11 @@ board; the page shows the staged version). On its next connect, or within
 the Tab5 fetches it in 48 KB chunks into the other app slot, checks size
 and SHA-256, restarts into it and reports the result (shown on the admin
 page, disarmed either way).
+
+**Only newer builds are offered.** One image is staged for all Tab5s; a
+device running a later build (e.g. flashed over USB after the staging)
+shows "neuer als bereitgestellt" without an update button, and an armed
+update for it is dropped. Stage again to update it.
 
 **Rollback:** a new image runs "pending" until the print channel connects
 (Wi-Fi, TLS, login and server proven). A reset before that, or 5 minutes

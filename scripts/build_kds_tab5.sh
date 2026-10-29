@@ -68,14 +68,16 @@ else
     echo "note: $WIFI_ENV not found — building without Wi-Fi credentials" >&2
 fi
 
-# The firmware's version (ota::VERSION): what the server compares with the
-# staged update. Crate version + commit (+ -dirty); `stage` adds the time.
+# The firmware's version (ota::VERSION): crate version + commit (+ -dirty)
+# + build time, for every build (USB too). The server only offers a staged
+# image whose build time is newer than the running one's — a Tab5 flashed
+# over USB after the last staging is never "updated" back to it.
 if [ -z "${KDS_VERSION:-}" ]; then
     PKGVER="$(sed -n 's/^version = "\(.*\)"/\1/p' "$CRATE/Cargo.toml" | head -1)"
     GITREV="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo nogit)"
     git -C "$ROOT_DIR" diff --quiet HEAD -- crates/kds-tab5 crates/kds-ui crates/receipt-escpos crates/kitchen-protocol \
         2>/dev/null || GITREV="$GITREV-dirty"
-    KDS_VERSION="$PKGVER-$GITREV"
+    KDS_VERSION="$PKGVER-$GITREV-$(date +%Y%m%d-%H%M)"
 fi
 export KDS_VERSION
 
@@ -240,8 +242,6 @@ case "$CMD" in
         ;;
     stage)
         PROFILE=release
-        KDS_VERSION="$KDS_VERSION-$(date +%Y%m%d-%H%M)"
-        export KDS_VERSION
         build
         BOOTLOADER="$(bootloader)"
         [ -n "$BOOTLOADER" ] || { echo "ESP-IDF bootloader.bin not found" >&2; exit 5; }
