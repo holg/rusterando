@@ -53,8 +53,14 @@ pub fn run(
             set(wifi::describe(&wifi));
         }
         // SAFETY: read-only heap statistics.
-        let free_kb = unsafe { sys::esp_get_free_heap_size() } / 1024;
-        log::info!("alive #{beat}, free heap {free_kb} KB");
+        let (free_kb, internal_kb, internal_min_kb) = unsafe {
+        (
+            sys::esp_get_free_heap_size() / 1024,
+            sys::heap_caps_get_free_size(sys::MALLOC_CAP_INTERNAL) / 1024,
+            sys::heap_caps_get_minimum_free_size(sys::MALLOC_CAP_INTERNAL) / 1024,
+        )
+    };
+        log::info!("alive #{beat}, free heap {free_kb} KB, internal {internal_kb} KB (lowest {internal_min_kb} KB)");
         beat += 1;
     }
 }

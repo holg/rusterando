@@ -924,6 +924,10 @@ async fn main() {
         .route("/api/kds/feed", axum::routing::get(kds_feed_handler))
         .route("/api/kds/action", axum::routing::post(kds_action_handler))
         .route("/api/kitchen/ws", axum::routing::get(kitchen_ws_handler))
+        .route(
+            "/api/kitchen/test-receipt",
+            axum::routing::get(kitchen_test_receipt_handler),
+        )
         // Process-health probe — fd usage + uptime. Designed for an
         // external uptime monitor to poll every minute and alert on
         // `status != "ok"`. Unauthenticated, counters only.
@@ -1740,6 +1744,45 @@ async fn kds_action_handler(
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(reason) => (StatusCode::UNPROCESSABLE_ENTITY, reason).into_response(),
     }
+}
+
+/// `/api/kitchen/test-receipt` — the test receipt for a kitchen device's own
+/// "Testdruck" button: the admin test print's fake order with the shop's
+/// receipt settings and the live theme's logos, for the asking device only —
+/// nothing is broadcast, no order is created. Body:
+/// `encode_versioned(postcard(ReceiptProgram))`. `?delivery=true` /
+/// `?prepaid=true` pick the variant (default: pickup, unpaid).
+async fn kitchen_test_receipt_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    StaffRole(role): StaffRole,
+    axum::extract::Query(q): axum::extract::Query<TestReceiptQuery>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    if !kds_allowed(role) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let theme = rusterando_server::kitchen::printer_theme(&state.db).await;
+    let program =
+        rusterando_server::kitchen::compose_test_program(&state.db, q.delivery, q.prepaid, &theme)
+            .await;
+    match postcard::to_allocvec(&program) {
+        Ok(bytes) => (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            kitchen_protocol::encode_versioned(&bytes),
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TestReceiptQuery {
+    #[serde(default)]
+    delivery: bool,
+    #[serde(default)]
+    prepaid: bool,
 }
 
 /// A kitchen device's name (`kitchen_clients.shop_slug`), as the Pis use it.

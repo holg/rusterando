@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -48,6 +48,10 @@ const TAP_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 /// action sender and the print channel.
 pub type Session = Arc<Mutex<Option<String>>>;
 
+/// The session, once the feed has started: for requests made outside the
+/// feed's threads (the Start page's "Testdruck").
+static SESSION: OnceLock<Session> = OnceLock::new();
+
 /// The session cookie is kept across restarts (valid for a year), so a
 /// restart goes straight to the feed instead of logging in again.
 pub const NVS_NAMESPACE: &str = "kds";
@@ -69,6 +73,7 @@ pub fn start(
         .and_then(|s| s.get_str(KEY_COOKIE, &mut buf).ok().flatten())
         .map(str::to_string);
     let session: Session = Arc::new(Mutex::new(saved));
+    let _ = SESSION.set(session.clone());
     let store = Arc::new(Mutex::new(store));
     let feed_session = session.clone();
     let action_session = session.clone();
@@ -448,6 +453,36 @@ fn send_action(cookie: &str, msg: &ClientMessage) -> Result<Option<String>> {
     let n = embedded_svc::utils::io::try_read_full(&mut response, &mut buf).map_err(|e| anyhow!("read: {:?}", e.0))?;
     let text = String::from_utf8_lossy(&buf[..n]).trim().to_string();
     Ok(Some(if text.is_empty() { format!("Server: Fehler {status}") } else { text }))
+}
+
+/// `GET {SHOP_URL}{path}` with the Küche session; the body, up to `max`
+/// bytes. Fails without a session (not logged in yet) or on any status but 2xx.
+pub fn get(path: &str, max: usize) -> Result<Vec<u8>> {
+    let cookie = SESSION
+        .get()
+        .and_then(|s| s.lock().ok()?.clone())
+        .ok_or_else(|| anyhow!("nicht angemeldet"))?;
+    let url = format!("{SHOP_URL}{path}");
+    let headers = [("cookie", cookie.as_str())];
+    let mut client = client(Duration::from_secs(20))?;
+    let request = client.request(Method::Get, &url, &headers)?;
+    let mut response = request.submit()?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        bail!("Server: Fehler {status}");
+    }
+    let mut body = Vec::new();
+    let mut buf = [0u8; 2048];
+    loop {
+        let n = embedded_svc::io::Read::read(&mut response, &mut buf).map_err(|e| anyhow!("read: {e:?}"))?;
+        if n == 0 {
+            return Ok(body);
+        }
+        if body.len() + n > max {
+            bail!("Antwort größer als {max} B");
+        }
+        body.extend_from_slice(&buf[..n]);
+    }
 }
 
 fn urlencode(s: &str) -> String {

@@ -266,7 +266,8 @@ pub fn run(
                 .stack_size(16 * 1024)
                 .spawn(move || {
                     let msg = match printing::test_print(&printer) {
-                        Ok(()) => UiMsg::Info("Testdruck gesendet".into()),
+                        Ok(true) => UiMsg::Info("Testdruck gesendet".into()),
+                        Ok(false) => UiMsg::Info("Testdruck gesendet — ohne Logo (Server nicht erreichbar)".into()),
                         Err(e) => UiMsg::Notice(format!("Testdruck fehlgeschlagen: {e:#}")),
                     };
                     let _ = notices.send(msg);

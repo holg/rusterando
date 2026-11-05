@@ -991,20 +991,7 @@ impl rusterando_frontend::pages::push::KitchenSink for KitchenChannel {
         prepaid: bool,
         theme: String,
     ) -> anyhow::Result<()> {
-        use rusterando_frontend::pages::settings::ssr as settings;
-
-        let (shop_name, public_url_base) = resolve_brand_and_url(db).await;
-        // A representative fake order so the layout is realistic. Marked as
-        // test_mode so the *** TEST *** banner makes clear this isn't a real
-        // ticket. QR points at the shop's configured target (or homepage).
-        let mut dto = sample_order_for_test(&shop_name, &theme, delivery, prepaid);
-        dto.qr_url = settings::resolve_qr_url(db, &public_url_base, "TESTDRUCK").await;
-        let config = settings::receipt_config(db).await;
-
-        let site_root =
-            std::env::var("LEPTOS_SITE_ROOT").unwrap_or_else(|_| "target/site".to_string());
-        let provider = crate::bon_designer::provider(&site_root);
-        let program = kitchen_protocol::receipt::compose(&dto, false, &config, provider);
+        let program = compose_test_program(db, delivery, prepaid, &theme).await;
         self.broadcast(KitchenEvent::Print(program)).await?;
         Ok(())
     }
@@ -1092,6 +1079,44 @@ fn sample_order_for_test(
         pickup_time_label: Some("18:30".into()),
         printer_theme: theme.to_string(),
     }
+}
+
+/// The test receipt: a representative fake order, so the layout is
+/// realistic, composed like a real one — the shop's receipt settings, the
+/// theme's logos (the same artwork and renderer path as live orders). Marked
+/// as test_mode so the *** TEST *** banner makes clear this isn't a real
+/// ticket; no order is created. QR points at the shop's configured target
+/// (or homepage). Used by the admin's test print (to every printer) and by a
+/// kitchen device's own "Testdruck" (`/api/kitchen/test-receipt`, to that
+/// device only).
+pub async fn compose_test_program(
+    db: &SqlitePool,
+    delivery: bool,
+    prepaid: bool,
+    theme: &str,
+) -> kitchen_protocol::receipt::ReceiptProgram {
+    use rusterando_frontend::pages::settings::ssr as settings;
+
+    let (shop_name, public_url_base) = resolve_brand_and_url(db).await;
+    let mut dto = sample_order_for_test(&shop_name, theme, delivery, prepaid);
+    dto.qr_url = settings::resolve_qr_url(db, &public_url_base, "TESTDRUCK").await;
+    let config = settings::receipt_config(db).await;
+
+    let site_root = std::env::var("LEPTOS_SITE_ROOT").unwrap_or_else(|_| "target/site".to_string());
+    let provider = crate::bon_designer::provider(&site_root);
+    kitchen_protocol::receipt::compose(&dto, false, &config, provider)
+}
+
+/// The receipt layout theme live orders get (`app_settings.printer_theme`).
+/// Empty / missing → the default layout, without logos. Read live so an
+/// admin change applies to the next order without a server restart.
+pub async fn printer_theme(db: &SqlitePool) -> String {
+    sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'printer_theme'")
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
 }
 
 impl KitchenChannel {
@@ -1536,16 +1561,7 @@ pub async fn build_order_for_kitchen(
         None
     };
 
-    // Receipt layout theme (app_settings.printer_theme). Empty / missing
-    // → the Pi renders the default layout. Read live so an admin change
-    // applies to the next order without a server restart.
-    let printer_theme: String =
-        sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'printer_theme'")
-            .fetch_optional(db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
+    let printer_theme = printer_theme(db).await;
 
     Ok(OrderForKitchen {
         order_id: OrderId(hasher.finish()),

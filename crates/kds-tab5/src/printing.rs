@@ -52,8 +52,12 @@ const PRINT_TRIES: u32 = 3;
 /// Rendered logos kept (by content hash): a handful of channel/payment
 /// variants, the same on every receipt.
 const LOGO_CACHE: usize = 16;
-/// The logo renderer's stack (measured: resvg peaks at about 80 KB).
-const RENDER_STACK: usize = 128 * 1024;
+/// The logo renderer's stack, in PSRAM. resvg recurses per SVG group: the
+/// warm-up logo peaks at about 80 KB, the shop's composed receipt logo
+/// (729×120, nested groups, text, 35 `use`) at 232 KB — with 128 KB it
+/// overflowed and the device restarted on its first real order. Logos come
+/// from the admin's theme, so plenty of headroom; PSRAM has ~30 MB free.
+const RENDER_STACK: usize = 1024 * 1024;
 const KEY_SEQ: &str = "kitchen_seq";
 
 /// What the Start page shows about printing.
@@ -95,6 +99,7 @@ pub fn start(
 
 fn run(printer: UsbPrinter, session: Session, nvs: EspDefaultNvsPartition, ui: Sender<UiMsg>, status: SharedStatus) {
     warm_up_logos();
+    replay_job();
     let store = EspNvs::new(nvs, feed::NVS_NAMESPACE, true)
         .map_err(|e| log::warn!("printing: NVS: {e}"))
         .ok();
@@ -107,12 +112,17 @@ fn run(printer: UsbPrinter, session: Session, nvs: EspDefaultNvsPartition, ui: S
         download: None,
     };
     let base = feed::SHOP_URL.replacen("https://", "wss://", 1).replacen("http://", "ws://", 1);
+    // Diagnostic builds: the server's test receipt, rendered once after login.
+    let mut dry_test_receipt = option_env!("KDS_DRY_RENDER").is_some();
     loop {
         let Some(cookie) = session.lock().ok().and_then(|s| s.clone()) else {
             // The feed logs in; wait for it.
             std::thread::sleep(Duration::from_secs(1));
             continue;
         };
+        if std::mem::take(&mut dry_test_receipt) {
+            dry_render_test_receipt();
+        }
         let mut url = format!(
             "{base}/api/kitchen/ws?slug={}&version={}&arch={}",
             board::device_name(),
@@ -226,6 +236,20 @@ impl Channel {
         let number = program.display_number;
         if !self.printer.present() {
             log::info!("printing: seq {seq} (Bon #{number}): no printer attached, not printed");
+            // Diagnostic builds (KDS_DRY_RENDER=1): render the receipt anyway,
+            // logos included, to test the renderer on real jobs without a printer.
+            if option_env!("KDS_DRY_RENDER").is_some() {
+                let started = Instant::now();
+                log::warn!("printing: seq {seq} (Bon #{number}): dry render …");
+                match receipt_escpos::render(program, &mut logo) {
+                    Ok(bytes) => log::warn!(
+                        "printing: seq {seq} (Bon #{number}): dry render ok, {} B in {} ms",
+                        bytes.len(),
+                        started.elapsed().as_millis()
+                    ),
+                    Err(e) => log::warn!("printing: seq {seq} (Bon #{number}): dry render failed: {e:#}"),
+                }
+            }
             self.remember(seq);
             return;
         }
@@ -379,10 +403,10 @@ struct RenderJob {
     reply: SyncSender<Result<Bitmap>>,
 }
 
-/// Render an SVG logo on the renderer thread. resvg needs about 80 KB of
-/// stack; that must not come out of the internal RAM (TLS's SHA engine
-/// needs it — a big internal stack broke every handshake), so the renderer
-/// runs on its own thread with its stack in PSRAM. That thread never touches
+/// Render an SVG logo on the renderer thread. resvg needs a deep stack
+/// ([`RENDER_STACK`]); that must not come out of the internal RAM (TLS's SHA
+/// engine needs it — a big internal stack broke every handshake), so the
+/// renderer runs on its own thread with its stack in PSRAM. That thread never touches
 /// flash: a task with a PSRAM stack must not run while the cache is off.
 fn rasterize(svg: &[u8], width: u16) -> Result<Bitmap> {
     static RENDERER: OnceLock<Option<Mutex<Sender<RenderJob>>>> = OnceLock::new();
@@ -421,14 +445,16 @@ fn spawn_renderer() -> Result<Sender<RenderJob>> {
         .name("logos".into())
         .stack_size(RENDER_STACK)
         .spawn(move || {
-            let mut first = true;
             for job in rx {
                 let _ = job.reply.send(receipt_escpos::svg::rasterize(&job.svg, job.width));
-                if std::mem::take(&mut first) {
-                    // SAFETY: plain query about this task.
-                    let free = unsafe { sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) };
-                    log::info!("printing: logo renderer stack (PSRAM): {free} of {RENDER_STACK} bytes never used");
-                }
+                // After every new logo (they're cached): how close the
+                // stack came to its end.
+                // SAFETY: plain query about this task.
+                let free = unsafe { sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) };
+                log::info!(
+                    "printing: logo renderer stack (PSRAM): peak {} of {RENDER_STACK} bytes",
+                    RENDER_STACK as u32 - free
+                );
             }
         });
     // SAFETY: as above.
@@ -476,17 +502,94 @@ fn logo(hash: &[u8; 32], target_width: u16, svg: &[u8]) -> Option<Bitmap> {
     }
 }
 
-/// Start page "Testdruck": a sample receipt, composed here with the server's
-/// layout code (umlauts, €, QR code, cut).
-pub fn test_print(printer: &UsbPrinter) -> Result<()> {
-    struct NoLogos;
-    impl RasterProvider for NoLogos {
-        fn resolve(&self, _theme: &str, _slot: RasterSlot) -> Option<ComposedSvg> {
-            None
+/// Diagnostic builds (`KDS_REPLAY_JOB`, see build.rs): one stored print job
+/// from the server, decoded and rendered on this thread like a live one —
+/// logos included — but not printed. Empty in normal builds.
+static REPLAY_JOB: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/replay_job.bin"));
+
+fn replay_job() {
+    if REPLAY_JOB.is_empty() {
+        return;
+    }
+    log::warn!("printing: replaying a stored job ({} B)", REPLAY_JOB.len());
+    let event = match kitchen_protocol::decode_versioned(REPLAY_JOB) {
+        Ok((_minor, bytes)) => postcard::from_bytes::<KitchenEvent>(bytes),
+        Err(e) => {
+            log::warn!("printing: replay: {e:?}");
+            return;
+        }
+    };
+    let program = match event {
+        Ok(KitchenEvent::Print(program)) => program,
+        Ok(_) => {
+            log::warn!("printing: replay: not a print job");
+            return;
+        }
+        Err(e) => {
+            log::warn!("printing: replay: undecodable: {e}");
+            return;
+        }
+    };
+    let number = program.display_number;
+    let started = Instant::now();
+    log::warn!("printing: replay Bon #{number}: rendering …");
+    match receipt_escpos::render(&program, &mut logo) {
+        Ok(bytes) => log::warn!(
+            "printing: replay Bon #{number}: rendered, {} B in {} ms",
+            bytes.len(),
+            started.elapsed().as_millis()
+        ),
+        Err(e) => log::warn!("printing: replay Bon #{number}: render failed: {e:#}"),
+    }
+}
+
+/// Start page "Testdruck": the server's test receipt — the admin test
+/// print's fake order with the shop's receipt settings and the live theme's
+/// logos, so the logo renderer runs exactly as for a real order (a test
+/// without logos once missed a renderer crash). Only this device gets it; no
+/// order is created. Offline (or an older server): a sample receipt composed
+/// here, without logos. Returns whether the server's receipt was printed.
+pub fn test_print(printer: &UsbPrinter) -> Result<bool> {
+    match server_test_receipt() {
+        Ok(program) => {
+            log::info!("printing: test receipt from the server, with the theme's logos");
+            print_program(printer, &program)?;
+            Ok(true)
+        }
+        Err(e) => {
+            log::warn!("printing: test receipt from the server: {e:#} — printing the local one, without logos");
+            struct NoLogos;
+            impl RasterProvider for NoLogos {
+                fn resolve(&self, _theme: &str, _slot: RasterSlot) -> Option<ComposedSvg> {
+                    None
+                }
+            }
+            let program = receipt::compose(&sample_order(), false, &ReceiptConfig::default(), &NoLogos);
+            print_program(printer, &program)?;
+            Ok(false)
         }
     }
-    let program = receipt::compose(&sample_order(), false, &ReceiptConfig::default(), &NoLogos);
-    print_program(printer, &program)
+}
+
+/// Diagnostic builds (`KDS_DRY_RENDER`): fetch and render the server's test
+/// receipt without a printer — the endpoint and the logo path, at the desk.
+fn dry_render_test_receipt() {
+    let started = Instant::now();
+    match server_test_receipt().and_then(|program| receipt_escpos::render(&program, &mut logo).map_err(Into::into)) {
+        Ok(bytes) => log::warn!(
+            "printing: server test receipt: dry render ok, {} B in {} ms",
+            bytes.len(),
+            started.elapsed().as_millis()
+        ),
+        Err(e) => log::warn!("printing: server test receipt: {e:#}"),
+    }
+}
+
+/// `GET /api/kitchen/test-receipt`: `encode_versioned(postcard(ReceiptProgram))`.
+fn server_test_receipt() -> Result<ReceiptProgram> {
+    let body = feed::get("/api/kitchen/test-receipt", MAX_FRAME)?;
+    let (_minor, bytes) = kitchen_protocol::decode_versioned(&body).map_err(|e| anyhow!("{e:?}"))?;
+    Ok(postcard::from_bytes(bytes)?)
 }
 
 fn sample_order() -> OrderForKitchen {

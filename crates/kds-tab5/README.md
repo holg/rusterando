@@ -156,9 +156,15 @@ image.
 - **Logos:** the server sends them as SVG; the Tab5 renders them with the
   same code as the STM board (`receipt-escpos`, feature `svg`: resvg +
   bundled Poppins), cached by content hash. The renderer runs on its own
-  thread with a 128 KB stack in **PSRAM** — resvg peaks at about 80 KB, and
-  a stack that size in internal RAM starves TLS's SHA engine (every
-  handshake failed). That thread never touches flash.
+  thread with a **1 MB stack in PSRAM**: resvg recurses per SVG group, and
+  the shop's composed receipt logo peaks at 232 KB (128 KB overflowed — the
+  device restarted on its first real order, 2026-11-05). A big stack in
+  internal RAM starves TLS's SHA engine (every handshake failed). That
+  thread never touches flash. The log shows the peak after every new logo.
+- **Diagnostics:** `KDS_DRY_RENDER=1` (render every job even without a
+  printer) and `KDS_REPLAY_JOB=<hex file>` (run one stored job at start,
+  e.g. `sqlite3 … "SELECT hex(payload) FROM kitchen_outbox WHERE id=…"`)
+  reproduce printing problems at the desk, without a printer.
 - **Offline:** the screen keeps the last board ("letzter Stand"). Board taps
   ("fertig", …) made without a connection are queued and sent in order once
   the server is reachable (up to 10 min old); the server checks each against
