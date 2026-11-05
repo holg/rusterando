@@ -108,8 +108,13 @@ BOARD=jc1060p470 PROFILE=release scripts/build_kds_tab5.sh stage   # update slot
   pixel → lane-clock conversion is exact — with Guition's 52 MHz / 750 Mbps
   it truncates, and the whole picture flickers (details in
   `boards/jc1060p470/bsp/src/bsp_display.c`).
-- **No speaker included:** amplifier and ES8311 codec are on board, the
-  speaker goes into the 2-pin MX1.25 socket. No gong until then.
+- **Gong:** ES8311 codec and NS4150 amplifier are on board and set up
+  (`bsp_audio.c`, the Tab5's `gong.rs`), but no speaker comes with it: plug
+  one (e.g. Waveshare "2030 Cavity Speaker (B)", 8 Ω 2 W, 2-pin PH1.25)
+  into the MX1.25 socket **left of the micro-SD slot** — the one right of it
+  is the lithium battery input. "Alarm testen" on the Start page plays it.
+  No Bluetooth speaker: the C6 does Bluetooth LE only, speakers need
+  Classic Bluetooth (A2DP).
 - **USB printer:** the "high-speed" USB-C port (USB host), with an OTG
   adapter or a C-to-B cable; flashing and the console use the other one
   (from the schematic, not tested with a printer yet).

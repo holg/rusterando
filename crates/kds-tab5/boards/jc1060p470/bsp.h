@@ -4,5 +4,6 @@
 #include "bsp/jc1060p470.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_touch.h"
+#include "esp_codec_dev.h"
 #include "usb/usb_host.h"
 #include "usb/usb_helpers.h"

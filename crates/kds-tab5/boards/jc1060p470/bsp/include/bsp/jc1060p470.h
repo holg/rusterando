@@ -23,6 +23,7 @@
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_touch.h"
 #include "esp_netif.h"
+#include "esp_codec_dev.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +52,16 @@ extern "C" {
  * would pick the I2C address; bsp_touch_new probes both instead. */
 #define BSP_LCD_TOUCH_RST      (GPIO_NUM_NC)
 #define BSP_LCD_TOUCH_INT      (GPIO_NUM_NC)
+
+/* Audio: ES8311 codec over I2S into the NS4150 amplifier; the speaker
+ * socket is MX1.25 2-pin (no speaker comes with the board). */
+#define BSP_I2S_NUM            (I2S_NUM_0)
+#define BSP_I2S_MCLK           (GPIO_NUM_13)
+#define BSP_I2S_SCLK           (GPIO_NUM_12)
+#define BSP_I2S_LCLK           (GPIO_NUM_10)
+#define BSP_I2S_DOUT           (GPIO_NUM_9)  /* P4 -> codec */
+#define BSP_I2S_DSIN           (GPIO_NUM_48) /* codec -> P4 (microphone), unused */
+#define BSP_POWER_AMP_IO       (GPIO_NUM_11) /* NS4150 enable, active high */
 
 /* Ethernet: the P4's EMAC, RMII to an IP101 PHY */
 #define BSP_ETH_MDC            (31)
@@ -84,6 +95,17 @@ typedef struct {
 /* Touch points come in panel pixels (0..1023, 0..599), whatever resolution
  * the GT911's own configuration reports. Needs bsp_i2c_init first. */
 esp_err_t bsp_touch_new(const bsp_touch_config_t *config, esp_lcd_touch_handle_t *ret_touch);
+
+/* Audio, as in Espressif's board packages. The codec handle plays 48 kHz /
+ * 16 bit / mono after esp_codec_dev_open; the amplifier stays off until
+ * bsp_feature_enable(BSP_FEATURE_SPEAKER, true). */
+esp_codec_dev_handle_t bsp_audio_codec_speaker_init(void);
+
+typedef enum {
+    BSP_FEATURE_SPEAKER,
+} bsp_feature_t;
+
+esp_err_t bsp_feature_enable(bsp_feature_t feature, bool enable);
 
 /* USB host (the receipt printer) */
 typedef enum bsp_usb_host_power_mode_t {

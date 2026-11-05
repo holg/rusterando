@@ -18,7 +18,6 @@ mod board;
 mod crashlog;
 mod display;
 mod feed;
-#[cfg_attr(feature = "jc1060p470", path = "jc1060p470/gong.rs")]
 mod gong;
 #[cfg_attr(feature = "jc1060p470", path = "jc1060p470/imu.rs")]
 mod imu;
