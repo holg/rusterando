@@ -16,6 +16,13 @@ publish = false
 name = "kds-tab5"
 harness = false
 
+[features]
+# The 7" Guition JC1060P470 (ESP32-P4, 1024×600, Ethernet) instead of the
+# Tab5: its own board package (boards/jc1060p470), components and sdkconfig,
+# chosen by `BOARD=jc1060p470 scripts/build_kds_tab5.sh` (never by hand: the
+# component list and sdkconfig come from the script's environment).
+jc1060p470 = []
+
 [profile.release]
 opt-level = "s"
 # Smallest image: whole-program optimisation across all crates.

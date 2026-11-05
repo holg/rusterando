@@ -23,6 +23,12 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use esp_idf_svc::sys::{self, bsp, esp};
 
+/// What this device reports as its arch on the print channel: the server
+/// stages one update image per arch (artifacts/printer/<arch>/).
+pub const ARCH: &str = "esp32p4";
+/// The device on the test receipt.
+pub const MODEL: &str = "Tab5";
+
 /// E2.P7: battery charging enable.
 const CHARGE_EN: u32 = bsp::esp_io_expander_pin_num_t_IO_EXPANDER_PIN_NUM_7;
 /// E2.P5: fast charging, active low.

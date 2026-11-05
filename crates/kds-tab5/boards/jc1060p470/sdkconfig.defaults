@@ -1,0 +1,30 @@
+# Guition JC1060P470 — applied after ../../sdkconfig.defaults (the chip,
+# flash, PSRAM, console, stack and update settings are the Tab5's: the same
+# ESP32-P4 rev v1.3, 16 MB flash, 32 MB PSRAM). Later files win.
+
+# Wi-Fi coprocessor (ESP32-C6, esp_hosted 2.3.0 from the factory) on SDIO
+# slot 1, wired as on Espressif's P4 EV board — Guition's factory firmware
+# logs "CLK[18] CMD[19] D0[14] D1[15] D2[16] D3[17] Slave_Reset[54]".
+# In esp_hosted 2.x the pins are set per slot; the Tab5's
+# CONFIG_ESP_HOSTED_SDIO_PIN_* lines in the shared file are derived values
+# there and get ignored, but its reset GPIO is a real setting: overridden.
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
+CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CLK_SLOT_1=18
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_CMD_SLOT_1=19
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D0_SLOT_1=14
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D1_4BIT_BUS_SLOT_1=15
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D2_4BIT_BUS_SLOT_1=16
+CONFIG_ESP_HOSTED_PRIV_SDIO_PIN_D3_4BIT_BUS_SLOT_1=17
+CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE=54
+
+# The hotspot (src/jc1060p470/net.rs): devices on it reach the internet
+# through the LAN cable under the board's address, like the STM32 board's
+# IPMasquerade.
+CONFIG_LWIP_IP_FORWARD=y
+CONFIG_LWIP_IPV4_NAPT=y
+
+# The board's flash is a Boya part ("using generic driver" otherwise).
+CONFIG_SPI_FLASH_SUPPORT_BOYA_CHIP=y

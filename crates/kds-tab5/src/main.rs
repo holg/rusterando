@@ -1,19 +1,29 @@
-//! Kitchen display on the M5Stack Tab5 (ESP32-P4).
+//! Kitchen display on the M5Stack Tab5 (ESP32-P4), or with feature
+//! `jc1060p470` on the 7" Guition JC1060P470 (ESP32-P4, Ethernet).
 //!
 //! Board setup (I2C, expanders, Wi-Fi power, charging), the display, the USB
 //! printer port, then the kitchen screen (kds-ui) on the main task. A network
-//! thread joins Wi-Fi through the ESP32-C6 coprocessor, sets the clock via
-//! SNTP and keeps the connection up; once online it starts the live feed
-//! (feed.rs) and the print channel (printing.rs), which prints the kitchen's
-//! receipts while a USB printer is plugged in.
+//! thread (net.rs) gets online — Tab5: Wi-Fi through the ESP32-C6
+//! coprocessor; JC1060P470: the LAN cable, plus the shop's Wi-Fi hotspot —
+//! sets the clock via SNTP and keeps the connection up; once online it starts
+//! the live feed (feed.rs) and the print channel (printing.rs), which prints
+//! the kitchen's receipts while a USB printer is plugged in.
 
+// Board-specific parts: the Tab5's in src/, the 7" JC1060P470's in
+// src/jc1060p470/ (feature `jc1060p470`), with the same interfaces.
+#[cfg_attr(feature = "jc1060p470", path = "jc1060p470/battery.rs")]
 mod battery;
+#[cfg_attr(feature = "jc1060p470", path = "jc1060p470/board.rs")]
 mod board;
 mod crashlog;
 mod display;
 mod feed;
+#[cfg_attr(feature = "jc1060p470", path = "jc1060p470/gong.rs")]
 mod gong;
+#[cfg_attr(feature = "jc1060p470", path = "jc1060p470/imu.rs")]
 mod imu;
+#[cfg_attr(feature = "jc1060p470", path = "jc1060p470/net.rs")]
+mod net;
 mod ota;
 mod printing;
 mod ui;
@@ -23,14 +33,11 @@ mod wifi;
 use std::ffi::CStr;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::Result;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::hal::peripherals::Peripherals;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
-use esp_idf_svc::sntp::EspSntp;
 use esp_idf_svc::sys;
 
 /// The shop's local time (POSIX TZ for Europe/Berlin).
@@ -114,7 +121,7 @@ fn main() -> Result<()> {
         .stack_size(16 * 1024)
         .spawn(move || {
             let feed_status = net_status.clone();
-            network(peripherals.modem, sysloop, nvs, net_status, move || {
+            net::run(peripherals.modem, sysloop, nvs, net_status, move || {
                 if demo {
                     return;
                 }
@@ -141,54 +148,6 @@ fn main() -> Result<()> {
 
     let gong = gong::Gong::start()?;
     ui::run(display, status, print_status, printer, battery, care, ui_rx, ui_tx, tap_tx, demo, crash, gong, orientation)
-}
-
-/// Join Wi-Fi, set the clock, start the kitchen feed (`online`), then keep
-/// the link up.
-fn network(
-    modem: Modem<'static>,
-    sysloop: EspSystemEventLoop,
-    nvs: EspDefaultNvsPartition,
-    status: Arc<Mutex<String>>,
-    online: impl FnOnce(),
-) {
-    let set = |text: String| {
-        if let Ok(mut s) = status.lock() {
-            *s = text;
-        }
-    };
-    let mut wifi = match wifi::connect(modem, sysloop, nvs) {
-        Ok(w) => w,
-        Err(e) => {
-            log::error!("Wi-Fi: {e:#}");
-            set(format!("Wi-Fi: {e:#}"));
-            return;
-        }
-    };
-    let link = wifi::describe(&wifi);
-    set(link.clone());
-
-    // Kept alive for the life of the thread; it re-syncs periodically. The
-    // feed doesn't wait for it: until it answers, the first board snapshot
-    // sets the clock from the server's (feed.rs).
-    let _sntp = EspSntp::new_default().map_err(|e| log::warn!("SNTP: {e}")).ok();
-    // The feed's login is the server check.
-    online();
-
-    let mut beat: u32 = 0;
-    loop {
-        std::thread::sleep(Duration::from_secs(10));
-        if !wifi.is_connected().unwrap_or(false) {
-            log::warn!("Wi-Fi: connection lost");
-            set("Wi-Fi: verbinde neu …".into());
-            wifi::rejoin(&mut wifi);
-            set(wifi::describe(&wifi));
-        }
-        // SAFETY: read-only heap statistics.
-        let free_kb = unsafe { sys::esp_get_free_heap_size() } / 1024;
-        log::info!("alive #{beat}, free heap {free_kb} KB");
-        beat += 1;
-    }
 }
 
 fn log_chip_info() {

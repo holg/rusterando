@@ -75,6 +75,47 @@ The firmware reports its version as
 `<crate version>-<commit>[-dirty]-<YYYYMMDD-HHMM>` (`ota::VERSION`, set by
 the script): every build carries its build time, USB builds too.
 
+## 7" board: Guition JC1060P470
+
+The same firmware on Guition's 7" JC1060P470 (ESP32-P4 rev v1.3, 1024×600
+JD9165 panel, GT911 touch, IP101 Ethernet, ESP32-C6 for Wi-Fi, no battery):
+the same screen, about 1.4× larger (KDS_UI_SCALE 2.133).
+
+```bash
+BOARD=jc1060p470 PROFILE=release scripts/build_kds_tab5.sh flash
+BOARD=jc1060p470 PROFILE=release scripts/build_kds_tab5.sh stage   # update slot esp32p4-jc1060p470
+```
+
+- **Build:** cargo feature `jc1060p470` (set by the script), the board
+  package in `boards/jc1060p470/bsp` (C, Espressif's board-package function
+  names, so display, touch and USB printing are shared Rust code), its own
+  sdkconfig on top of the shared one, its own component list and target dir
+  (`target/jc1060p470`). Board-specific Rust: `src/jc1060p470/`.
+- **Network, chosen at start by the cable:**
+  - **LAN mode** (a cable, and an address from DHCP): the cable is the uplink,
+    and the board runs the shop's hotspot through the C6 — the STM32 board's
+    network: `HOTSPOT_SSID` / `HOTSPOT_PASS` from `tmp/tab5-wifi.env`
+    ("rusterando"), 192.168.72.1/24, DHCP, NAT to the LAN. A Tab5 joins it
+    with what it already knows.
+  - **Wi-Fi mode** (no cable): a Wi-Fi client like the Tab5, no hotspot. A
+    cable plugged in later restarts the board into LAN mode.
+- **Updates:** reports arch `esp32p4-jc1060p470`, its own update image —
+  a Tab5 image is never offered to it. Device name `jc1060-<last 3 MAC bytes>`.
+- **Panel:** Guition ships two panels behind the JD9165 ("V2" after the
+  material number on the rear label = the newer one). The init table is
+  the V2 one, read out of the factory firmware; a V1 panel needs another.
+  Clocks: 48 MHz pixel clock with 720 Mbps DSI lanes, so ESP-IDF 5.4.4's
+  pixel → lane-clock conversion is exact — with Guition's 52 MHz / 750 Mbps
+  it truncates, and the whole picture flickers (details in
+  `boards/jc1060p470/bsp/src/bsp_display.c`).
+- **No speaker included:** amplifier and ES8311 codec are on board, the
+  speaker goes into the 2-pin MX1.25 socket. No gong until then.
+- **USB printer:** the "high-speed" USB-C port (USB host), with an OTG
+  adapter or a C-to-B cable; flashing and the console use the other one
+  (from the schematic, not tested with a printer yet).
+- **Factory firmware:** verified backup in `tmp/p4-7-backup/` (restore
+  steps in its README).
+
 ## Updates over the network
 
 ```bash

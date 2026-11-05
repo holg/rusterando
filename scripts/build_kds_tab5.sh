@@ -6,6 +6,12 @@
 #   scripts/build_kds_tab5.sh monitor    # just show the log (SECS=60, RESET=1 restarts first)
 #   scripts/build_kds_tab5.sh stage      # release build → server, as the update for every Tab5
 #
+# BOARD=jc1060p470 builds the same firmware for the 7" Guition JC1060P470
+# (ESP32-P4, 1024×600, Ethernet + Wi-Fi hotspot) instead: cargo feature
+# `jc1060p470`, its board package and sdkconfig from
+# crates/kds-tab5/boards/jc1060p470/, its own target dir
+# (target/jc1060p470) and update slot (artifacts/printer/esp32p4-jc1060p470).
+#
 # Updates over the network (src/ota.rs): `stage` uploads the app image to
 # <DEPLOY_REMOTE_BASE>/artifacts/printer/esp32p4/ on the server (SSH_HOST and
 # DEPLOY_REMOTE_BASE from .env.davids, or STAGE_ENV=<file>). Then arm the
@@ -42,6 +48,34 @@ CRATE="$ROOT_DIR/crates/kds-tab5"
 CMD="${1:-build}"
 PROFILE="${PROFILE:-debug}"
 TARGET=riscv32imafc-esp-espidf
+BOARD="${BOARD:-tab5}"
+FEATURES=()
+case "$BOARD" in
+    tab5)
+        TARGET_DIR="$CRATE/target"
+        ARCH=esp32p4
+        ;;
+    jc1060p470)
+        BOARD_DIR="$CRATE/boards/jc1060p470"
+        TARGET_DIR="$CRATE/target/jc1060p470"
+        ARCH=esp32p4-jc1060p470
+        FEATURES=(--features jc1060p470)
+        export CARGO_TARGET_DIR="$TARGET_DIR"
+        # The 480x272 kitchen screen on the 1024x600 panel: 1024 / 480.
+        export KDS_UI_SCALE=2.133
+        # The shared settings, then the board's (later files win).
+        export ESP_IDF_SDKCONFIG_DEFAULTS="$CRATE/sdkconfig.defaults;$BOARD_DIR/sdkconfig.defaults"
+        # Replaces the Tab5's component list in Cargo.toml. esp-idf-sys wants
+        # absolute paths in this file, hence generated per checkout.
+        mkdir -p "$TARGET_DIR"
+        sed "s|@BOARD_DIR@|$BOARD_DIR|g" "$BOARD_DIR/components.toml.in" >"$TARGET_DIR/components.toml"
+        export ESP_IDF_SYS_EXTRA_COMPONENTS_FILE="$TARGET_DIR/components.toml"
+        ;;
+    *)
+        echo "unknown BOARD=$BOARD (tab5 or jc1060p470)" >&2
+        exit 2
+        ;;
+esac
 
 # ESP-IDF's installer runs whatever `python3` is first on PATH.
 PYTHON="${PYTHON:-$(command -v python3.12 || true)}"
@@ -60,7 +94,7 @@ if [ -f "$WIFI_ENV" ]; then
         value="${value%$'\r'}"
         case "$value" in \"*\") value="${value:1:${#value}-2}" ;; \'*\') value="${value:1:${#value}-2}" ;; esac
         case "$key" in
-            WIFI_SSID|WIFI_PASS|WIFI[2-5]_SSID|WIFI[2-5]_PASS|KITCHEN_PASSWORD|SHOP_URL|KITCHEN_SLUG)
+            WIFI_SSID|WIFI_PASS|WIFI[2-5]_SSID|WIFI[2-5]_PASS|KITCHEN_PASSWORD|SHOP_URL|KITCHEN_SLUG|HOTSPOT_SSID|HOTSPOT_PASS)
                 export "$key=$value" ;;
         esac
     done < "$WIFI_ENV"
@@ -84,7 +118,7 @@ export KDS_VERSION
 build() {
     local flags=()
     [ "$PROFILE" = release ] && flags=(--release)
-    (cd "$CRATE" && cargo build "${flags[@]}")
+    (cd "$CRATE" && cargo build "${flags[@]}" "${FEATURES[@]}")
 }
 
 # Offset of a partition in partitions.csv, e.g. `part_offset ota_0`.
@@ -95,7 +129,7 @@ part_offset() {
 # The bootloader ESP-IDF built for this chip revision (not espflash's
 # bundled one, which may target the newer v3.x silicon).
 bootloader() {
-    find "$CRATE/target/$TARGET/$PROFILE/build" -path "*esp-idf-sys*/out/build/bootloader/bootloader.bin" -print0 \
+    find "$TARGET_DIR/$TARGET/$PROFILE/build" -path "*esp-idf-sys*/out/build/bootloader/bootloader.bin" -print0 \
         | xargs -0 ls -t | head -1
 }
 
@@ -112,7 +146,7 @@ app_image() {
         --min-rev-full "$(cfg ESP32P4_REV_MIN_FULL)" \
         --max-rev-full "$(cfg ESP32P4_REV_MAX_FULL)" \
         --elf-sha256-offset 0xb0 \
-        -o "$2" "$CRATE/target/$TARGET/$PROFILE/kds-tab5" >"$LOG" 2>&1 \
+        -o "$2" "$TARGET_DIR/$TARGET/$PROFILE/kds-tab5" >"$LOG" 2>&1 \
         || { echo "elf2image failed — see $LOG" >&2; exit 8; }
 }
 
@@ -183,7 +217,7 @@ case "$CMD" in
         ;;
     flash)
         build
-        OUT="$CRATE/target/$TARGET/$PROFILE"
+        OUT="$TARGET_DIR/$TARGET/$PROFILE"
         BOOTLOADER="$(bootloader)"
         [ -n "$BOOTLOADER" ] || { echo "ESP-IDF bootloader.bin not found under $OUT/build" >&2; exit 5; }
         [ -x "$ESPTOOL" ] || { echo "esptool not found at $ESPTOOL (see header)" >&2; exit 6; }
@@ -254,7 +288,7 @@ case "$CMD" in
         BASE="$(sed -n 's/^DEPLOY_REMOTE_BASE=//p' "$STAGE_ENV" | tail -1)"
         [ -n "$SSH_HOST" ] && [ -n "$BASE" ] \
             || { echo "SSH_HOST / DEPLOY_REMOTE_BASE missing in $STAGE_ENV" >&2; exit 11; }
-        DIR="$BASE/artifacts/printer/esp32p4"
+        DIR="$BASE/artifacts/printer/$ARCH"
         REMOTE_TMP="/tmp/kds-tab5-$KDS_VERSION.bin"
         scp -q "$IMG/app.bin" "$SSH_HOST:$REMOTE_TMP"
         # Version first, then the image swapped in atomically: the server

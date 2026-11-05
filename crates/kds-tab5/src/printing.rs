@@ -114,9 +114,10 @@ fn run(printer: UsbPrinter, session: Session, nvs: EspDefaultNvsPartition, ui: S
             continue;
         };
         let mut url = format!(
-            "{base}/api/kitchen/ws?slug={}&version={}&arch=esp32p4",
+            "{base}/api/kitchen/ws?slug={}&version={}&arch={}",
             board::device_name(),
-            ota::VERSION
+            ota::VERSION,
+            board::ARCH
         );
         if let Some(seq) = channel.last_seen {
             url.push_str(&format!("&last_seen={seq}"));
@@ -511,7 +512,7 @@ fn sample_order() -> OrderForKitchen {
         created_at_unix: now as i64,
         created_at_label: label,
         channel: OrderChannel::Pickup,
-        customer: Customer { name: "Tab5 Testdruck".to_string(), phone: None },
+        customer: Customer { name: format!("{} Testdruck", board::MODEL), phone: None },
         items: vec![
             item(1, "#22a Pizza Funghi - Größe XL", &["extra Käse", "ohne Zwiebeln"], 1150),
             item(2, "#12 Pizzabrötchen", &["Sauce: Kräuterbutter"], 450),
@@ -520,7 +521,7 @@ fn sample_order() -> OrderForKitchen {
         delivery_fee_cents: 0,
         total_cents: 2050,
         payment: PaymentStatus::CollectOnDelivery { amount_cents: 2050 },
-        note: Some("Testdruck vom Tab5 - äöüß € - bitte wegwerfen".to_string()),
+        note: Some(format!("Testdruck vom {} - äöüß € - bitte wegwerfen", board::MODEL)),
         shop_name: "Testdruck".to_string(),
         accepted_at_unix: None,
         accepted_at_label: None,

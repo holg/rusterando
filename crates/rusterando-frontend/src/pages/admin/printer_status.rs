@@ -276,12 +276,14 @@ pub fn PrinterStatusPage() -> impl IntoView {
 
 /// The kitchen device generations, by the arch each one reports:
 /// Raspberry Pi 4, then the STM32MP135F-DK (touch display, still Linux),
-/// then the all-in-one M5Stack Tab5.
+/// then the all-in-one M5Stack Tab5 and the 7" Guition JC1060P470 (same
+/// firmware, its own update image).
 fn device_model(arch: &str) -> Option<&'static str> {
     match arch {
         "aarch64-unknown-linux-gnu" => Some("RPi4"),
         "armv7-unknown-linux-gnueabihf" => Some("STM32MP135F-DK"),
         "esp32p4" => Some("Tab5"),
+        "esp32p4-jc1060p470" => Some("JC1060P470"),
         _ => None,
     }
 }

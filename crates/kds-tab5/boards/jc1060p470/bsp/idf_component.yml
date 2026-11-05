@@ -1,0 +1,12 @@
+version: "0.1.0"
+description: Board package for the Guition JC1060P470 (ESP32-P4, 7" 1024x600) as used by kds-tab5
+targets:
+  - esp32p4
+dependencies:
+  idf: ">=5.4"
+  # The panel's controller (Guition's factory firmware uses 2.0.2).
+  espressif/esp_lcd_jd9165: "==2.0.2"
+  # Touch, the same version as in the Tab5 build.
+  espressif/esp_lcd_touch_gt911: "==1.2.1"
+  # USB host library (the receipt printer), the same as in the Tab5 build.
+  espressif/usb: "==1.4.1"

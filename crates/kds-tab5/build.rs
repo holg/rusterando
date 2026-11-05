@@ -9,5 +9,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KITCHEN_PASSWORD");
     println!("cargo:rerun-if-env-changed=SHOP_URL");
     println!("cargo:rerun-if-env-changed=KITCHEN_SLUG");
+    // The JC1060P470's Wi-Fi hotspot (src/jc1060p470/net.rs).
+    println!("cargo:rerun-if-env-changed=HOTSPOT_SSID");
+    println!("cargo:rerun-if-env-changed=HOTSPOT_PASS");
     println!("cargo:rerun-if-env-changed=KDS_VERSION");
 }
