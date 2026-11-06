@@ -153,9 +153,13 @@ image.
 
 ## Printing details
 
-- **Logos:** the server sends them as SVG; the Tab5 renders them with the
-  same code as the STM board (`receipt-escpos`, feature `svg`: resvg +
-  bundled Poppins), cached by content hash. The renderer runs on its own
+- **Logos:** since kitchen-protocol 2.3 the server renders them and sends
+  the finished 1-bit raster (`RasterBits`) — the device asks for it with
+  `caps=raster-bits` and just prints it (crates/kitchen-protocol/RECEIPT_LOGOS.md).
+  From an older server they still come as SVG, rendered here with the same
+  code as the STM board (`receipt-escpos`, feature `svg`: resvg + bundled
+  Poppins), cached by content hash; that renderer leaves the firmware once
+  every server is on 2.3. The renderer runs on its own
   thread with a **1 MB stack in PSRAM**: resvg recurses per SVG group, and
   the shop's composed receipt logo peaks at 232 KB (128 KB overflowed — the
   device restarted on its first real order, 2026-11-05). A big stack in

@@ -7,7 +7,10 @@ name = "kitchen-protocol"
 # BoardAdvance) — append-only, old 2.0 Pis are unaffected.
 # 2.2.0: WebSocket kitchen devices (/api/kitchen/ws) report a plugged-in
 # USB printer (ClientMessage::PrinterPresent) — append-only.
-version = "2.2.0"
+# 2.3.0: server-rendered logos (ReceiptLine::RasterBits) for clients that
+# announce ClientMessage::Capabilities { raster_bits } — append-only; SVG
+# clients are unaffected (crates/kitchen-protocol/RECEIPT_LOGOS.md).
+version = "2.3.0"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -28,3 +31,6 @@ sha2 = "0.10"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# Wire-compat tests: the stored/sent form is postcard, which encodes enum
+# variants by index — appending must not move the older ones.
+postcard = { workspace = true }

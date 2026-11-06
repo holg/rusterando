@@ -124,7 +124,9 @@ fn run(printer: UsbPrinter, session: Session, nvs: EspDefaultNvsPartition, ui: S
             dry_render_test_receipt();
         }
         let mut url = format!(
-            "{base}/api/kitchen/ws?slug={}&version={}&arch={}",
+            // caps: we print server-rendered logos (kitchen-protocol 2.3);
+            // older servers ignore it and keep sending SVG.
+            "{base}/api/kitchen/ws?slug={}&version={}&arch={}&caps=raster-bits",
             board::device_name(),
             ota::VERSION,
             board::ARCH
@@ -587,7 +589,7 @@ fn dry_render_test_receipt() {
 
 /// `GET /api/kitchen/test-receipt`: `encode_versioned(postcard(ReceiptProgram))`.
 fn server_test_receipt() -> Result<ReceiptProgram> {
-    let body = feed::get("/api/kitchen/test-receipt", MAX_FRAME)?;
+    let body = feed::get("/api/kitchen/test-receipt?caps=raster-bits", MAX_FRAME)?;
     let (_minor, bytes) = kitchen_protocol::decode_versioned(&body).map_err(|e| anyhow!("{e:?}"))?;
     Ok(postcard::from_bytes(bytes)?)
 }

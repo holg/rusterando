@@ -131,6 +131,17 @@ async fn connect_and_run(
         .await
         .context("send Hello")?;
 
+    // kitchen-protocol 2.3: we print server-rendered logos (RasterBits) as
+    // is, so the server needn't send the SVG. Servers before 2.3 can't
+    // decode this and log + skip it (as with BoardSubscribe); they keep
+    // sending SVG, which we still render.
+    let body = postcard::to_allocvec(&ClientMessage::Capabilities { raster_bits: true })
+        .context("encode Capabilities")?;
+    framed
+        .send(Bytes::from(kitchen_protocol::encode_versioned(&body)))
+        .await
+        .context("send Capabilities")?;
+
     if let Some(link) = ui.as_mut() {
         // A display wants the board. Old servers can't decode this and just
         // log + skip it, so it is safe to send unconditionally.

@@ -10,5 +10,6 @@ mod kitchen_board;
 pub mod pdf;
 pub mod printer_artifacts;
 pub mod printer_monitor;
+pub mod receipt_logos;
 pub mod sysadmin;
 pub mod tenant;

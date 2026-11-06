@@ -9,13 +9,16 @@
 //!     admin preview renders this directly (slot → `<img>` of the
 //!     `.1bit.png` twin), so the preview can't drift from the layout.
 //!
-//!   * [`compose`] resolves every [`RasterSlot`] into **inline 1-bit
-//!     bytes** via a [`RasterProvider`], yielding a [`ReceiptProgram`] —
-//!     a fully self-contained, serializable list of [`ReceiptLine`]s.
-//!     This is what the **server sends to the Pi**: the Pi holds no
-//!     themes and no assets, it just executes primitives (text, raster
-//!     bytes, native QR, rule, feed, cut). New themes/artwork are a
-//!     server-only change.
+//!   * [`compose`] resolves every [`RasterSlot`] into a logo via a
+//!     [`RasterProvider`], yielding a [`ReceiptProgram`] — a fully
+//!     self-contained, serializable list of [`ReceiptLine`]s. This is what
+//!     the **server sends to the printing devices**: they hold no themes and
+//!     no assets, they just execute primitives (text, raster, native QR,
+//!     rule, feed, cut). New themes/artwork are a server-only change.
+//!     Since 2.3 the server renders logos itself and sends devices that
+//!     announce it ([`crate::ClientMessage::Capabilities`]) the finished
+//!     1-bit raster ([`ReceiptLine::RasterBits`]); older devices still get
+//!     the SVG ([`ReceiptLine::RasterSvg`]) and render it themselves.
 //!
 //! This module is column-math + composition but **not** ESC/POS: it
 //! knows the receipt is `RECEIPT_WIDTH` columns wide and packs 1-bit
@@ -142,9 +145,10 @@ pub enum RasterSlot {
     ChannelAndBrand { is_delivery: bool, is_paid: bool },
 }
 
-/// A composed SVG ready to ship to the Pi: the SVG document bytes plus
-/// the dot-width the Pi should rasterize it at. The Pi caches the
-/// resulting 1-bit raster keyed by the content hash (see [`compose`]).
+/// A composed SVG logo: the SVG document bytes plus the dot-width to
+/// rasterize it at. The server renders it once and keeps the 1-bit raster
+/// keyed by the content hash ([`raster_hash`]); older devices rasterize the
+/// SVG themselves and cache by the same hash.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComposedSvg {
     pub svg: Vec<u8>,
@@ -156,15 +160,16 @@ pub struct ComposedSvg {
 /// implements this by reading the theme's source `.svg` files and laying
 /// them out side-by-side. Returns `None` for a missing asset / unknown
 /// theme (the slot is then dropped, and the text banners still convey the
-/// channel). The SVG is rasterized to 1-bit ON THE PI, not here.
+/// channel). Rasterizing to 1-bit happens later: on the server (for
+/// [`ReceiptLine::RasterBits`]) or, for older devices, on the device.
 pub trait RasterProvider {
     fn resolve(&self, theme: &str, slot: RasterSlot) -> Option<ComposedSvg>;
 }
 
 /// Content hash for a composed raster: sha256 of the SVG bytes plus the
-/// target width (so a width change re-rasterizes). The Pi keys its raster
-/// cache by this; the server decides ref-vs-bytes by whether the Pi
-/// already advertised it in Hello.
+/// target width (so a width change re-rasterizes). The key of the server's
+/// logo store and of the devices' raster caches; the server decides
+/// ref-vs-bytes for SVG devices by whether they advertised it in Hello.
 pub fn raster_hash(svg: &[u8], target_width: u16) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -241,13 +246,19 @@ pub enum ReceiptLine {
     Feed { n: u8 },
     /// A full-width `-` rule.
     Rule,
-    /// A centered logo as SVG. The Pi rasterizes it to 1-bit at
+    /// A centered logo as SVG. The device rasterizes it to 1-bit at
     /// `target_width` dots and emits `GS v 0`, caching the result keyed by
     /// `hash` (= [`raster_hash`]). On a repeat the server may send the same
-    /// `hash` with an EMPTY `svg` (a reference) once the Pi advertised it
-    /// in Hello — the Pi then uses its cache. Miss with empty svg → the
-    /// logo is skipped (text banners still convey the channel) and re-sent
-    /// with bytes on the next reconnect.
+    /// `hash` with an EMPTY `svg` (a reference) once the device advertised
+    /// it in Hello — the device then uses its cache. Miss with empty svg →
+    /// the logo is skipped (text banners still convey the channel) and
+    /// re-sent with bytes on the next reconnect.
+    ///
+    /// Since 2.3 this is also the server's *stored* form: print jobs in the
+    /// outbox carry logos as references (empty `svg`), the SVG and its
+    /// raster live once in the server's logo store, and every send turns
+    /// the reference into [`ReceiptLine::RasterBits`] or a full `RasterSvg`
+    /// for the receiving device.
     RasterSvg {
         hash: [u8; 32],
         target_width: u16,
@@ -258,6 +269,20 @@ pub enum ReceiptLine {
     Qr { url: String },
     /// Feed paper and cut. Terminates the receipt.
     Cut { feed: u8 },
+
+    // ===== 2.3+ — APPEND ONLY (postcard encodes variants by index) =====
+    /// A centered logo as a finished 1-bit raster, rendered by the server
+    /// (row-major, MSB-first, set bit = black dot, `width.div_ceil(8)`
+    /// bytes per row — a [`crate::bitmap::Bitmap`]). The device emits it as
+    /// `GS v 0` as is: no SVG renderer on the device. Sent only to devices
+    /// that announced [`crate::ClientMessage::Capabilities`]`{ raster_bits }`.
+    /// `hash` is the logo's [`raster_hash`], for device-side caching.
+    RasterBits {
+        hash: [u8; 32],
+        width: u16,
+        height: u16,
+        bits: Vec<u8>,
+    },
 }
 
 /// A complete, self-contained receipt program: the server composes it

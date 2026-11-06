@@ -16,7 +16,7 @@ description = "A composed rusterando kitchen receipt as ESC/POS bytes"
 # bytes are the same everywhere. `escpos` without its driver features is
 # encoding_rs + log only, which builds on ESP-IDF too.
 [dependencies]
-kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.3.0" }
 escpos = { version = "0.16", default-features = false, features = ["codes_2d"] }
 anyhow = { workspace = true }
 # Logos (feature `svg`): the server ships them as SVG; render + dither to

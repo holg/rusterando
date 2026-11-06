@@ -47,7 +47,7 @@ slint = { version = "1.18", default-features = false, features = ["compat-1-18",
 kds-ui = { path = "../kds-ui", default-features = false, features = ["mcu"] }
 # The live feed and the print channel: same wire format as the board and
 # the browser mirror.
-kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.3.0" }
 # Receipt → ESC/POS bytes, the same code as the board's printer client.
 receipt-escpos = { path = "../receipt-escpos", version = "0.2.0", features = ["svg"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }

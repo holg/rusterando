@@ -55,19 +55,50 @@ pub struct KitchenChannel {
     orders_paused: Option<rusterando_frontend::pages::settings::OrdersPausedHandle>,
     /// Admin alerts for the connected displays: (title, text).
     alerts: broadcast::Sender<(String, String)>,
+    /// Receipt logos, rendered here once (see `receipt_logos`): print jobs
+    /// are stored with logo references, every send resolves them for the
+    /// receiving client.
+    logos: crate::receipt_logos::LogoStore,
 }
 
 impl KitchenChannel {
     pub fn new(db: SqlitePool) -> Self {
         let (tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         let (alerts, _) = broadcast::channel(8);
+        let logos = crate::receipt_logos::LogoStore::new(db.clone());
         Self {
             tx,
             db,
             live: None,
             orders_paused: None,
             alerts,
+            logos,
         }
+    }
+
+    /// The receipt logo store (wire form per client, test receipts).
+    pub fn logos(&self) -> &crate::receipt_logos::LogoStore {
+        &self.logos
+    }
+
+    /// Render the configured theme's logos (at start): broken artwork shows
+    /// in the log at deploy time, and the first order doesn't wait.
+    pub async fn warm_up_logos(&self) {
+        let site_root =
+            std::env::var("LEPTOS_SITE_ROOT").unwrap_or_else(|_| "target/site".to_string());
+        let theme = printer_theme(&self.db).await;
+        self.logos
+            .warm_up(&theme, crate::bon_designer::provider(&site_root))
+            .await;
+    }
+
+    /// One-time migration of the stored print jobs' inline logo SVG into the
+    /// logo store (see `receipt_logos::migrate_outbox`).
+    pub async fn migrate_outbox_logos(
+        &self,
+        dry_run: bool,
+    ) -> anyhow::Result<crate::receipt_logos::MigrationReport> {
+        crate::receipt_logos::migrate_outbox(&self.db, &self.logos, dry_run).await
     }
 
     pub fn with_live(mut self, live: rusterando_frontend::live::LiveHub) -> Self {
@@ -92,6 +123,9 @@ impl KitchenChannel {
     /// recognise the major bumps over to the skip+log path rather
     /// than poisoning the channel.
     pub async fn broadcast(&self, event: KitchenEvent) -> anyhow::Result<SeqId> {
+        // Logos into the store; the job keeps references (resolved per
+        // client when it's sent).
+        let event = self.logos.externalize(event).await;
         let postcard_bytes = postcard::to_allocvec(&event).context("postcard encode event")?;
         let payload = kitchen_protocol::encode_versioned(&postcard_bytes);
         let id: i64 = sqlx::query_scalar(
@@ -487,9 +521,14 @@ async fn handle_client(
     };
     info!(%peer, %shop_slug, %version, %arch, ?last_seen_seq,
         cached = cached_rasters.len(), "kitchen client hello");
-    // Logo hashes the Pi already has cached → we send refs (empty svg) for
-    // these and full SVG bytes otherwise. Set for O(1) lookup at send time.
-    let cached: std::collections::HashSet<[u8; 32]> = cached_rasters.into_iter().collect();
+    // How logos go to this client: SVG, with references for the hashes it
+    // has cached — until it announces raster bits (Capabilities, read by
+    // the reader below), from then on as server-rendered rasters.
+    let mut caps = crate::receipt_logos::WireCaps {
+        raster_bits: false,
+        cached: cached_rasters.into_iter().collect(),
+    };
+    let raster_bits = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     // Record this Pi's running version + arch so the admin panel can show
     // it (and so a version skew is never invisible again). Best-effort.
@@ -521,7 +560,7 @@ async fn handle_client(
     let mut rx = channel.subscribe();
 
     for msg in &backlog {
-        let msg = ref_cached_rasters(msg.clone(), &cached);
+        let msg = channel.logos.wire_message(msg.clone(), &caps).await;
         let body = postcard::to_allocvec(&msg).context("encode replay")?;
         let frame = kitchen_protocol::encode_versioned(&body);
         framed
@@ -552,6 +591,7 @@ async fn handle_client(
     // Reader: handle client → server messages (acks, heartbeats, board)
     let chan_for_acks = channel.clone();
     let shop_for_hb = shop_slug.clone();
+    let raster_bits_for_reader = raster_bits.clone();
     let ack_task = tokio::spawn(async move {
         let mut board_feed: Option<tokio::task::JoinHandle<()>> = None;
         while let Some(frame) = input.next().await {
@@ -612,6 +652,10 @@ async fn handle_client(
                 // client always counts as printing.
                 ClientMessage::PrinterPresent(_) => {
                     debug!("PrinterPresent over the tunnel; ignoring");
+                }
+                ClientMessage::Capabilities { raster_bits } => {
+                    info!(shop = %shop_for_hb, raster_bits, "kitchen client capabilities");
+                    raster_bits_for_reader.store(raster_bits, std::sync::atomic::Ordering::Relaxed);
                 }
                 ClientMessage::BoardSubscribe => {
                     if board_feed.is_none() {
@@ -709,7 +753,8 @@ async fn handle_client(
                     debug!(seq_id = %msg.seq_id, "skipping live event already in replay");
                     continue;
                 }
-                let msg = ref_cached_rasters(msg, &cached);
+                caps.raster_bits = raster_bits.load(std::sync::atomic::Ordering::Relaxed);
+                let msg = channel.logos.wire_message(msg, &caps).await;
                 let body = match postcard::to_allocvec(&msg) {
                     Ok(b) => b,
                     Err(e) => {
@@ -913,30 +958,6 @@ async fn disarm(db: &SqlitePool, shop_slug: &str) {
         .bind(shop_slug)
         .execute(db)
         .await;
-}
-
-/// Rewrite a `ServerMessage` so any `RasterSvg` whose hash the Pi already
-/// has cached becomes a *reference* (empty `svg`) — the Pi uses its cache,
-/// and we don't re-send the bytes. Hashes the Pi hasn't advertised keep
-/// their full SVG. Leaves non-Print events untouched.
-fn ref_cached_rasters(
-    mut msg: ServerMessage,
-    cached: &std::collections::HashSet<[u8; 32]>,
-) -> ServerMessage {
-    use kitchen_protocol::receipt::ReceiptLine;
-    if cached.is_empty() {
-        return msg;
-    }
-    if let KitchenEvent::Print(prog) = &mut msg.event {
-        for line in &mut prog.lines {
-            if let ReceiptLine::RasterSvg { hash, svg, .. } = line {
-                if !svg.is_empty() && cached.contains(hash) {
-                    svg.clear(); // → reference; Pi resolves from its cache
-                }
-            }
-        }
-    }
-    msg
 }
 
 async fn record_update_result(db: &SqlitePool, shop_slug: &str, to: &str, ok: bool, error: &str) {

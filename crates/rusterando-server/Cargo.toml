@@ -39,6 +39,9 @@ rusterando-frontend = { workspace = true, features = ["ssr"] }
 # Kitchen printer subsystem (see src/kitchen.rs). The Pi binary lives at
 # crates/rusterando-printer/ and depends on the same protocol crate.
 kitchen-protocol = { workspace = true }
+# Receipt logos are rendered here (crates/kitchen-protocol/RECEIPT_LOGOS.md), with
+# the same SVG → 1-bit code the devices used (resvg + bundled Poppins).
+receipt-escpos = { path = "../receipt-escpos", features = ["svg"] }
 postcard = { workspace = true }
 # Browser kitchen-display feed: postcard events, base64 per SSE message.
 base64 = "0.22"

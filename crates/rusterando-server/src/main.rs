@@ -342,6 +342,35 @@ async fn main() {
         }
     }
 
+    // One-off maintenance commands, run with the server's own environment
+    // and database (e.g. `davidspizzeria-server migrate-receipt-logos
+    // --dry-run` in the deploy directory); they exit instead of serving.
+    if let Some(command) = std::env::args().nth(1) {
+        match command.as_str() {
+            // Stored print jobs' inline logo SVG → the logo store
+            // (crates/kitchen-protocol/RECEIPT_LOGOS.md). Safe while the server
+            // runs; a second run finds nothing to do.
+            "migrate-receipt-logos" => {
+                let dry_run = std::env::args().any(|a| a == "--dry-run");
+                let chan = rusterando_server::kitchen::KitchenChannel::new(db.clone());
+                match chan.migrate_outbox_logos(dry_run).await {
+                    Ok(report) => {
+                        println!("{report}");
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("receipt logo migration failed: {e:#}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            other => {
+                eprintln!("unknown command {other:?} (known: migrate-receipt-logos [--dry-run])");
+                std::process::exit(2);
+            }
+        }
+    }
+
     // Seed the PDF cover + theme libraries if they're still empty
     // (fresh deploy, or first run after the 20260522 migration on a
     // shop that never set the legacy single-value overrides). This
@@ -541,6 +570,26 @@ async fn main() {
                 let chan = rusterando_server::kitchen::KitchenChannel::new(db.clone())
                     .with_live(live.clone())
                     .with_orders_paused(orders_paused.clone());
+                // Receipt logos: render the theme's now (broken artwork shows
+                // in this log), and point out stored jobs that still carry
+                // their logo inline (they print fine; migrating saves space).
+                {
+                    let chan = chan.clone();
+                    let db = db.clone();
+                    tokio::spawn(async move {
+                        chan.warm_up_logos().await;
+                        match rusterando_server::receipt_logos::inline_logo_rows(&db).await {
+                            Ok(0) => {}
+                            Ok(n) => tracing::warn!(
+                                rows = n,
+                                "kitchen_outbox still holds print jobs with inline logo SVG — \
+                                 run `<server binary> migrate-receipt-logos --dry-run`, then \
+                                 without --dry-run"
+                            ),
+                            Err(e) => tracing::warn!(error = %e, "receipt logo row check failed"),
+                        }
+                    });
+                }
                 let listener_chan = chan.clone();
                 // Respawn loop: on 2026-05-30 the listener exited once
                 // with "Too many open files" and stayed dead the rest of
@@ -1751,7 +1800,8 @@ async fn kds_action_handler(
 /// receipt settings and the live theme's logos, for the asking device only —
 /// nothing is broadcast, no order is created. Body:
 /// `encode_versioned(postcard(ReceiptProgram))`. `?delivery=true` /
-/// `?prepaid=true` pick the variant (default: pickup, unpaid).
+/// `?prepaid=true` pick the variant (default: pickup, unpaid); with
+/// `?caps=raster-bits` the logo comes server-rendered, as for live jobs.
 async fn kitchen_test_receipt_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     StaffRole(role): StaffRole,
@@ -1767,6 +1817,15 @@ async fn kitchen_test_receipt_handler(
     let program =
         rusterando_server::kitchen::compose_test_program(&state.db, q.delivery, q.prepaid, &theme)
             .await;
+    // Through the logo store like a live job (without a kitchen channel the
+    // SVG stays inline, which every device can still print).
+    let program = match state.kitchen.as_ref() {
+        Some(chan) => {
+            let caps = rusterando_server::receipt_logos::WireCaps::from_param(&q.caps);
+            chan.logos().wire_program(program, &caps).await
+        }
+        None => program,
+    };
     match postcard::to_allocvec(&program) {
         Ok(bytes) => (
             [(header::CONTENT_TYPE, "application/octet-stream")],
@@ -1783,6 +1842,8 @@ struct TestReceiptQuery {
     delivery: bool,
     #[serde(default)]
     prepaid: bool,
+    #[serde(default)]
+    caps: String,
 }
 
 /// A kitchen device's name (`kitchen_clients.shop_slug`), as the Pis use it.
@@ -1803,6 +1864,11 @@ struct KitchenDeviceQuery {
     arch: String,
     /// The last seq the device received; absent on its very first connect.
     last_seen: Option<u64>,
+    /// What the device can take (kitchen-protocol 2.3+), comma-separated:
+    /// `raster-bits` = logos as server-rendered rasters. Absent on older
+    /// firmware, which keeps getting the SVG.
+    #[serde(default)]
+    caps: String,
 }
 
 /// Server ping interval on a kitchen device's WebSocket.
@@ -1861,6 +1927,7 @@ async fn kitchen_ws_session(
             .map(|bytes| Message::Binary(bytes.into()))
     }
 
+    let caps = rusterando_server::receipt_logos::WireCaps::from_param(&q.caps);
     let (slug, version, arch) = (q.slug, q.version, q.arch);
     let mut feed = chan
         .print_feed(
@@ -1892,6 +1959,8 @@ async fn kitchen_ws_session(
                 // The feed ends when it lagged: closing makes the device
                 // reconnect with its last seq and catch up from the outbox.
                 let Some(msg) = msg else { break "feed closed" };
+                // Logos resolved for this device: rasters or SVG.
+                let msg = chan.logos().wire_message(msg, &caps).await;
                 let Ok(bytes) = postcard::to_allocvec(&msg) else { continue };
                 if socket.send(Message::Binary(bytes.into())).await.is_err() {
                     break "send failed";

@@ -172,6 +172,15 @@ pub enum ClientMessage {
     /// and watches only printing devices for the printer-offline alarm.
     /// Old Pis never send it: they count as printing whenever connected.
     PrinterPresent(bool),
+
+    // ===== 2.3+ — APPEND ONLY =====
+    /// What this client can take, sent right after `Hello` by tunnel
+    /// clients (WebSocket devices say it in their URL: `caps=raster-bits`).
+    /// `raster_bits`: logos as server-rendered [`receipt::ReceiptLine::RasterBits`]
+    /// instead of SVG. A server that predates 2.3 never receives it (the
+    /// server is updated first); clients that never send it keep getting
+    /// SVG. Applies to messages sent after it arrives.
+    Capabilities { raster_bits: bool },
 }
 
 // ===== Domain types =====
@@ -659,6 +668,50 @@ mod tests {
             pickup_time_label: Some("13:30".into()),
             printer_theme: "rusterando-rando".into(),
         }
+    }
+
+    /// postcard encodes enum variants by index. 2.3 appends `RasterBits`
+    /// and `Capabilities`; every older variant must keep its index, or the
+    /// print jobs stored in the server's outbox (and older devices) would
+    /// decode into something else.
+    #[test]
+    fn appended_2_3_variants_keep_older_indices() {
+        use crate::receipt::ReceiptLine;
+        // Text 0, Feed 1, Rule 2, RasterSvg 3, Qr 4, Cut 5 — as in 2.2.
+        assert_eq!(
+            postcard::to_allocvec(&ReceiptLine::Cut { feed: 4 }).unwrap(),
+            [5, 4]
+        );
+        let svg = ReceiptLine::RasterSvg {
+            hash: [7; 32],
+            target_width: 480,
+            svg: Vec::new(),
+        };
+        assert_eq!(postcard::to_allocvec(&svg).unwrap()[0], 3);
+        let bits = ReceiptLine::RasterBits {
+            hash: [9; 32],
+            width: 16,
+            height: 2,
+            bits: vec![0xff, 0x00, 0x0f, 0xf0],
+        };
+        let wire = postcard::to_allocvec(&bits).unwrap();
+        assert_eq!(wire[0], 6, "RasterBits is appended after Cut");
+        assert_eq!(postcard::from_bytes::<ReceiptLine>(&wire).unwrap(), bits);
+
+        // ClientMessage: Hello 0, Ack 1, Heartbeat 2, FetchArtifact 3,
+        // UpdateResult 4, BoardSubscribe 5, BoardAdvance 6, Shop 7,
+        // PrinterPresent 8 (the last 2.2 variant) — Capabilities appended.
+        assert_eq!(
+            postcard::to_allocvec(&ClientMessage::PrinterPresent(true)).unwrap(),
+            [8, 1]
+        );
+        let caps = ClientMessage::Capabilities { raster_bits: true };
+        let wire = postcard::to_allocvec(&caps).unwrap();
+        assert_eq!(wire, [9, 1]);
+        assert!(matches!(
+            postcard::from_bytes::<ClientMessage>(&wire).unwrap(),
+            ClientMessage::Capabilities { raster_bits: true }
+        ));
     }
 
     #[test]

@@ -3002,8 +3002,9 @@ dependencies = [
 
 [[package]]
 name = "kitchen-protocol"
-version = "2.2.0"
+version = "2.3.0"
 dependencies = [
+ "postcard",
  "serde",
  "serde_json",
  "sha2",
@@ -5015,6 +5016,7 @@ dependencies = [
  "libc",
  "postcard",
  "qrcode",
+ "receipt-escpos",
  "reqwest",
  "rusterando-frontend",
  "rusterando-geo",

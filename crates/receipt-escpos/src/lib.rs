@@ -37,9 +37,12 @@ use kitchen_protocol::receipt::{LineStyle, ReceiptLine, ReceiptProgram, RECEIPT_
 /// render code stays Unicode.
 pub const RECEIPT_PAGE_CODE: PageCode = PageCode::ISO8859_15;
 
-/// Resolves a logo ([`ReceiptLine::RasterSvg`]) to a 1-bit raster:
-/// `(hash, target_width, svg)` → bitmap, or `None` to leave the logo out
-/// (the text banners still convey the channel).
+/// Resolves an SVG logo ([`ReceiptLine::RasterSvg`], from servers before
+/// kitchen-protocol 2.3 or for devices that didn't announce raster bits) to
+/// a 1-bit raster: `(hash, target_width, svg)` → bitmap, or `None` to leave
+/// the logo out (the text banners still convey the channel). Logos the
+/// server already rendered ([`ReceiptLine::RasterBits`]) don't go through
+/// it — a device without an SVG renderer passes `&mut |_, _, _| None`.
 pub type LogoResolver<'a> = dyn FnMut(&[u8; 32], u16, &[u8]) -> Option<Bitmap> + 'a;
 
 /// The ESC/POS bytes for `program`.
@@ -94,9 +97,24 @@ fn emit_line(
             svg,
         } => {
             if let Some(bm) = logos(hash, *target_width, svg) {
-                p.justify(JustifyMode::CENTER)?
-                    .custom(&gs_v0(&bm))?
-                    .justify(JustifyMode::LEFT)?;
+                emit_logo(p, &bm)?;
+            }
+        }
+        ReceiptLine::RasterBits {
+            width,
+            height,
+            bits,
+            ..
+        } => {
+            let bm = Bitmap {
+                width: *width as usize,
+                height: *height as usize,
+                bytes: bits.clone(),
+            };
+            // A malformed raster would make the printer eat the following
+            // bytes as image data: leave the logo out instead.
+            if bm.bytes.len() == bm.row_bytes() * bm.height {
+                emit_logo(p, &bm)?;
             }
         }
         ReceiptLine::Qr { url } => {
@@ -116,6 +134,14 @@ fn emit_line(
             p.feeds(*feed)?.cut()?;
         }
     }
+    Ok(())
+}
+
+/// A logo, centered — the same bytes whichever way it arrived.
+fn emit_logo(p: &mut Printer<Memory>, bm: &Bitmap) -> Result<()> {
+    p.justify(JustifyMode::CENTER)?
+        .custom(&gs_v0(bm))?
+        .justify(JustifyMode::LEFT)?;
     Ok(())
 }
 
@@ -237,5 +263,93 @@ mod tests {
             &with,
             &[0x1d, b'v', b'0', 0x00, 2, 0, 2, 0, 0xff, 0xff, 0xff, 0xff]
         ));
+    }
+
+    #[test]
+    fn server_rendered_logo_needs_no_resolver() {
+        let p = program(vec![ReceiptLine::RasterBits {
+            hash: [7; 32],
+            width: 16,
+            height: 2,
+            bits: vec![0xff; 4],
+        }]);
+        let bytes = render(&p, &mut |_, _, _| panic!("no SVG to resolve")).unwrap();
+        assert!(contains(
+            &bytes,
+            &[0x1d, b'v', b'0', 0x00, 2, 0, 2, 0, 0xff, 0xff, 0xff, 0xff]
+        ));
+
+        // A raster whose size doesn't match its bytes is left out.
+        let broken = program(vec![ReceiptLine::RasterBits {
+            hash: [7; 32],
+            width: 16,
+            height: 3,
+            bits: vec![0xff; 4],
+        }]);
+        let bytes = render(&broken, &mut |_, _, _| None).unwrap();
+        assert!(!contains(&bytes, &[0x1d, b'v', b'0']));
+    }
+
+    /// The server renders logos with the same `svg::rasterize` the devices
+    /// used: the same logo sent as `RasterBits` must give byte-for-byte the
+    /// same printer data as the device rendering the `RasterSvg` itself —
+    /// the same paper output. With a real receipt header band, composed from
+    /// the theme's files in public/img at the server's sizes.
+    #[cfg(feature = "svg")]
+    #[test]
+    fn server_rendered_logo_prints_like_device_rendered() {
+        use kitchen_protocol::receipt::{
+            compose_header_svg, raster_hash, SvgLogo, HEADER_LOGO_GAP, HEADER_LOGO_HEIGHT,
+        };
+        let img = concat!(env!("CARGO_MANIFEST_DIR"), "/../../public/img/");
+        let read = |stem: &str| std::fs::read_to_string(format!("{img}{stem}.svg")).unwrap();
+        let channel = read("rusterando-printer-rando-delivery-e-car");
+        let brand = read("rusterando-printer-rando-brand-mark-unpaid");
+        let size = |svg: &str| {
+            let tree = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()).unwrap();
+            (tree.size().width(), tree.size().height())
+        };
+        let ((cw, ch), (bw, bh)) = (size(&channel), size(&brand));
+        let header = compose_header_svg(
+            &SvgLogo {
+                svg: &channel,
+                width: cw as f64,
+                height: ch as f64,
+            },
+            &SvgLogo {
+                svg: &brand,
+                width: bw as f64,
+                height: bh as f64,
+            },
+            HEADER_LOGO_HEIGHT as f64,
+            HEADER_LOGO_GAP as f64,
+        );
+        let target_width = 480;
+        let hash = raster_hash(header.as_bytes(), target_width);
+
+        let device = render(
+            &program(vec![ReceiptLine::RasterSvg {
+                hash,
+                target_width,
+                svg: header.as_bytes().to_vec(),
+            }]),
+            &mut |_, width, svg| svg::rasterize(svg, width).ok(),
+        )
+        .unwrap();
+
+        let bm = svg::rasterize(header.as_bytes(), target_width).unwrap();
+        let server = render(
+            &program(vec![ReceiptLine::RasterBits {
+                hash,
+                width: bm.width as u16,
+                height: bm.height as u16,
+                bits: bm.bytes.clone(),
+            }]),
+            &mut |_, _, _| None,
+        )
+        .unwrap();
+
+        assert!(contains(&device, &[0x1d, b'v', b'0']), "logo printed");
+        assert_eq!(device, server);
     }
 }
