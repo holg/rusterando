@@ -27,3 +27,8 @@ resvg = { version = "0.44", default-features = false, features = ["text", "raste
 [features]
 default = []
 svg = ["dep:resvg"]
+# Also DejaVu Sans Bold (assets/fonts, Bitstream Vera licence + public-domain
+# changes, 0.7 MB) for logo text the theme sets in it — e.g. the ✔ in the
+# "paid" brand mark, which Poppins doesn't have. For the server, which
+# renders the logos (kitchen-protocol 2.3); devices leave it off.
+font-dejavu = ["svg"]

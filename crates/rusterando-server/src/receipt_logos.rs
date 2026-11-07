@@ -138,6 +138,61 @@ impl LogoStore {
         Ok(hash)
     }
 
+    /// Re-render every stored logo with the current renderer and fonts and
+    /// update those whose raster changed — the SVG, and so the hash, stays
+    /// the same when e.g. a font is added, the pixels don't. At start.
+    /// Returns (stored, re-rendered).
+    pub async fn refresh(&self) -> Result<(usize, usize)> {
+        let rows =
+            sqlx::query("SELECT hash, svg, target_width, width, height, bits FROM receipt_logos")
+                .fetch_all(&self.db)
+                .await
+                .context("read receipt logos")?;
+        let stored = rows.len();
+        let mut changed = 0;
+        for row in rows {
+            let key: Vec<u8> = row.get("hash");
+            let Ok(hash) = <[u8; 32]>::try_from(key.as_slice()) else {
+                continue;
+            };
+            let svg: Vec<u8> = row.get("svg");
+            let target_width = row.get::<i64, _>("target_width") as u16;
+            let bitmap = match render(svg.clone(), target_width).await {
+                Ok(bitmap) => bitmap,
+                Err(e) => {
+                    warn!(hash = %short(&hash), error = %e, "stored receipt logo no longer renders; kept");
+                    continue;
+                }
+            };
+            let same = bitmap.width as i64 == row.get::<i64, _>("width")
+                && bitmap.height as i64 == row.get::<i64, _>("height")
+                && bitmap.bytes == row.get::<Vec<u8>, _>("bits");
+            if !same {
+                sqlx::query(
+                    "UPDATE receipt_logos SET width = ?, height = ?, bits = ? WHERE hash = ?",
+                )
+                .bind(bitmap.width as i64)
+                .bind(bitmap.height as i64)
+                .bind(&bitmap.bytes)
+                .bind(&hash[..])
+                .execute(&self.db)
+                .await
+                .context("update receipt logo")?;
+                info!(hash = %short(&hash), "receipt logo re-rendered (renderer or fonts changed)");
+                changed += 1;
+            }
+            self.cache.lock().unwrap().insert(
+                hash,
+                Arc::new(Logo {
+                    svg,
+                    target_width,
+                    bitmap,
+                }),
+            );
+        }
+        Ok((stored, changed))
+    }
+
     /// The stored form of an event: every inline logo goes into the store,
     /// the job keeps a reference. A logo that can't be rendered stays inline
     /// (older devices may still manage; bits clients get it left out).

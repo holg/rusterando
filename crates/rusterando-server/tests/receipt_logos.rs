@@ -300,3 +300,25 @@ async fn migration_moves_inline_logos_and_keeps_everything_else() {
     assert_eq!(again.with_inline_logo, 0);
     assert_eq!(again.migrated, 0);
 }
+
+/// The hash covers only the SVG: when the renderer or its fonts change, a
+/// stored logo keeps its hash but must get the new pixels at the next start.
+#[tokio::test]
+async fn refresh_rerenders_logos_whose_pixels_changed() {
+    let (chan, db) = channel().await;
+    chan.logos().put(LOGO.as_bytes(), WIDTH).await.unwrap();
+    // As if rendered by an older renderer.
+    sqlx::query("UPDATE receipt_logos SET bits = zeroblob(length(bits))")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let store = rusterando_server::receipt_logos::LogoStore::new(db.clone());
+    assert_eq!(store.refresh().await.unwrap(), (1, 1));
+    let bits: Vec<u8> = sqlx::query_scalar("SELECT bits FROM receipt_logos")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(bits, expected_bits());
+    assert_eq!(store.refresh().await.unwrap(), (1, 0), "nothing left to do");
+}

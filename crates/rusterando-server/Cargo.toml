@@ -41,7 +41,8 @@ rusterando-frontend = { workspace = true, features = ["ssr"] }
 kitchen-protocol = { workspace = true }
 # Receipt logos are rendered here (crates/kitchen-protocol/RECEIPT_LOGOS.md), with
 # the same SVG → 1-bit code the devices used (resvg + bundled Poppins).
-receipt-escpos = { path = "../receipt-escpos", features = ["svg"] }
+# DejaVu Sans Bold too: the theme's "paid" brand mark sets its ✔ in it.
+receipt-escpos = { path = "../receipt-escpos", features = ["svg", "font-dejavu"] }
 postcard = { workspace = true }
 # Browser kitchen-display feed: postcard events, base64 per SSE message.
 base64 = "0.22"

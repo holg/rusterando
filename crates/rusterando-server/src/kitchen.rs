@@ -86,6 +86,12 @@ impl KitchenChannel {
     pub async fn warm_up_logos(&self) {
         let site_root =
             std::env::var("LEPTOS_SITE_ROOT").unwrap_or_else(|_| "target/site".to_string());
+        // Stored logos first: their pixels follow the current renderer and
+        // fonts (the hash only covers the SVG).
+        match self.logos.refresh().await {
+            Ok((stored, changed)) => info!(stored, changed, "receipt logos checked"),
+            Err(e) => warn!(error = %e, "receipt logo refresh failed"),
+        }
         let theme = printer_theme(&self.db).await;
         self.logos
             .warm_up(&theme, crate::bon_designer::provider(&site_root))

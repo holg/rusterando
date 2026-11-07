@@ -5,8 +5,10 @@
 //! renders it at the requested dot-width and Floyd-Steinberg dithers it to
 //! 1-bit (matching the look of the old offline ImageMagick pipeline);
 //! devices cache the result by content hash. All pure Rust
-//! (resvg/usvg/tiny-skia + a bundled Poppins font): builds for the
-//! aarch64/armv7 printer client and for ESP-IDF alike.
+//! (resvg/usvg/tiny-skia + a bundled Poppins font, plus DejaVu Sans Bold
+//! with feature `font-dejavu`): builds for the aarch64/armv7 printer
+//! client and for ESP-IDF alike. Since kitchen-protocol 2.3 the server
+//! renders the logos with this module and devices get the finished raster.
 
 use std::sync::OnceLock;
 
@@ -24,12 +26,22 @@ use resvg::usvg;
 /// a binary that silently can't render the brand text.
 static POPPINS_BOLD: &[u8] = include_bytes!("../assets/fonts/Poppins-Bold.ttf");
 
+/// Feature `font-dejavu` (the server): DejaVu Sans Bold too, for logo text
+/// set in it — the theme's "paid" brand mark draws its ✔ (U+2714) in
+/// "DejaVu Sans", which Poppins lacks; without this font the check mark is
+/// silently left out. Devices render logos only from servers before
+/// kitchen-protocol 2.3 and stay without it (0.7 MB).
+#[cfg(feature = "font-dejavu")]
+static DEJAVU_SANS_BOLD: &[u8] = include_bytes!("../assets/fonts/DejaVuSans-Bold.ttf");
+
 /// Shared usvg options with our font database loaded once.
 fn usvg_options() -> &'static usvg::Options<'static> {
     static OPTS: OnceLock<usvg::Options<'static>> = OnceLock::new();
     OPTS.get_or_init(|| {
         let mut fontdb = usvg::fontdb::Database::new();
         fontdb.load_font_data(POPPINS_BOLD.to_vec());
+        #[cfg(feature = "font-dejavu")]
+        fontdb.load_font_data(DEJAVU_SANS_BOLD.to_vec());
         // Make "Poppins" (the family the SVGs request) resolvable, and set
         // it as the default so any unnamed text still uses it.
         fontdb.set_serif_family("Poppins");
@@ -136,6 +148,17 @@ mod tests {
                                     // All-black rect → lots of set bits.
         let black = bm.bytes.iter().filter(|&&b| b != 0).count();
         assert!(black > 0);
+    }
+
+    /// The "paid" brand mark's ✔ is set in DejaVu Sans Bold: with the
+    /// server's font it has ink, without it nothing would be drawn.
+    #[cfg(feature = "font-dejavu")]
+    #[test]
+    fn check_mark_renders_with_dejavu() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="60"><rect width="60" height="60" fill="white"/><text x="30" y="48" text-anchor="middle" font-family="DejaVu Sans" font-weight="bold" font-size="46" fill="black">✔</text></svg>"#;
+        let bm = rasterize(svg.as_bytes(), 60).expect("rasterize");
+        let ink: u32 = bm.bytes.iter().map(|b| b.count_ones()).sum();
+        assert!(ink > 100, "the check mark should be drawn, got {ink} dots");
     }
 }
 
