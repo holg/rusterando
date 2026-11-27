@@ -2,8 +2,8 @@
 //!
 //! ```text
 //! GEO_BACKEND=cadastre_nrw
-//! GEO_AGS=05558024
-//! GEO_POSTCODE_MAP=05558024:59348:Lüdinghausen
+//! GEO_AGS=05999001
+//! GEO_POSTCODE_MAP=05999001:99999:Musterstadt
 //! GEO_DATA_DIR=/var/lib/rusterando/<tenant>/geo
 //! GEO_EXPECT_BBOX=51.68,51.86,7.30,7.58        # optional import sanity box
 //! ```
@@ -106,18 +106,18 @@ mod tests {
     fn parses_all_keys() {
         let c = GeoConfig::from_vars(&vars(&[
             ("GEO_BACKEND", "cadastre_nrw"),
-            ("GEO_AGS", "05558024, 05558028"),
+            ("GEO_AGS", "05999001, 05999002"),
             (
                 "GEO_POSTCODE_MAP",
-                "05558024:59348:Lüdinghausen,05558028:59394:Nordkirchen",
+                "05999001:99999:Musterstadt,05999002:99998:Beispieldorf",
             ),
             ("GEO_EXPECT_BBOX", "51.68,51.86,7.30,7.58"),
         ]))
         .unwrap();
-        assert_eq!(c.ags, vec!["05558024", "05558028"]);
+        assert_eq!(c.ags, vec!["05999001", "05999002"]);
         assert_eq!(
-            c.postcode_city("05558024"),
-            Some(&("59348".to_string(), "Lüdinghausen".to_string()))
+            c.postcode_city("05999001"),
+            Some(&("99999".to_string(), "Musterstadt".to_string()))
         );
         assert_eq!(c.expect_bbox, (51.68, 51.86, 7.30, 7.58));
         assert!(c.data_dir.is_none());

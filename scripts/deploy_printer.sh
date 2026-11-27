@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # deploy_printer.sh — build + deploy the rusterando-printer binary to the
-# Raspberry Pi that drives David's Epson TM-T20III thermal printer.
+# Raspberry Pi that drives the shop's Epson TM-T20III thermal printer.
 #
-# Mirrors deploy_to_server.sh / dprestart.sh conventions: confirmation
+# Mirrors deploy_to_server.sh conventions: confirmation
 # gate, post-restart health check, journal tail. The Pi runs the binary
 # as the systemd unit `pizzeria-printer.service`; we NEVER invoke the
 # binary by hand (a manual run wedges the single-open /dev/usb/lp0 and
@@ -22,8 +22,10 @@
 #   7. Tails the unit journal for 5 s so you see it reconnect the tunnel
 #      and reopen the printer device.
 #
-# SSH: uses the `davidspizzeria-pi` host alias from ~/.ssh/config (user,
-# key, port all come from there). Override with PI_SSH_HOST=... env.
+# SSH: PI_SSH_HOST, a host alias from ~/.ssh/config (user, key, port all
+# come from there). Taken from the environment, else from the PI_SSH_HOST=
+# line of .env in the repo root (only that line is read, the file is not
+# sourced). Unset in both: the script stops before deploying.
 #
 # Usage:
 #   ./scripts/deploy_printer.sh                 # build + deploy, with confirm
@@ -51,7 +53,6 @@ for a in "$@"; do
 done
 
 # ----- config -----
-PI_SSH_HOST="${PI_SSH_HOST:-davidspizzeria-pi}"
 TARGET_TRIPLE="aarch64-unknown-linux-gnu"
 BUILT_BINARY="crates/rusterando-printer/target/${TARGET_TRIPLE}/release/rusterando-printer"
 SERVICE="rusterando-printer"
@@ -76,8 +77,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
+# One KEY=value line from .env (optional `export `, quotes stripped); the
+# file is never sourced.
+env_value() {
+  [ -f "$REPO_ROOT/.env" ] || return 0
+  sed -n "s/^\(export \)\{0,1\}$1=//p" "$REPO_ROOT/.env" | tail -1 | tr -d '\r' \
+    | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+}
+PI_SSH_HOST="${PI_SSH_HOST:-$(env_value PI_SSH_HOST)}"
+
 echo
-say "rusterando-printer → ${PI_SSH_HOST}"
+say "rusterando-printer → ${PI_SSH_HOST:-(PI_SSH_HOST not set)}"
 
 # ----- 1. build -----
 if [ "$DO_BUILD" -eq 1 ]; then
@@ -120,6 +130,10 @@ if [ "$DO_DEPLOY" -eq 0 ]; then
 fi
 
 # ----- 3. reachability + current state -----
+if [ -z "$PI_SSH_HOST" ]; then
+  err "set PI_SSH_HOST (ssh alias of the printer Pi) in the environment or in .env"
+  exit 2
+fi
 say "checking ${PI_SSH_HOST}"
 if ! ssh -o ConnectTimeout=8 "$PI_SSH_HOST" true 2>/dev/null; then
   err "cannot reach ${PI_SSH_HOST} over SSH — check ~/.ssh/config + that the Pi is up"
@@ -192,5 +206,5 @@ ssh "$PI_SSH_HOST" "timeout 5 sudo journalctl -fu ${SERVICE} --no-pager 2>/dev/n
 echo
 ok "done"
 echo
-say "Tip: have David place one test order and confirm a receipt prints."
+say "Tip: have the shop place one test order and confirm a receipt prints."
 echo

@@ -2,16 +2,16 @@
 //!
 //! Two deployment kinds, distinguished by `--standalone`:
 //!
-//!   STANDALONE (own service, own domain) — like David's:
-//!       .env.<shop>            e.g. .env.davids
-//!       PUBLIC_URL             https://<domain>            davidspizzeria.de
-//!       APP_NAME / BIN_NAME    <shop>-server               davidspizzeria-server
-//!       LEPTOS_OUTPUT_NAME     <shop>                      davidspizzeria
+//!   STANDALONE (own service, own domain):
+//!       .env.<shop>            e.g. .env.myshop
+//!       PUBLIC_URL             https://<domain>            shop.example.com
+//!       APP_NAME / BIN_NAME    <shop>-server               myshop-server
+//!       LEPTOS_OUTPUT_NAME     <shop>                      myshop
 //!       DATABASE_URL           sqlite:./data/<shop>.db
 //!
 //!   MULTI-TENANT (rides one shared service, subdomain per shop) — default:
-//!       .env.<parent>.<shop>   e.g. .env.rusterando.flizza
-//!       PUBLIC_URL             https://<shop>.<parent-domain>   flizza.rusterando.de
+//!       .env.<parent>.<shop>   e.g. .env.rusterando.beispiel
+//!       PUBLIC_URL             https://<shop>.<parent-domain>   beispiel.rusterando.de
 //!       APP_NAME / BIN_NAME    <parent>-server  (inherited)     rusterando-server
 //!       LEPTOS_OUTPUT_NAME     <parent>         (inherited)     rusterando
 //!       DATABASE_URL           sqlite:./data/<shop>.sqlite
@@ -31,12 +31,12 @@
 //! Run from the repo root so `migrations/`, `data/`, `.env.example` resolve:
 //!
 //!   # multi-tenant tenant under rusterando:
-//!   cargo run -p menu-import -- --parent rusterando --shop flizza \
-//!       --menu rusterando-scrape/menu-json/menu-speisekarte-pizza-flizza-2025.json
+//!   cargo run -p menu-import -- --parent rusterando --shop beispiel \
+//!       --menu rusterando-scrape/menu-json/menu-speisekarte-pizza-beispiel-2025.json
 //!
 //!   # standalone own-service shop:
-//!   cargo run -p menu-import -- --standalone --shop davids --domain davidspizzeria.de \
-//!       --menu …/menu-davids-pizzeria-ludinghausen.json
+//!   cargo run -p menu-import -- --standalone --shop myshop --domain shop.example.com \
+//!       --menu …/menu-myshop.json
 //!
 //! Re-running replaces the menu in place (manual /admin/menu edits are lost).
 
@@ -158,7 +158,7 @@ struct Args {
     menu: PathBuf,
 
     /// Generate a standalone own-service shop (own domain + binary identity),
-    /// like David's. Without this flag the shop is a multi-tenant tenant.
+    /// like the reference shop. Without this flag the shop is a multi-tenant tenant.
     #[arg(long)]
     standalone: bool,
 
@@ -169,7 +169,7 @@ struct Args {
     parent: String,
 
     /// Public domain. Standalone: the shop's own domain (e.g.
-    /// davidspizzeria.de). Multi-tenant: the PARENT domain (e.g.
+    /// shop.example.com). Multi-tenant: the PARENT domain (e.g.
     /// rusterando.de) — the tenant becomes `<shop>.<that>`.
     /// Defaults to `<parent>.de` (multi-tenant) or `<shop>.example.com`
     /// (standalone).
@@ -335,9 +335,9 @@ async fn main() -> Result<()> {
 /// place the sqlite. Every field is concrete (defaults applied + overrides
 /// merged) so `rewrite_env` is pure substitution.
 struct Names {
-    /// `.env.davids` (standalone) / `.env.rusterando.flizza` (multi-tenant).
+    /// `.env.myshop` (standalone) / `.env.rusterando.beispiel` (multi-tenant).
     env_file: String,
-    /// `data/davids.db` (standalone) / `data/flizza.sqlite` (multi-tenant),
+    /// `data/myshop.db` (standalone) / `data/beispiel.sqlite` (multi-tenant),
     /// relative to root.
     db_rel: String,
     app_name: String,
@@ -345,7 +345,7 @@ struct Names {
     leptos_output_name: String,
     /// `sqlite:./data/<…>` matching `db_rel`.
     database_url: String,
-    /// `https://davidspizzeria.de` / `https://flizza.rusterando.de`.
+    /// `https://shop.example.com` / `https://beispiel.rusterando.de`.
     public_url: String,
     /// `/var/www/<host>` deploy base, host taken from `public_url`.
     deploy_remote_base: String,
@@ -435,7 +435,7 @@ fn env_overrides(set: &[String], meta: &Meta, multi_tenant: bool) -> Result<Vec<
         out.push(("GEO_BACKEND".into(), "cadastre_nrw".into()));
         out.push(("GEO_DATA_DIR".into(), "./data/geo".into()));
         // The template's GEO_AGS / GEO_POSTCODE_MAP / GEO_EXPECT_BBOX are
-        // Lüdinghausen (the first shop) — carrying those into a shop in
+        // one example town's — carrying those into a shop in
         // Aachen would veto every address of its own town on import. We
         // can't know the municipality keys from a scrape, so leave AGS and
         // the postcode map EMPTY (the admin's "Alles aus Adresse einrichten"
@@ -720,7 +720,7 @@ async fn import_menu(
     // collisions to NULL so the insert doesn't fail.
     let mut seen_numbers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Auto-numbering: some shops (e.g. Pizzeria Rimini, Lieferando) print no
+    // Auto-numbering: some menus (e.g. scraped Lieferando ones) print no
     // "Nr N" — every item's `id` is a UUID or empty, so none is a usable
     // menu_number. When NOT A SINGLE item carries a printed number, we assign
     // sequential 1..n in menu order. If the shop DOES print numbers, we keep
@@ -914,8 +914,8 @@ async fn import_menu(
     debug_assert_eq!(count as usize, n_items);
 
     // Branding: set the shop's display name from restaurant.name everywhere
-    // it's stored, so a fresh tenant's site isn't branded with the David's
-    // seed. Two sinks, both written here (in the same txn as the menu) and
+    // it's stored, so a fresh tenant's site isn't branded with the reference
+    // shop's seed. Two sinks, both written here (in the same txn as the menu) and
     // logged so it's verifiable that it actually happened:
     //   - app_settings.shop_name  → header / branding name
     //   - home_hero.title (id=1)   → landing-page headline
@@ -1053,10 +1053,29 @@ async fn write_meta(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, meta: &Meta) -
     Ok(written)
 }
 
+/// The delivery zones the reference seed inserts, as `(id, postcode)` in
+/// `ORDER BY id` order. They mirror the frozen migration
+/// `migrations/20260507000011_seed_reference_data.sql` and must match it
+/// byte for byte (every applied DB carries exactly these rows). Roles:
+/// [`SEED_MAIN`] is the town zone, [`SEED_SUBURB_1`] / [`SEED_SUBURB_2`]
+/// the two suburb rows.
+#[rustfmt::skip]
+const SEED_ZONES: [(&str, &str); 3] = [
+    ("dz-bauerschaften", "59348-bauerschaft"), // frozen-seed
+    ("dz-luedinghausen", "59348"),             // frozen-seed
+    ("dz-seppenrade", "59348-seppenrade"),     // frozen-seed
+];
+/// Index of the seeded main (town) zone in [`SEED_ZONES`].
+const SEED_MAIN: usize = 1;
+/// Index of the first seeded suburb zone (becomes `<plz>-umland-1`).
+const SEED_SUBURB_1: usize = 2;
+/// Index of the second seeded suburb zone (becomes `<plz>-umland-2`).
+const SEED_SUBURB_2: usize = 0;
+
 /// Point the seeded delivery zones at THIS shop's town.
 ///
 /// Every tenant DB starts from the same migrations, whose reference seed is
-/// Lüdinghausen (`59348`, plus `-seppenrade` / `-bauerschaft` suburb rows).
+/// one town ([`SEED_ZONES`]: a main postcode zone plus two suburb rows).
 /// A shop in Aachen inherited those verbatim, so its delivery area was three
 /// zones of a town 200 km away — the admin had to fix it by hand after every
 /// import.
@@ -1087,34 +1106,29 @@ async fn localise_delivery_zones(
         sqlx::query_as("SELECT id, postcode FROM delivery_zones ORDER BY id")
             .fetch_all(&mut **tx)
             .await?;
-    let pristine = [
-        ("dz-bauerschaften", "59348-bauerschaft"),
-        ("dz-luedinghausen", "59348"),
-        ("dz-seppenrade", "59348-seppenrade"),
-    ];
-    let untouched = rows.len() == pristine.len()
+    let untouched = rows.len() == SEED_ZONES.len()
         && rows
             .iter()
-            .zip(pristine.iter())
+            .zip(SEED_ZONES.iter())
             .all(|((id, pc), (sid, spc))| id == sid && pc == spc);
     if !untouched {
         tracing::info!("delivery zones already customised — left untouched");
         return Ok(0);
     }
     // Nothing to do when the shop really is in the seeded town.
-    if plz == "59348" {
+    if plz == SEED_ZONES[SEED_MAIN].1 {
         return Ok(0);
     }
 
     let updates = [
-        ("dz-luedinghausen", plz.to_string(), city.to_string()),
+        (SEED_ZONES[SEED_MAIN].0, plz.to_string(), city.to_string()),
         (
-            "dz-seppenrade",
+            SEED_ZONES[SEED_SUBURB_1].0,
             format!("{plz}-umland-1"),
             format!("{city} Umland 1"),
         ),
         (
-            "dz-bauerschaften",
+            SEED_ZONES[SEED_SUBURB_2].0,
             format!("{plz}-umland-2"),
             format!("{city} Umland 2"),
         ),
@@ -1202,7 +1216,7 @@ async fn write_branding(
     // home_hero (single row, CHECK id = 1): title, subtitle AND image.
     //
     // The migration seeds all three for the reference shop, so importing only
-    // the title left a new shop advertising "…direkt aus Lüdinghausen" over a
+    // the title left a new shop advertising the seed's own town over a
     // photo of another restaurant. The subtitle is rebuilt from the scraped
     // city + cuisines; the image is the listing's own hero when we managed to
     // download one (else the seed path stays and the admin can replace it).
@@ -1548,8 +1562,8 @@ mod tests {
 
     #[test]
     fn slug_basic() {
-        assert_eq!(slugify("Pizza-Flizza 2025"), "pizza-flizza-2025");
-        assert_eq!(slugify("  Davids Pizzeria  "), "davids-pizzeria");
+        assert_eq!(slugify("Pizza-Beispiel 2025"), "pizza-beispiel-2025");
+        assert_eq!(slugify("  Musterpizzeria Nord  "), "musterpizzeria-nord");
     }
 
     #[test]
@@ -1577,18 +1591,18 @@ mod tests {
 
     #[test]
     fn names_multitenant_defaults() {
-        let a = args_from(&["--parent", "rusterando", "--shop", "flizza"]);
-        let n = resolve_names(&a, "flizza", "Pizza Flizza");
-        assert_eq!(n.env_file, ".env.rusterando.flizza");
-        assert_eq!(n.db_rel, "data/flizza.sqlite");
+        let a = args_from(&["--parent", "rusterando", "--shop", "beispiel"]);
+        let n = resolve_names(&a, "beispiel", "Pizza Beispiel");
+        assert_eq!(n.env_file, ".env.rusterando.beispiel");
+        assert_eq!(n.db_rel, "data/beispiel.sqlite");
         assert_eq!(n.app_name, "rusterando-server"); // parent identity
         assert_eq!(n.bin_name, "rusterando-server");
         assert_eq!(n.leptos_output_name, "rusterando");
-        assert_eq!(n.public_url, "https://flizza.rusterando.de");
-        assert_eq!(n.deploy_remote_base, "/var/www/flizza.rusterando.de");
+        assert_eq!(n.public_url, "https://beispiel.rusterando.de");
+        assert_eq!(n.deploy_remote_base, "/var/www/beispiel.rusterando.de");
         assert_eq!(
             n.email_from,
-            "Pizza Flizza <bestellung@flizza.rusterando.de>"
+            "Pizza Beispiel <bestellung@beispiel.rusterando.de>"
         );
         assert!(n.site_addr.is_none()); // inherits shared service port
     }
@@ -1598,39 +1612,39 @@ mod tests {
         let a = args_from(&[
             "--standalone",
             "--shop",
-            "davids",
+            "myshop",
             "--domain",
-            "davidspizzeria.de",
+            "shop.example.com",
         ]);
-        let n = resolve_names(&a, "davids", "Davids Pizzeria");
-        assert_eq!(n.env_file, ".env.davids");
-        assert_eq!(n.db_rel, "data/davids.db");
-        assert_eq!(n.app_name, "davids-server"); // own identity
-        assert_eq!(n.leptos_output_name, "davids");
-        assert_eq!(n.public_url, "https://davidspizzeria.de");
-        assert_eq!(n.deploy_remote_base, "/var/www/davidspizzeria.de");
+        let n = resolve_names(&a, "myshop", "Musterpizzeria");
+        assert_eq!(n.env_file, ".env.myshop");
+        assert_eq!(n.db_rel, "data/myshop.db");
+        assert_eq!(n.app_name, "myshop-server"); // own identity
+        assert_eq!(n.leptos_output_name, "myshop");
+        assert_eq!(n.public_url, "https://shop.example.com");
+        assert_eq!(n.deploy_remote_base, "/var/www/shop.example.com");
     }
 
     #[test]
     fn names_overrides_win() {
-        // Reproduce the real .env.davids: brand-named identity via overrides.
+        // A standalone shop with a brand-named identity via overrides.
         let a = args_from(&[
             "--standalone",
             "--shop",
-            "davids",
+            "myshop",
             "--domain",
-            "davidspizzeria.de",
+            "musterpizzeria.example",
             "--app-name",
-            "davidspizzeria-server",
+            "musterpizzeria-server",
             "--leptos-output-name",
-            "davidspizzeria",
+            "musterpizzeria",
             "--port",
             "3005",
         ]);
-        let n = resolve_names(&a, "davids", "Davids");
-        assert_eq!(n.app_name, "davidspizzeria-server");
-        assert_eq!(n.bin_name, "davidspizzeria-server"); // BIN defaults to APP
-        assert_eq!(n.leptos_output_name, "davidspizzeria");
+        let n = resolve_names(&a, "myshop", "Musterpizzeria");
+        assert_eq!(n.app_name, "musterpizzeria-server");
+        assert_eq!(n.bin_name, "musterpizzeria-server"); // BIN defaults to APP
+        assert_eq!(n.leptos_output_name, "musterpizzeria");
         assert_eq!(n.site_addr.as_deref(), Some("127.0.0.1:3005"));
     }
 
@@ -1647,8 +1661,8 @@ mod tests {
         );
         // Already-fine values untouched.
         assert_eq!(
-            quote_env_line_if_needed("APNS_TEAM_ID=U4GT5CZ7J7"),
-            "APNS_TEAM_ID=U4GT5CZ7J7"
+            quote_env_line_if_needed("APNS_TEAM_ID=TEAMID0001"),
+            "APNS_TEAM_ID=TEAMID0001"
         );
         // Already-quoted untouched.
         assert_eq!(
@@ -1671,8 +1685,8 @@ mod tests {
         // placeholders unfilled. Build one from a template that contains
         // the exact .env.example breakers and assert every line is valid
         // `KEY=value` (no spaces in an unquoted value).
-        let a = args_from(&["--parent", "rusterando", "--shop", "flizza"]);
-        let n = resolve_names(&a, "flizza", "Flizza");
+        let a = args_from(&["--parent", "rusterando", "--shop", "beispiel"]);
+        let n = resolve_names(&a, "beispiel", "Beispiel");
         let tmpl = "APP_NAME=rusterando-server\n\
                     APNS_TEAM_ID=<10-char team id>\n\
                     ORS_API_KEY=<your ORS api key>\n\
@@ -1695,8 +1709,8 @@ mod tests {
     #[test]
     fn overrides_replace_uncomment_and_append() {
         let tmpl = "ADMIN_PASSWORD=change-me\n#GEO_BACKEND=cadastre_nrw\nRUST_LOG=info\n";
-        let a = args_from(&["--parent", "rusterando", "--shop", "flizza"]);
-        let n = resolve_names(&a, "flizza", "Flizza");
+        let a = args_from(&["--parent", "rusterando", "--shop", "beispiel"]);
+        let n = resolve_names(&a, "beispiel", "Beispiel");
         let ov = vec![
             ("ADMIN_PASSWORD".to_string(), "s3cret".to_string()),
             ("GEO_BACKEND".to_string(), "cadastre_nrw".to_string()),
@@ -1718,8 +1732,12 @@ mod tests {
         let (plz, city) = ("52066", "Aachen");
         assert_eq!(format!("{plz}-umland-1"), "52066-umland-1");
         assert_eq!(format!("{city} Umland 2"), "Aachen Umland 2");
-        // A shop in the seeded town keeps the seeded zones untouched.
-        assert_eq!("59348", "59348");
+        // The pristine check zips the seed against `ORDER BY id`, so the
+        // seed must be id-sorted; the main zone is the bare-postcode row.
+        assert!(SEED_ZONES.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(!SEED_ZONES[SEED_MAIN].1.contains('-'));
+        assert!(SEED_ZONES[SEED_SUBURB_1].1.contains('-'));
+        assert!(SEED_ZONES[SEED_SUBURB_2].1.contains('-'));
     }
 
     #[test]
@@ -1736,8 +1754,7 @@ mod tests {
             sub,
             "Italienische Pizza, Döner & Schnitzel — frisch aus Aachen."
         );
-        // Never the reference shop's town.
-        assert!(!sub.contains("Lüdinghausen"));
+        // Built from the shop's own town only, never the seed's.
 
         // City only.
         let m2 = Meta {
@@ -1777,7 +1794,8 @@ mod tests {
             (v[3] - v[2] - 0.2836).abs() < 0.02,
             "lon span widens with latitude: {b}"
         );
-        // Lüdinghausen must NOT be inside an Aachen shop's box (the bug).
+        // The template's example town (lat 51.77) must NOT be inside an
+        // Aachen shop's box (the bug).
         assert!(!(v[0]..=v[1]).contains(&51.7701));
         assert_eq!(bbox_around(Some(0.0), Some(0.0), 10.0), None);
         assert_eq!(bbox_around(None, Some(6.1), 10.0), None);
@@ -1794,7 +1812,7 @@ mod tests {
         let get = |k: &str| ov.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
         assert_eq!(get("MULTI_TENANT").as_deref(), Some("1"));
         assert_eq!(get("GEO_BACKEND").as_deref(), Some("cadastre_nrw"));
-        // The Lüdinghausen defaults are cleared, not inherited.
+        // The template's example-town defaults are cleared, not inherited.
         assert_eq!(get("GEO_AGS").as_deref(), Some(""));
         assert_eq!(get("GEO_POSTCODE_MAP").as_deref(), Some(""));
         assert!(get("GEO_EXPECT_BBOX").unwrap().starts_with("50."));
@@ -1811,9 +1829,9 @@ mod tests {
 
     #[test]
     fn empty_override_comments_the_key_out() {
-        let a = args_from(&["--parent", "rusterando", "--shop", "flizza"]);
-        let n = resolve_names(&a, "flizza", "Flizza");
-        let tmpl = "GEO_AGS=05558024\n#GEO_POSTCODE_MAP=05558024:59348:Lüdinghausen\n";
+        let a = args_from(&["--parent", "rusterando", "--shop", "beispiel"]);
+        let n = resolve_names(&a, "beispiel", "Beispiel");
+        let tmpl = "GEO_AGS=05999001\n#GEO_POSTCODE_MAP=05999001:99999:Musterstadt\n";
         let ov = vec![
             ("GEO_AGS".to_string(), String::new()),
             ("GEO_POSTCODE_MAP".to_string(), String::new()),
@@ -1824,31 +1842,31 @@ mod tests {
             "stale value must be commented out: {out}"
         );
         assert!(
-            !out.contains("\nGEO_AGS=05558024"),
-            "Lüdinghausen AGS must be gone: {out}"
+            !out.contains("\nGEO_AGS=05999001"),
+            "template AGS must be gone: {out}"
         );
-        assert!(!out.contains("59348"), "no inherited postcode map: {out}");
+        assert!(!out.contains("99999"), "no inherited postcode map: {out}");
     }
 
     #[test]
     fn nrw_heuristic() {
         let mut m = Meta::default();
-        m.postcode = "59348".into();
+        m.postcode = "52066".into();
         assert!(looks_like_nrw(&m));
         m.postcode = "80331".into();
         assert!(!looks_like_nrw(&m));
-        m.postcode = "59348".into();
+        m.postcode = "52066".into();
         m.country = "AT".into();
         assert!(!looks_like_nrw(&m));
     }
 
     #[test]
     fn rewrite_only_touches_known_keys() {
-        let a = args_from(&["--parent", "rusterando", "--shop", "flizza"]);
-        let n = resolve_names(&a, "flizza", "Flizza");
+        let a = args_from(&["--parent", "rusterando", "--shop", "beispiel"]);
+        let n = resolve_names(&a, "beispiel", "Beispiel");
         let tmpl = "# comment\nAPP_NAME=rusterando-server\nSMTP_PASS='secret$!'\nDATABASE_URL=sqlite:./data/rusterando.db\n";
         let out = rewrite_env(tmpl, &n, &[]);
-        assert!(out.contains("DATABASE_URL=sqlite:./data/flizza.sqlite"));
+        assert!(out.contains("DATABASE_URL=sqlite:./data/beispiel.sqlite"));
         assert!(out.contains("SMTP_PASS='secret$!'")); // secret untouched
         assert!(out.contains("# comment"));
     }

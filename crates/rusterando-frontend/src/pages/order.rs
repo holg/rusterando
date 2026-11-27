@@ -38,8 +38,8 @@ pub struct CheckoutContext {
     /// admin from /admin/settings.
     #[serde(default)]
     pub free_delivery_threshold_cents: i64,
-    /// Snapshot of the shop's address line ("Wolfsberger Str. 18, 59348
-    /// Lüdinghausen") for the pickup-instructions hint at the bottom of
+    /// Snapshot of the shop's address line ("Musterstraße 1, 99999
+    /// Musterstadt") for the pickup-instructions hint at the bottom of
     /// the form. Empty when the admin hasn't filled in /admin/branding.
     /// Read inside the SAME server-fn that builds the rest of the
     /// checkout context — that way SSR and hydrate render identical
@@ -1213,8 +1213,8 @@ pub mod ssr {
         Ok((intent.id.to_string(), secret))
     }
 
-    /// Strip everything but digits and a leading `+`. "0 2591 / 12 34" and
-    /// "025911234" land on the same key; "+49 2591 1234" stays distinct from
+    /// Strip everything but digits and a leading `+`. "0 1234 / 56 78" and
+    /// "012345678" land on the same key; "+49 1234 5678" stays distinct from
     /// its national-format twin (intentional — different write conventions
     /// across customer base, we'd rather keep two rows than merge wrongly).
     pub fn normalize_phone(raw: &str) -> String {
@@ -1437,7 +1437,7 @@ pub mod ssr {
 
     /// 30 km is a generous radius around the pizzeria — anything farther is
     /// clearly out of delivery range, so we reject before we'd ever reach
-    /// the suburb classifier (avoids "Lüdinghausen, Sachsen-Anhalt" surprises).
+    /// the suburb classifier (avoids "Musterstadt, Sachsen-Anhalt" surprises).
     pub const SANITY_RADIUS_KM: f64 = 30.0;
 
     pub fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
@@ -1697,7 +1697,7 @@ pub mod ssr {
             }
         }
 
-        // 2. Extra circles (explicit outliers like Nordkirchen-Bauerschaften).
+        // 2. Extra circles (explicit outliers like a neighbouring town's hamlets).
         //    Cheap and first because admin-configured points should win
         //    over any name-based heuristic.
         for c in &areas.extra_circles {
@@ -1776,8 +1776,8 @@ pub mod ssr {
         pub village: Option<String>,
         pub suburb: Option<String>,
         pub city_district: Option<String>,
-        /// Rural sub-locality — this is what OSM uses for the Münsterland
-        /// Bauerschaften (e.g. `hamlet = "Berenbrock"`).
+        /// Rural sub-locality — this is what OSM uses for rural
+        /// hamlets / Bauerschaften (e.g. `hamlet = "Kleinhof"`).
         pub hamlet: Option<String>,
         #[allow(dead_code)]
         pub postcode: Option<String>,
@@ -1793,7 +1793,7 @@ pub mod ssr {
         ///   - `suburb`: typical for big cities
         ///   - `city_district`: used as "<City> (Stadt)" for the city centre
         ///   - `village`: when the place is a Stadtteil that's geographically
-        ///     a separate village under a parent town (Seppenrade is one).
+        ///     a separate village under a parent town (Nebendorf is one).
         pub fn suburb_or_district(&self) -> Option<&str> {
             self.suburb
                 .as_deref()
@@ -1830,8 +1830,8 @@ pub mod ssr {
     ///
     /// We attempt two queries: (1) the structured address as the customer
     /// typed it, (2) postcode-only fallback that drops the city field. Reason:
-    /// Seppenrade is a Stadtteil of Lüdinghausen, so "Bahnhofstr. 1, 59348
-    /// Seppenrade" returns 0 hits — but with the city dropped, Nominatim
+    /// Nebendorf is a Stadtteil of Musterstadt, so "Bahnhofstr. 1, 99999
+    /// Nebendorf" returns 0 hits — but with the city dropped, Nominatim
     /// resolves it correctly. Two requests respects the 1 req/sec limit
     /// thanks to the shared `acquire_nominatim_slot()` gate.
     pub async fn nominatim_lookup(
@@ -1872,7 +1872,7 @@ pub mod ssr {
                 city.trim()
             ),
             // Drop the city; postcode + street + house number is usually
-            // enough and avoids the "Seppenrade is a suburb, not a city" trap.
+            // enough and avoids the "Nebendorf is a suburb, not a city" trap.
             format!(
                 "{} {}, {}, Deutschland",
                 street.trim(),
@@ -2360,6 +2360,10 @@ pub async fn place_order(
         }
     }
 
+    // Tagesangebot lines only at the offer that is on now (daily_offer.rs).
+    crate::pages::daily_offer::ssr::check_cart(&db, &cart_id)
+        .await
+        .map_err(ServerFnError::new)?;
     let mut cart = load_cart(&db, &cart_id).await?;
     if cart.lines.is_empty() {
         return Err(ServerFnError::new("Warenkorb ist leer"));
@@ -2587,7 +2591,7 @@ pub async fn place_order(
         .map_err(|e| ServerFnError::new(format!("begin tx: {e}")))?;
 
     // Upsert the customer keyed by phone. Phone is normalised lightly so
-    // "0 2591 / 12 34" and "025911234" land on the same row. We keep the
+    // "0 1234 / 56 78" and "012345678" land on the same row. We keep the
     // *raw* phone on the order row for receipts; only the customers table
     // uses the normalised form.
     let phone_norm = ssr::normalize_phone(&phone);
@@ -3942,8 +3946,8 @@ pub async fn validate_address(
                 // The old "customer-typed city as Stadtteil hint" trick is
                 // gone: the new served_municipalities config decides what
                 // counts as which suburb, so we don't second-guess
-                // Nominatim. If Nominatim says suburb=Westrup, classify_zone
-                // looks up Westrup in zone_routing (or falls to the "*"
+                // Nominatim. If Nominatim says suburb=Kleinhof, classify_zone
+                // looks up Kleinhof in zone_routing (or falls to the "*"
                 // wildcard); if Nominatim says no suburb, the "*" wildcard
                 // (when present) catches the city-proper case.
                 let effective_suburb = suburb_resolved.clone();
@@ -5597,9 +5601,9 @@ fn Form(
     //
     // Fetch the shop's PLZ → Ort hint list once on mount. Drives:
     //   * placeholder defaults for the PLZ and Ort fields (no more "12345"),
-    //   * PLZ → city autofill: type "59348" → city becomes "Lüdinghausen",
-    //   * city → PLZ autofill: type "Lüdinghausen" → PLZ → "59348",
-    //   * a polite "PLZ 59348 = Lüdinghausen — stimmt das?" hint when the
+    //   * PLZ → city autofill: type "99999" → city becomes "Musterstadt",
+    //   * city → PLZ autofill: type "Musterstadt" → PLZ → "99999",
+    //   * a polite "PLZ 99999 = Musterstadt — stimmt das?" hint when the
     //     two fields are both filled in but disagree (so we don't silently
     //     overwrite something the customer might have typed deliberately).
     //

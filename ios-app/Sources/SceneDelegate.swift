@@ -1,6 +1,6 @@
 //
 //  SceneDelegate.swift
-//  Davids Pizzeria
+//  Rusterando
 //
 //  Standard UIKit scene lifecycle. We just create one window, install
 //  the WebViewController, and listen for Universal Link / deep-link
@@ -26,7 +26,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window.makeKeyAndVisible()
 
         // Universal Link cold-start: if the app launched because the
-        // user tapped a https://davidspizzeria.de/... URL, route the
+        // user tapped a https://shop.example.com/... URL, route the
         // WebView there directly instead of the home page.
         if let userActivity = connectionOptions.userActivities.first(where: {
             $0.activityType == NSUserActivityTypeBrowsingWeb

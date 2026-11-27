@@ -16,7 +16,7 @@
 //!
 //! Matching strategy (v1):
 //!   1. Pick a single global "base" pizza — the listed pizza with the
-//!      lowest small price across all categories. On Davids' menu that
+//!      lowest small price across all categories. On a typical menu that
 //!      is "Pizza Margherita". Customers can order this base and add
 //!      any extra, regardless of the named pizza's category.
 //!   2. For each pizza_extra, search ALL listed pizzas/calzones for
@@ -226,7 +226,7 @@ fn name_matches(pizza_name: &str, extra_label: &str) -> bool {
     if pn.contains(&needle) {
         return true;
     }
-    // de ↔ it synonyms covering Davids' menu. Extendable.
+    // de ↔ it synonyms covering a typical menu. Extendable.
     let syn: &[(&str, &[&str])] = &[
         ("schinken", &["prosciutto"]),
         ("pilze", &["funghi"]),

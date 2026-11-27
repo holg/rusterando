@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use rusterando_shared::models::{format_eur, CartLine, CartView, SizeChoice};
 
-use crate::pages::cart::{get_cart, AddToCart, ClaimGiveaway, ClearCart, UpdateCartLine};
+use crate::pages::cart::{get_cart, AddToCart, ClaimGiveaway, ClearCart, ReplaceCartLine, UpdateCartLine};
 
 /// Shared cart state. One Resource (the source of truth) plus three actions
 /// (add / update / clear). All routes that need the cart pull this via context.
@@ -11,6 +11,10 @@ pub struct CartCtx {
     pub open: RwSignal<bool>,
     pub add: ServerAction<AddToCart>,
     pub update: ServerAction<UpdateCartLine>,
+    /// A line changed in the basket's dialog (size, extras, "ohne …").
+    pub replace: ServerAction<ReplaceCartLine>,
+    /// The line whose dialog is open.
+    pub editing: RwSignal<Option<CartLine>>,
     pub clear: ServerAction<ClearCart>,
     /// Claim the free-Pizzabrötchen giveaway (the "Jetzt sichern" button).
     pub claim_giveaway: ServerAction<ClaimGiveaway>,
@@ -34,6 +38,7 @@ impl CartCtx {
 pub fn provide_cart_ctx() {
     let add = ServerAction::<AddToCart>::new();
     let update = ServerAction::<UpdateCartLine>::new();
+    let replace = ServerAction::<ReplaceCartLine>::new();
     let clear = ServerAction::<ClearCart>::new();
     let claim_giveaway = ServerAction::<ClaimGiveaway>::new();
 
@@ -46,6 +51,11 @@ pub fn provide_cart_ctx() {
     });
     Effect::new(move |_| {
         if matches!(update.value().get(), Some(Ok(_))) {
+            bump.update(|n| *n += 1);
+        }
+    });
+    Effect::new(move |_| {
+        if matches!(replace.value().get(), Some(Ok(_))) {
             bump.update(|n| *n += 1);
         }
     });
@@ -91,6 +101,8 @@ pub fn provide_cart_ctx() {
         open: RwSignal::new(false),
         add,
         update,
+        replace,
+        editing: RwSignal::new(None),
         clear,
         claim_giveaway,
         bump,
@@ -161,6 +173,7 @@ pub fn CartDrawer() -> impl IntoView {
     let close = move |_| ctx.open.set(false);
 
     view! {
+        {move || ctx.editing.get().map(|line| view! { <CartEditDialog line/> })}
         <div class="cart-overlay" class:open=is_open on:click=close></div>
         <aside class="cart-drawer" class:open=is_open aria-hidden=move || (!is_open()).to_string()>
             <header class="drawer-head">
@@ -406,37 +419,14 @@ fn Line(line: CartLine) -> impl IntoView {
         }
     };
 
-    // "Bearbeiten" — remove this line and navigate back to the menu
-    // item so the customer can re-pick extras. We pass the previous
-    // extras through the URL hash so the menu page can pre-fill the
-    // checkboxes; that's lighter than threading state through a
-    // signal and survives a full page reload.
+    // "Ändern" — the item's own card in a dialog right here, with this
+    // line's size, extras and "ohne …" ticked; its size buttons replace
+    // the line (CartEditDialog). Not for a Tagesangebot: its price belongs
+    // to the offer.
+    let editable = !line.is_offer;
     let edit = {
-        let id = id.clone();
-        let menu_item_id = line.menu_item_id.clone();
-        let extras_ids: Vec<String> = line.extras.iter().map(|e| e.id.clone()).collect();
-        move |_| {
-            ctx.update.dispatch(UpdateCartLine {
-                line_id: id.clone(),
-                quantity: 0,
-            });
-            ctx.open.set(false);
-            let hash = if extras_ids.is_empty() {
-                format!("#{}", menu_item_id)
-            } else {
-                format!("#{}?extras={}", menu_item_id, extras_ids.join(","))
-            };
-            // window.location.assign — full navigation so the menu
-            // page mounts fresh and reads the hash on init.
-            #[cfg(feature = "hydrate")]
-            if let Some(win) = web_sys::window() {
-                let _ = win.location().set_href(&format!("/menu{hash}"));
-            }
-            #[cfg(not(feature = "hydrate"))]
-            {
-                let _ = &hash; // silence unused on SSR
-            }
-        }
+        let line = line.clone();
+        move |_| ctx.editing.set(Some(line.clone()))
     };
 
     let extras_render = (!line.extras.is_empty()).then(|| {
@@ -523,11 +513,63 @@ fn Line(line: CartLine) -> impl IntoView {
                 </div>
                 <strong class="line-total">{format_eur(line.line_total_cents)}</strong>
                 <div class="line-buttons">
-                    <button class="edit" on:click=edit aria-label=crate::t!("cart.edit_extras") title=crate::t!("cart.edit_extras")>"✎"</button>
+                    {editable.then(|| view! {
+                        <button class="edit" on:click=edit.clone() aria-label=crate::t!("cart.edit_extras") title=crate::t!("cart.edit_extras")>"✎"</button>
+                    })}
                     <button class="remove" on:click=remove aria-label=crate::t!("cart.remove")>"🗑"</button>
                 </div>
             </div>
         </li>
     }
     .into_any()
+}
+
+/// The basket's "change" dialog: the line's item as the menu shows it, its
+/// current size, extras, options and "ohne …" ticked. A size button there
+/// replaces the line (menu.rs `Card`, `ReplaceCartLine`).
+#[component]
+fn CartEditDialog(line: CartLine) -> impl IntoView {
+    let ctx = use_cart_ctx();
+    let close = move |_| ctx.editing.set(None);
+    let item_id = line.menu_item_id.clone();
+    let data = Resource::new(
+        move || item_id.clone(),
+        |id| async move {
+            let item = crate::pages::menu::get_menu_item(id).await?;
+            let extras = crate::pages::admin::extras_admin::list_pizza_extras()
+                .await
+                .unwrap_or_default();
+            Ok::<_, ServerFnError>((item, extras))
+        },
+    );
+    let edit = crate::pages::menu::CardEdit {
+        line_id: line.id.clone(),
+        extras_ids: line.extras.iter().map(|e| e.id.clone()).collect(),
+        removal_ids: line.removals.iter().map(|r| r.id.clone()).collect(),
+        options: line
+            .selected_options
+            .iter()
+            .map(|o| (o.group_id.clone(), o.option_id.clone()))
+            .collect(),
+    };
+    view! {
+        <div class="offer-dialog cart-edit" on:click=close>
+            <div class="offer-dialog-box menu" on:click=|ev| ev.stop_propagation()>
+                <button class="offer-dialog-close" type="button" aria-label="Schließen" on:click=close>"×"</button>
+                <p class="cart-edit-hint">"Extras und „ohne …“ anpassen, dann die Größe wählen — die Position im Warenkorb wird ersetzt."</p>
+                <Suspense fallback=|| view! { <p class="loading">"…"</p> }>
+                    {move || data.get().map(|res| match res {
+                        Ok((Some(it), extras)) => {
+                            provide_context(StoredValue::new(extras));
+                            view! { <crate::pages::menu::Card it edit=edit.clone()/> }.into_any()
+                        }
+                        Ok((None, _)) => view! {
+                            <p class="error">"Dieser Artikel ist nicht mehr auf der Karte."</p>
+                        }.into_any(),
+                        Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
+                    })}
+                </Suspense>
+            </div>
+        </div>
+    }
 }

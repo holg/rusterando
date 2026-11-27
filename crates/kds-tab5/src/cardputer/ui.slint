@@ -1,0 +1,311 @@
+// The kitchen display on the M5Stack Cardputer ADV: 240×135, keys instead
+// of touch. Colours from the "Trattoria" menu theme.
+//
+// The Rust side (ui.rs) hands over only what is on screen: the visible rows
+// of the order list, the visible lines of a detail or terminal page.
+//
+// No size picked by a condition (`a ? 11px : 13px`): the S3's compiler
+// (Xtensa LLVM) can't build that; colours and visibility are fine.
+
+import "../../../kds-ui/assets/fonts/Poppins-Medium.ttf";
+import "../../../kds-ui/assets/fonts/Poppins-Bold.ttf";
+import "../../../kds-ui/assets/fonts/JetBrainsMono-Regular-subset.ttf";
+
+export global Palette {
+    out property <color> paper: #191715;
+    out property <color> paper-hi: #2c2823;
+    out property <color> line: #3a352e;
+    out property <color> cream: #e8e0d0;
+    out property <color> muted: #a39b8b;
+    out property <color> red: #d4513f;
+    out property <color> amber: #e2b04a;
+    out property <color> green: #8fab62;
+}
+
+/// One order in the list. `status`: 0 neu, 1 in Arbeit, 2 fertig;
+/// `urgency`: 0 fine, 1 soon, 2 late.
+export struct Row {
+    number: string,
+    tag: string,
+    when: string,
+    items: string,
+    status: int,
+    urgency: int,
+    selected: bool,
+}
+
+/// A text line. `kind`: 0 normal, 1 quiet, 2 heading, 3 warning, 4 good.
+export struct Line {
+    text: string,
+    kind: int,
+}
+
+component StatusDot inherits Rectangle {
+    in property <int> status;
+    width: 6px;
+    height: 6px;
+    border-radius: 3px;
+    background: status == 0 ? Palette.red : status == 1 ? Palette.amber : Palette.green;
+}
+
+component LineText inherits Text {
+    in property <Line> l;
+    text: l.text;
+    color: l.kind == 1 ? Palette.muted : l.kind == 2 ? Palette.red : l.kind == 3 ? Palette.amber : l.kind == 4 ? Palette.green : Palette.cream;
+    font-weight: l.kind == 2 ? 700 : 500;
+    overflow: elide;
+}
+
+export component CardWindow inherits Window {
+    width: 240px;
+    height: 135px;
+    background: Palette.paper;
+    default-font-family: "Poppins";
+    default-font-size: 10px;
+
+    /// 0 Küche, 1 Details, 2 Info, 3 Terminal.
+    in property <int> page;
+    in property <string> heading: "KÜCHE";
+    in property <string> clock;
+    /// 0 offline, 1 online, 2 over LoRa.
+    in property <int> link;
+    /// "74%", empty before the first reading; `battery-low` below 20 %.
+    in property <string> battery;
+    in property <bool> battery-low;
+    in property <int> n-new;
+    in property <int> n-work;
+    in property <int> n-ready;
+
+    in property <[Row]> rows;
+    in property <string> above;
+    in property <string> below;
+    in property <string> empty-text;
+
+    in property <[Line]> lines;
+    in property <string> term-input;
+
+    in property <string> hint;
+    in property <string> notice;
+    in property <bool> notice-ok;
+    in property <bool> flash;
+
+    // ----- Header -------------------------------------------------------
+    Rectangle {
+        y: 0;
+        height: 15px;
+        background: Palette.paper-hi;
+        Text {
+            x: 5px;
+            text: root.heading;
+            color: Palette.red;
+            font-weight: 700;
+            vertical-alignment: center;
+        }
+        HorizontalLayout {
+            x: 84px;
+            width: 64px;
+            spacing: 3px;
+            alignment: start;
+            StatusDot {
+                status: 0;
+                y: 5px;
+            }
+            Text {
+                text: root.n-new;
+                color: Palette.cream;
+                vertical-alignment: center;
+            }
+            StatusDot {
+                status: 1;
+                y: 5px;
+            }
+            Text {
+                text: root.n-work;
+                color: Palette.cream;
+                vertical-alignment: center;
+            }
+            StatusDot {
+                status: 2;
+                y: 5px;
+            }
+            Text {
+                text: root.n-ready;
+                color: Palette.cream;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            x: 146px;
+            width: 28px;
+            text: root.battery;
+            color: root.battery-low ? Palette.red : Palette.muted;
+            font-size: 8px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            x: 176px;
+            y: 4px;
+            width: 7px;
+            height: 7px;
+            border-radius: 3.5px;
+            background: root.link == 1 ? Palette.green : root.link == 2 ? Palette.amber : Palette.red;
+        }
+        Text {
+            x: 186px;
+            width: 50px;
+            text: root.clock;
+            color: Palette.cream;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            font-weight: 700;
+        }
+    }
+
+    // ----- Küche: the order list ----------------------------------------
+    if root.page == 0: Rectangle {
+        y: 16px;
+        height: 106px;
+        for row[i] in root.rows: Rectangle {
+            y: i * 26px;
+            height: 25px;
+            background: row.selected ? Palette.paper-hi : Palette.paper;
+            Rectangle {
+                x: 0;
+                width: 3px;
+                background: row.status == 0 ? Palette.red : row.status == 1 ? Palette.amber : Palette.green;
+            }
+            Rectangle {
+                x: 0;
+                width: 240px;
+                visible: row.selected;
+                border-width: 1px;
+                border-color: Palette.cream;
+            }
+            Text {
+                x: 7px;
+                y: 0;
+                text: "#" + row.number;
+                color: Palette.cream;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            Text {
+                x: 52px;
+                y: 2px;
+                width: 80px;
+                text: row.tag;
+                color: Palette.muted;
+                font-size: 9px;
+                overflow: elide;
+            }
+            Text {
+                x: 134px;
+                y: 1px;
+                width: 100px;
+                text: row.when;
+                color: row.urgency == 2 ? Palette.red : row.urgency == 1 ? Palette.amber : Palette.cream;
+                horizontal-alignment: right;
+                font-weight: 700;
+            }
+            Text {
+                x: 7px;
+                y: 13px;
+                width: 228px;
+                text: row.items;
+                color: Palette.muted;
+                font-size: 9px;
+                overflow: elide;
+            }
+        }
+        Text {
+            visible: root.rows.length == 0;
+            width: 240px;
+            height: 106px;
+            text: root.empty-text;
+            color: Palette.muted;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        Text {
+            x: 200px;
+            y: 0;
+            width: 36px;
+            text: root.above;
+            color: Palette.muted;
+            font-size: 8px;
+            horizontal-alignment: right;
+        }
+    }
+
+    // ----- Details / Info: lines of text --------------------------------
+    if root.page == 1 || root.page == 2: VerticalLayout {
+        y: 17px;
+        height: 104px;
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 0;
+        alignment: start;
+        for l in root.lines: LineText {
+            l: l;
+            height: 13px;
+        }
+    }
+
+    // ----- Terminal -----------------------------------------------------
+    if root.page == 3: Rectangle {
+        y: 16px;
+        height: 106px;
+        VerticalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            alignment: end;
+            for l in root.lines: LineText {
+                l: l;
+                height: 11px;
+                font-family: "JetBrains Mono";
+                font-size: 9px;
+            }
+            Text {
+                height: 12px;
+                text: root.term-input;
+                color: Palette.green;
+                font-family: "JetBrains Mono";
+                font-size: 9px;
+                overflow: elide;
+            }
+        }
+    }
+
+    // ----- Footer: key hints, or a message ------------------------------
+    Rectangle {
+        y: 123px;
+        height: 12px;
+        background: root.notice == "" ? Palette.paper : root.notice-ok ? Palette.green : Palette.red;
+        Text {
+            x: 5px;
+            width: 200px;
+            text: root.notice == "" ? root.hint : root.notice;
+            color: root.notice == "" ? Palette.muted : Palette.paper;
+            font-size: 8px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            x: 206px;
+            width: 30px;
+            text: root.below;
+            color: Palette.muted;
+            font-size: 8px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+
+    // ----- New order: the white flash -----------------------------------
+    Rectangle {
+        visible: root.flash;
+        background: white;
+    }
+}

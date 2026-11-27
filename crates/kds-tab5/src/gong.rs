@@ -1,6 +1,8 @@
 //! The gong: the kitchen's new-order sound (the same gong.wav as the STM32
-//! board and the staff app) through the Tab5's speaker — ES8388 codec and
-//! power amplifier, set up by the board package (48 kHz, 16 bit, mono).
+//! board and the staff app) through the speaker — codec and power amplifier
+//! set up by the board package (48 kHz, 16 bit, mono). Tab5: ES8388 and its
+//! built-in speaker. JC1060P470: ES8311 and NS4150, the speaker plugged
+//! into its MX1.25 socket (none comes with the board).
 //!
 //! Plays on its own thread so the screen keeps running; rings that come in
 //! while it plays are merged into the one playing. The power amplifier is
@@ -21,7 +23,8 @@ const VOLUME: i32 = 95;
 const AMP_ON: Duration = Duration::from_millis(30);
 const AMP_TAIL: Duration = Duration::from_millis(150);
 
-/// Switch the speaker's power amplifier (SPK_EN on the I/O expander 0x43).
+/// Switch the speaker's power amplifier (Tab5: SPK_EN on the I/O expander
+/// 0x43; JC1060P470: GPIO11).
 pub fn amplifier(on: bool) {
     // SAFETY: board-package feature switch on the shared I2C bus.
     let r = unsafe { bsp::bsp_feature_enable(bsp::bsp_feature_t_BSP_FEATURE_SPEAKER, on) };

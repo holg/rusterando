@@ -82,7 +82,7 @@ fn sample() -> OrderForKitchen {
         shop_name: "Testdruck".to_string(),
         accepted_at_unix: None,
         accepted_at_label: None,
-        qr_url: Some("https://davidspizzeria.de".to_string()),
+        qr_url: Some("https://example.com".to_string()),
         is_test_mode: true,
         voucher_code: String::new(),
         voucher_discount_cents: 0,

@@ -79,6 +79,28 @@ fn roll_back_unless_confirmed() {
     }
 }
 
+/// The app in `slot`, when it isn't this firmware. With a launcher on the
+/// device (bmorcelli's Launcher on the Cardputer, installing from the SD
+/// card) the next slot can hold another installed app: an update over the
+/// network must never write over it. (The Launcher itself sits in a `test`
+/// partition, which ESP-IDF never picks for an update.)
+fn other_app(slot: *const sys::esp_partition_t) -> Option<String> {
+    // SAFETY: read-only queries; the descriptions are copied out.
+    unsafe {
+        let mine = &*sys::esp_app_get_description();
+        let mut there: sys::esp_app_desc_t = core::mem::zeroed();
+        // An empty or erased slot has no description: free to use.
+        if sys::esp_ota_get_partition_description(slot, &mut there) != sys::ESP_OK {
+            return None;
+        }
+        let name = |n: &[core::ffi::c_char]| {
+            core::ffi::CStr::from_ptr(n.as_ptr()).to_string_lossy().into_owned()
+        };
+        let (mine, there) = (name(&mine.project_name), name(&there.project_name));
+        (mine != there).then_some(there)
+    }
+}
+
 /// An update image being received into the other slot. Dropping it before
 /// [`Download::finish`] abandons it; the running image stays.
 pub struct Download {
@@ -105,8 +127,13 @@ impl Download {
         // esp_ota_end / esp_ota_abort (Drop).
         unsafe {
             let partition = sys::esp_ota_get_next_update_partition(core::ptr::null());
-            if partition.is_null() {
-                bail!("no update slot (old partition layout: flash once over USB)");
+            // A launcher's layout may give this app a single slot: then the
+            // "next" one is the running one.
+            if partition.is_null() || partition == sys::esp_ota_get_running_partition() {
+                bail!("no second app slot (old layout or a launcher's: install over USB or from the SD card)");
+            }
+            if let Some(other) = other_app(partition) {
+                bail!("the update slot holds another app ({other}, a launcher?) — install from the SD card instead");
             }
             if size > (*partition).size as u64 {
                 bail!("image ({size} B) larger than the slot ({} B)", (*partition).size);

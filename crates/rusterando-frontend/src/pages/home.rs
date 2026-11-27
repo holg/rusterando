@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_SITE_URL: &str = "http://127.0.0.1:3001";
 
 /// What the home page renders in the "Wir liefern" section. Server-fed
-/// so the values stay in sync with whatever David sets in
+/// so the values stay in sync with whatever the admin sets in
 /// /admin/settings + delivery_zones.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HomeDeliveryInfo {
@@ -385,9 +385,8 @@ pub fn Home() -> impl IntoView {
             </table>
         </section>
 
+        // No link to the admin area: staff know the address.
         <footer class="site-footer">
-            <a href="/admin">"Admin"</a>
-            <span class="sep">"·"</span>
             <a href="/impressum">{move || crate::t!("header.imprint")}</a>
             <span class="sep">"·"</span>
             <a href="/datenschutz">{move || crate::t!("header.privacy")}</a>
@@ -402,7 +401,20 @@ fn HomeBody(content: crate::pages::home_content::HomeContent) -> impl IntoView {
         hero,
         offers,
         gallery,
+        cover_image,
+        daily_offer,
+        offer_items,
+        extras,
     } = content;
+    // The menu's item card (in the offers' dialog) reads the extras catalog
+    // from context, as on the menu page.
+    provide_context(StoredValue::new(extras));
+    let cover_alt = format!("{} — Titelblatt der Speisekarte", hero.title);
+    let hero_class = if cover_image.is_some() {
+        "hero hero-cinematic hero-with-cover"
+    } else {
+        "hero hero-cinematic"
+    };
     let title_upper = hero.title.to_uppercase();
 
     // Either an image URL (render <img>) or a CSS background string
@@ -415,7 +427,7 @@ fn HomeBody(content: crate::pages::home_content::HomeContent) -> impl IntoView {
         .unwrap_or_default();
 
     view! {
-        <section class="hero hero-cinematic">
+        <section class=hero_class>
             <div class="hero-bg" aria-hidden="true" style=bg_style>
                 {hero_img.map(|src| view! {
                     <img src=src alt="" class="hero-photo" loading="eager"/>
@@ -423,18 +435,29 @@ fn HomeBody(content: crate::pages::home_content::HomeContent) -> impl IntoView {
                 <div class="hero-vignette"></div>
             </div>
             <div class="hero-content">
-                <h1 class="logo">{title_upper}</h1>
+                {daily_offer.map(|offer| view! { <crate::pages::daily_offer::DailyOfferHero offer/> })}
+                <h1 class="logo">{crate::components::flag_letters::flag_letters(&title_upper)}</h1>
                 <p class="tag">{hero.subtitle}</p>
                 {render_meta()}
                 <p class="cta">
                     <a class="btn pill big" href="/menu">{move || crate::t!("home.order_now")}</a>
                 </p>
             </div>
+            // The printed menu's front cover, today's prices on it.
+            {cover_image.map(|src| view! {
+                <a class="hero-cover" href="/menu">
+                    <img src=src alt=cover_alt.clone()
+                        width="1000" height="1419" loading="eager"/>
+                </a>
+            })}
             <a class="hero-scroll-cue" href="#offers" aria-label=crate::t!("home.scroll_more")>"↓"</a>
         </section>
 
         <section id="offers" class="offers">
-            {offers.into_iter().map(|o: Offer| view! { <OfferCard o/> }).collect_view()}
+            {offers.into_iter().map(|o: Offer| {
+                let item = o.item_id.as_ref().and_then(|id| offer_items.iter().find(|it| &it.id == id).cloned());
+                view! { <OfferCard o item/> }
+            }).collect_view()}
         </section>
 
         <section class="gallery">
@@ -449,7 +472,22 @@ fn HomeBody(content: crate::pages::home_content::HomeContent) -> impl IntoView {
 }
 
 #[component]
-fn OfferCard(o: crate::pages::home_content::Offer) -> impl IntoView {
+fn OfferCard(
+    o: crate::pages::home_content::Offer,
+    /// The menu item behind the offer: "In den Warenkorb" opens its card
+    /// (size, toppings) in a dialog right here.
+    item: Option<rusterando_shared::models::MenuItem>,
+) -> impl IntoView {
+    let open = RwSignal::new(false);
+    let cart = crate::components::cart_drawer::use_cart_ctx();
+    // Added (the card opens the basket): the dialog closes.
+    Effect::new(move |_| {
+        if cart.open.get() {
+            open.set(false);
+        }
+    });
+    let has_item = item.is_some();
+    let item = StoredValue::new(item);
     let has_image = o.image_path.is_some();
     let class = if has_image {
         "offer offer-photo"
@@ -464,11 +502,30 @@ fn OfferCard(o: crate::pages::home_content::Offer) -> impl IntoView {
 
     view! {
         <article class=class style=bg>
+            {o.motif.clone().map(|m| view! {
+                <span class="chalk-motif" aria-hidden="true"
+                    style=format!("--motif: url('/img/motif/{m}.svg');")></span>
+            })}
             <h3>{o.title}</h3>
             <p class="price">{o.price_label}</p>
-            <p>{o.blurb}</p>
+            {o.included_line.map(|l| view! { <p>{l}</p> })}
+            {(!o.blurb.trim().is_empty()).then(|| view! { <p>{o.blurb.clone()}</p> })}
             {o.add_on.map(|a| view! { <p class="add-on">{a}</p> })}
+            {has_item.then(|| view! {
+                <button class="btn pill offer-add" type="button" on:click=move |_| open.set(true)>
+                    "In den Warenkorb"
+                </button>
+            })}
         </article>
+        {move || open.get().then(|| item.get_value().map(|it| view! {
+            <div class="offer-dialog" on:click=move |_| open.set(false)>
+                <div class="offer-dialog-box menu" on:click=|ev| ev.stop_propagation()>
+                    <button class="offer-dialog-close" type="button" aria-label="Schließen"
+                        on:click=move |_| open.set(false)>"×"</button>
+                    <crate::pages::menu::Card it/>
+                </div>
+            </div>
+        }))}
     }
 }
 

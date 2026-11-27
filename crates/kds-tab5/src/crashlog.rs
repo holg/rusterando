@@ -3,6 +3,8 @@
 //! tell: a Rust panic writes its message to NVS before the chip restarts, and
 //! the next boot shows the reset reason plus that message.
 
+#[cfg(not(feature = "cardputer"))]
+use std::ffi::CStr;
 use std::sync::{Mutex, OnceLock};
 
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
@@ -50,6 +52,22 @@ pub fn init(nvs: EspDefaultNvsPartition) -> Option<String> {
         default_hook(info);
     }));
 
+    // The last error/warning lines of the previous run (lab_ble diag.c),
+    // then keep this run's: a software restart (esp_hosted's "restart
+    // host", the LAN guard, …) logs why just before, and the USB console
+    // often loses those lines and stays silent afterwards.
+    #[cfg(not(feature = "cardputer"))]
+    // SAFETY: a NUL-terminated static buffer on the C side; then the hook.
+    let before = unsafe {
+        let last = CStr::from_ptr(sys::lab_ble::lab_diag_take_last())
+            .to_string_lossy()
+            .into_owned();
+        sys::lab_ble::lab_diag_install();
+        last
+    };
+    #[cfg(feature = "cardputer")]
+    let before = String::new();
+
     // SAFETY: plain query.
     let reason = match unsafe { sys::esp_reset_reason() } {
         sys::esp_reset_reason_t_ESP_RST_PANIC => "Absturz (Panic)",
@@ -58,10 +76,22 @@ pub fn init(nvs: EspDefaultNvsPartition) -> Option<String> {
         sys::esp_reset_reason_t_ESP_RST_WDT => "Watchdog",
         sys::esp_reset_reason_t_ESP_RST_BROWNOUT => "Unterspannung",
         sys::esp_reset_reason_t_ESP_RST_CPU_LOCKUP => "CPU-Lockup",
+        sys::esp_reset_reason_t_ESP_RST_PWR_GLITCH => "Spannungseinbruch",
+        // Not crashes, but every restart should say what it was.
+        sys::esp_reset_reason_t_ESP_RST_SW => "Neustart durch die Firmware",
+        sys::esp_reset_reason_t_ESP_RST_EXT => "Reset-Taste",
+        sys::esp_reset_reason_t_ESP_RST_USB => "USB",
+        sys::esp_reset_reason_t_ESP_RST_JTAG => "JTAG",
         _ => return saved.map(|p| format!("Letzter Absturz: {p}")),
     };
-    Some(match saved {
+    let mut note = match saved {
         Some(p) => format!("Neustart nach {reason}: {p}"),
+        None if reason.starts_with("Neustart") => reason.to_string(),
         None => format!("Neustart nach {reason}"),
-    })
+    };
+    if !before.is_empty() {
+        note.push_str(" — zuletzt: ");
+        note.push_str(&before);
+    }
+    Some(note)
 }

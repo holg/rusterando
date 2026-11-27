@@ -1058,7 +1058,7 @@ pub async fn geocode_shop_address() -> Result<ShopLocation, ServerFnError> {
     let idx = ssr::index_from_context()
         .ok_or_else(|| ServerFnError::new("Kein Adressindex geladen — erst importieren."))?;
     let street_text = loc.street.trim();
-    // "Wolfsberger Str. 18" → ("Wolfsberger Str.", "18"); the number is the
+    // "Musterstraße 1" → ("Musterstraße", "1"); the number is the
     // last whitespace-separated token starting with a digit.
     let (street_name, number) = match street_text.rsplit_once(' ') {
         Some((s, n)) if n.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
@@ -1066,7 +1066,7 @@ pub async fn geocode_shop_address() -> Result<ShopLocation, ServerFnError> {
         }
         _ => {
             return Err(ServerFnError::new(
-                "Straße + Hausnummer des Shops eintragen (z. B. „Wolfsberger Str. 18“).",
+                "Straße + Hausnummer des Shops eintragen (z. B. „Musterstraße 1“).",
             ))
         }
     };
@@ -1152,7 +1152,7 @@ pub async fn setup_from_address(
         }
         _ => {
             return Err(ServerFnError::new(
-                "PLZ + Ort des Shops eintragen (z. B. „48249 Dülmen“).",
+                "PLZ + Ort des Shops eintragen (z. B. „99999 Musterstadt“).",
             ))
         }
     };

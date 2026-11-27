@@ -1,8 +1,8 @@
 //
 //  WebViewController.swift
-//  Davids Pizzeria
+//  Rusterando
 //
-//  The main UI: a full-screen WKWebView pointed at davidspizzeria.de.
+//  The main UI: a full-screen WKWebView pointed at the active shop's URL.
 //  A small gear-shaped floating button (top-right) opens the native
 //  settings screen where the user manages saved role passwords and
 //  switches between Admin / Küche / Fahrer without re-typing.

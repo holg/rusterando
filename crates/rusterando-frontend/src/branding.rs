@@ -201,7 +201,7 @@ pub mod ssr {
         for (k, v) in rows {
             apply_kv_inner(&mut b, &k, &v);
         }
-        // Env-var fallback for geo so Davids' existing deployment keeps
+        // Env-var fallback for geo so an existing single-shop deployment keeps
         // its lat/lon without an extra admin step.
         if b.shop_lat == 0.0 {
             b.shop_lat = std::env::var("PIZZERIA_LAT")

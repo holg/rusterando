@@ -5,7 +5,7 @@ use rusterando_shared::models::{
 
 use crate::components::cart_drawer::use_cart_ctx;
 use crate::pages::admin::extras_admin::list_pizza_extras;
-use crate::pages::cart::AddToCart;
+use crate::pages::cart::{AddToCart, ReplaceCartLine};
 
 #[server(
     name = ListMenu,
@@ -169,7 +169,10 @@ pub async fn list_admin_menu() -> Result<MenuPayload, ServerFnError> {
 /// Shared item loader. `admin=true` returns every row; `admin=false` filters
 /// to listed items only (`is_listed = 1`).
 #[cfg(feature = "ssr")]
-async fn load_items(db: &sqlx::SqlitePool, admin: bool) -> Result<Vec<MenuItem>, ServerFnError> {
+pub(crate) async fn load_items(
+    db: &sqlx::SqlitePool,
+    admin: bool,
+) -> Result<Vec<MenuItem>, ServerFnError> {
     #[derive(sqlx::FromRow)]
     struct ItemRow {
         id: String,
@@ -393,6 +396,14 @@ pub fn MenuPage() -> impl IntoView {
 /// category matches the slug (→ the page emits a 404). The slug is matched
 /// against the stored `menu_categories.slug` (backfilled at boot from
 /// `seo_slug(name)`).
+/// One item as the menu shows it — for the basket's "change" dialog.
+#[server(name = GetMenuItem, prefix = "/api", endpoint = "get_menu_item")]
+pub async fn get_menu_item(id: String) -> Result<Option<MenuItem>, ServerFnError> {
+    let db = use_context::<sqlx::SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    Ok(load_items(&db, false).await?.into_iter().find(|i| i.id == id))
+}
+
 #[server(name = ListMenuCategory, prefix = "/api", endpoint = "list_menu_category")]
 pub async fn list_menu_category(
     slug: String,
@@ -892,8 +903,16 @@ fn code_to_anchor(code: &str) -> String {
 #[component]
 fn CategorySection(cat: MenuCategory, items: Vec<MenuItem>) -> impl IntoView {
     let anchor = format!("cat-{}", cat.id);
+    // The category's drawing, big and faint behind its items, staying in
+    // view while they scroll by: as on the PDF menu's cards.
+    let motif = format!(
+        "--motif: url('/img/motif/{}.svg'); --tilt: {}deg;",
+        category_motif(&cat.name),
+        [-9, 6, -5, 8, -7][cat.name.chars().count() % 5]
+    );
     view! {
         <section class="category" id=anchor>
+            <div class="cat-motif" aria-hidden="true" style=motif></div>
             <h2>{cat.name}</h2>
             <div class="grid">
                 {items.into_iter().map(|it| view! { <Card it/> }).collect_view()}
@@ -902,8 +921,100 @@ fn CategorySection(cat: MenuCategory, items: Vec<MenuItem>) -> impl IntoView {
     }
 }
 
+/// The drawing for a category, by words in its name — the PDF themes'
+/// `motif-map` (templates/tafel.typ), first match wins. Icons: Tabler (MIT),
+/// public/img/motif/.
+pub(crate) fn category_motif(name: &str) -> &'static str {
+    const MAP: &[(&[&str], &str)] = &[
+        (&["hollandaise"], "egg"),
+        (&["brötchen"], "bread"),
+        (&["baguette"], "baguette"),
+        (&["calzone"], "flame"),
+        (&["käse"], "cheese"),
+        (&["vegetar", "veggie"], "pepper"),
+        (&["vegan"], "leaf"),
+        (&["fleisch", "salami"], "sausage"),
+        (&["fisch", "meeresfrücht", "garnele"], "fish"),
+        (&["tomate", "mozzarella"], "leaf"),
+        (&["rucola"], "seedling"),
+        (&["salat"], "salad"),
+        (&["broccoli", "brokkoli"], "tree"),
+        (&["auflauf", "aufläufe", "gratin"], "bowl"),
+        (&["backofen", "überbacken"], "flame"),
+        (&["gourmet"], "chef-hat"),
+        (
+            &["nudel", "pasta", "spaghetti", "tortellini", "lasagne"],
+            "bowl-spoon",
+        ),
+        (
+            &[
+                "hähnchen",
+                "chicken",
+                "geflügel",
+                "döner",
+                "kebab",
+                "steak",
+                "grill",
+            ],
+            "meat",
+        ),
+        (&["schnitzel"], "tools-kitchen-2"),
+        (&["burger"], "burger"),
+        (&["suppe"], "soup"),
+        (&["frühstück"], "egg-fried"),
+        (&["dessert", "nachtisch", "eisbecher"], "ice-cream-2"),
+        (&["kuchen", "torte"], "cake"),
+        (&["kaffee", "heißgetränk"], "coffee"),
+        (&["cocktail"], "glass-cocktail"),
+        (&["wein"], "glass-full"),
+        (&["bier"], "beer"),
+        (&["getränk", "drink"], "bottle"),
+        (&["asia", "sushi", "wok"], "bowl-chopsticks"),
+        (&["pizz", "pide", "lahmacun"], "pizza"),
+    ];
+    let n = name.to_lowercase();
+    // "Eis" and "Reis" only as whole words (not in "Kreis", "Preis").
+    let word = |w: &str| n.split(|c: char| !c.is_alphanumeric()).any(|x| x == w);
+    if word("eis") {
+        return "ice-cream-2";
+    }
+    if word("reis") {
+        return "bowl-chopsticks";
+    }
+    MAP.iter()
+        .find(|(words, _)| words.iter().any(|w| n.contains(w)))
+        .map(|(_, icon)| *icon)
+        .unwrap_or("tools-kitchen-2")
+}
+
+/// The drawing for one item: by its own name first (Pizzablech → pizza,
+/// Broccoli Roma → broccoli), else by its category's. Server side only
+/// (Tagesangebot, homepage offers).
+#[cfg(feature = "ssr")]
+pub(crate) fn item_motif(item: &str, category: &str) -> &'static str {
+    match category_motif(item) {
+        "tools-kitchen-2" => category_motif(category),
+        m => m,
+    }
+}
+
+/// A basket line being changed (cart_drawer.rs): its current choice, which
+/// the card starts with, and the line the size buttons then replace.
+#[derive(Clone, Debug, Default)]
+pub struct CardEdit {
+    pub line_id: String,
+    pub extras_ids: Vec<String>,
+    pub removal_ids: Vec<String>,
+    /// (option group id, option id)
+    pub options: Vec<(String, String)>,
+}
+
+/// One item with its add-to-cart controls (size, extras, "ohne …",
+/// options). Also on the homepage, in the offer cards' dialog, and in the
+/// basket's "change" dialog (`edit`: the size buttons replace that line).
 #[component]
-fn Card(it: MenuItem) -> impl IntoView {
+pub fn Card(it: MenuItem, #[prop(optional)] edit: Option<CardEdit>) -> impl IntoView {
+    let edit = StoredValue::new(edit);
     let number = it
         .menu_number
         .clone()
@@ -924,7 +1035,8 @@ fn Card(it: MenuItem) -> impl IntoView {
     // column; the legacy "pizza | calzone" heuristic was wrong for
     // pasta items that DO allow extras and salads that don't.
     let allows_extras = it.allow_extras;
-    let selected_extras: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let selected_extras: RwSignal<Vec<String>> =
+        RwSignal::new(edit.with_value(|e| e.as_ref().map(|e| e.extras_ids.clone()).unwrap_or_default()));
     let extras_catalog: StoredValue<Vec<PizzaExtra>> =
         use_context().unwrap_or_else(|| StoredValue::new(Vec::new()));
 
@@ -932,7 +1044,8 @@ fn Card(it: MenuItem) -> impl IntoView {
     // × catalog × DB match rules) and shipped on the item — no parsing or
     // grammar in the browser. Shown only when the item has ≥1 match.
     let removable: Vec<rusterando_shared::models::RemovableIngredient> = it.removable.clone();
-    let selected_removals: RwSignal<Vec<String>> = RwSignal::new(Vec::new());
+    let selected_removals: RwSignal<Vec<String>> =
+        RwSignal::new(edit.with_value(|e| e.as_ref().map(|e| e.removal_ids.clone()).unwrap_or_default()));
 
     // Pre-fill extras when the URL hash names this item, e.g.
     // /menu#mi-007?extras=ex-pilze,ex-zwiebeln. Used by the cart
@@ -978,7 +1091,13 @@ fn Card(it: MenuItem) -> impl IntoView {
     let option_groups: StoredValue<Vec<rusterando_shared::models::OptionGroup>> =
         StoredValue::new(it.option_groups.clone());
     let selected_options: RwSignal<std::collections::HashMap<String, Vec<String>>> =
-        RwSignal::new(std::collections::HashMap::new());
+        RwSignal::new(edit.with_value(|e| {
+            let mut m: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+            for (group, option) in e.as_ref().map(|e| e.options.clone()).unwrap_or_default() {
+                m.entry(group).or_default().push(option);
+            }
+            m
+        }));
 
     // Flatten all picked option_ids for the AddToCart dispatch.
     let collect_option_ids = move || -> Vec<String> {
@@ -1058,10 +1177,30 @@ fn Card(it: MenuItem) -> impl IntoView {
 
     let ctx = use_cart_ctx();
 
+    // In the basket's dialog: replace the line being changed.
+    let replace = move |id: String, size: &str| -> bool {
+        let Some(e) = edit.get_value() else {
+            return false;
+        };
+        ctx.replace.dispatch(ReplaceCartLine {
+            line_id: e.line_id,
+            menu_item_id: id,
+            size: size.to_string(),
+            extras_ids: selected_extras.get_untracked(),
+            selected_option_ids: collect_option_ids(),
+            removal_ids: selected_removals.get_untracked(),
+        });
+        ctx.editing.set(None);
+        ctx.open.set(true);
+        true
+    };
     let add_small = {
         let id = item_id.clone();
         move |_| {
             let size = if has_large { "small" } else { "single" };
+            if replace(id.clone(), size) {
+                return;
+            }
             ctx.add.dispatch(AddToCart {
                 menu_item_id: id.clone(),
                 size: size.to_string(),
@@ -1079,6 +1218,9 @@ fn Card(it: MenuItem) -> impl IntoView {
     let add_large = {
         let id = item_id.clone();
         move |_| {
+            if replace(id.clone(), "large") {
+                return;
+            }
             ctx.add.dispatch(AddToCart {
                 menu_item_id: id.clone(),
                 size: "large".to_string(),

@@ -1,0 +1,17 @@
+# Generated Xcode project — regenerate with `xcodegen`.
+*.xcodeproj/
+*.xcworkspace/
+
+# Local build artifacts.
+build/
+DerivedData/
+
+# Local overlay with your Apple Team ID + real bundle id
+# (project.local.example.yml is the public template).
+project.local.yml
+
+# Per-developer Xcode state.
+*.xcuserstate
+xcuserdata/
+
+.DS_Store

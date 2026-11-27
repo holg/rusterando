@@ -258,8 +258,8 @@ address leaves the server.
 
    ```
    GEO_BACKEND=cadastre_nrw
-   GEO_AGS=05558024                              # municipality key(s)
-   GEO_POSTCODE_MAP=05558024:59348:Lüdinghausen  # AGS:PLZ:City
+   GEO_AGS=05999001                              # municipality key(s)
+   GEO_POSTCODE_MAP=05999001:99999:Musterstadt   # AGS:PLZ:City
    GEO_DATA_DIR=/var/www/<shop>/data/geo
    ```
 

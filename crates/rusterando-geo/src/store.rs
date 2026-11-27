@@ -295,11 +295,11 @@ mod tests {
         let (ns, na) = replace_import(&p, &r.streets).await.unwrap();
         assert_eq!(
             (ns as u64, na as u64),
-            (sample::STREETS_LH, sample::ROWS_KEPT_LH)
+            (sample::STREETS_MAIN, sample::ROWS_KEPT_MAIN)
         );
         let idx = load_index(&p).await.unwrap().unwrap();
-        assert_eq!(idx.streets().len() as u64, sample::STREETS_LH);
-        assert_eq!(idx.address_count() as u64, sample::ROWS_KEPT_LH);
+        assert_eq!(idx.streets().len() as u64, sample::STREETS_MAIN);
+        assert_eq!(idx.address_count() as u64, sample::ROWS_KEPT_MAIN);
         let s = idx.suggest_streets("hermann");
         assert_eq!(s[0].name, "Hermann-Löns-Straße");
         let r = idx.resolve(s[0].id, "3").unwrap();

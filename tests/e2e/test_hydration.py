@@ -2,7 +2,7 @@
 
 History: AdminShell used to read BrandingHandle inside a
 `#[cfg(feature = "ssr")]` block, falling back to a hardcoded string
-on the hydrate side. SSR rendered "Davids Pizzeria — Admin", hydrate
+on the hydrate side. SSR rendered "Musterpizzeria — Admin", hydrate
 expected "Mein Restaurant — Admin", tachys' walker aborted at the
 brand <a>, and every link in the top nav stayed unbound until a
 full-page reload re-built the tree from scratch.

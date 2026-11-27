@@ -1,6 +1,6 @@
 //
 //  PushRegistration.swift
-//  Davids Pizzeria
+//  Rusterando
 //
 //  Sends the APNs device token to /api/register_push_token. The role
 //  is read from the WebView's cookies, so the user must have logged in

@@ -515,7 +515,7 @@ pub fn SysAdminPage() -> impl IntoView {
                                     </label>
                                     <label>
                                         <span>"Slug (optional)"</span>
-                                        <input type="text" name="slug" placeholder="z. B. rimini" pattern="[a-z0-9\\-]*" value=slug_q/>
+                                        <input type="text" name="slug" placeholder="z. B. beispiel" pattern="[a-z0-9\\-]*" value=slug_q/>
                                     </label>
                                     <button type="submit" class="btn primary" disabled=active>"Scrapen"</button>
                                 </ActionForm>

@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod cart;
+pub mod daily_offer;
 pub mod driver;
 pub mod geo;
 pub mod home;

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::Router;
 use rusterando_frontend::app::{shell, App};
 use rusterando_server::notify::{EmailNotifier, LogNotifier, NotifierHandle};
-// (`notify` is re-exported from the frontend crate via davidspizzeria-server::lib)
+// (`notify` is re-exported from the frontend crate via rusterando-server::lib)
 use leptos::prelude::*;
 use leptos_axum::{generate_route_list, LeptosRoutes};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -151,7 +151,7 @@ fn resolved_tenant_ctx(
 /// Load the dotenv file, honouring an `ENV_FILE` override so a single
 /// checkout can run any tenant/profile without symlinking or sourcing:
 ///
-///   ENV_FILE=.env.rusterando.flizza cargo leptos watch
+///   ENV_FILE=.env.rusterando.beispiel cargo leptos watch
 ///
 /// Falls back to the default `.env` (search up from CWD) when `ENV_FILE`
 /// is unset. Either way, dotenvy does NOT override vars already present in
@@ -313,7 +313,7 @@ async fn main() {
     //     sqlx::migrate!() so every binary carries its own schema.
     //   * an optional runtime overlay folder (env: MIGRATIONS_OVERLAY)
     //     is applied AFTER the baseline. Used by per-deployment
-    //     overlays (e.g. Davids' menu seed) that must not leak into
+    //     overlays (e.g. a shop's menu seed) that must not leak into
     //     the public repo. Each overlay folder is a normal sqlx
     //     migrations dir, with its own version timestamps.
     //
@@ -338,6 +338,35 @@ async fn main() {
                 tracing::warn!(
                     "MIGRATIONS_OVERLAY={overlay_dir} could not be read: {e} — skipping overlay"
                 );
+            }
+        }
+    }
+
+    // One-off maintenance commands, run with the server's own environment
+    // and database (e.g. `myshop-server migrate-receipt-logos
+    // --dry-run` in the deploy directory); they exit instead of serving.
+    if let Some(command) = std::env::args().nth(1) {
+        match command.as_str() {
+            // Stored print jobs' inline logo SVG → the logo store
+            // (crates/kitchen-protocol/RECEIPT_LOGOS.md). Safe while the server
+            // runs; a second run finds nothing to do.
+            "migrate-receipt-logos" => {
+                let dry_run = std::env::args().any(|a| a == "--dry-run");
+                let chan = rusterando_server::kitchen::KitchenChannel::new(db.clone());
+                match chan.migrate_outbox_logos(dry_run).await {
+                    Ok(report) => {
+                        println!("{report}");
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("receipt logo migration failed: {e:#}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            other => {
+                eprintln!("unknown command {other:?} (known: migrate-receipt-logos [--dry-run])");
+                std::process::exit(2);
             }
         }
     }
@@ -394,7 +423,8 @@ async fn main() {
     // updates flow through update_setting -> ThemeHandle::set, which
     // rewrites this same Arc in place.
     let theme_initial = rusterando_frontend::pages::settings::ssr::theme(&db).await;
-    let theme = rusterando_frontend::pages::settings::ThemeHandle::new(theme_initial);
+    let theme = rusterando_frontend::pages::settings::ThemeHandle::new(theme_initial)
+        .with_alt(rusterando_frontend::pages::settings::ssr::theme_alt(&db).await);
 
     // Same pattern for shop-contact data — one boot read, write-through
     // on /admin/branding edits via update_setting.
@@ -419,8 +449,9 @@ async fn main() {
     tracing::info!(mode = ?stripe_mode_initial, "Stripe mode at boot");
 
     // i18n toggle — same boot read + write-through pattern. Default
-    // is false (single-locale) so a fresh deployment behaves like
-    // Davids' until the admin flips the switch in /admin/settings.
+    // is false (single-locale) so a fresh deployment behaves like an
+    // existing single-shop deployment until the admin flips the switch
+    // in /admin/settings.
     let i18n_initial = rusterando_frontend::pages::settings::ssr::i18n_enabled(&db).await;
     let i18n = rusterando_frontend::pages::settings::I18nHandle::new(i18n_initial);
     tracing::info!(enabled = i18n_initial, "i18n toggle at boot");
@@ -541,6 +572,26 @@ async fn main() {
                 let chan = rusterando_server::kitchen::KitchenChannel::new(db.clone())
                     .with_live(live.clone())
                     .with_orders_paused(orders_paused.clone());
+                // Receipt logos: render the theme's now (broken artwork shows
+                // in this log), and point out stored jobs that still carry
+                // their logo inline (they print fine; migrating saves space).
+                {
+                    let chan = chan.clone();
+                    let db = db.clone();
+                    tokio::spawn(async move {
+                        chan.warm_up_logos().await;
+                        match rusterando_server::receipt_logos::inline_logo_rows(&db).await {
+                            Ok(0) => {}
+                            Ok(n) => tracing::warn!(
+                                rows = n,
+                                "kitchen_outbox still holds print jobs with inline logo SVG — \
+                                 run `<server binary> migrate-receipt-logos --dry-run`, then \
+                                 without --dry-run"
+                            ),
+                            Err(e) => tracing::warn!(error = %e, "receipt logo row check failed"),
+                        }
+                    });
+                }
                 let listener_chan = chan.clone();
                 // Respawn loop: on 2026-05-30 the listener exited once
                 // with "Too many open files" and stayed dead the rest of
@@ -675,11 +726,11 @@ async fn main() {
     // 7 non-default locales. Whether they ACTUALLY serve customer
     // content is decided at request time by `i18n_guard_middleware`
     // below, which 404s any prefixed path when the admin toggle is
-    // off (Davids' default), so the SEO leak is closed.
+    // off (the default), so the SEO leak is closed.
     let routes = expand_locale_routes(routes);
 
     // Trait-erased push handle so server fns in the frontend crate
-    // can broadcast without depending on davidspizzeria-server's
+    // can broadcast without depending on rusterando-server's
     // concrete ApnsHandle type.
     let broadcast_sink: rusterando_frontend::pages::push::BroadcastSinkHandle =
         state.apns.as_ref().map(|h| {
@@ -695,6 +746,9 @@ async fn main() {
             std::sync::Arc::new(k.clone())
                 as std::sync::Arc<dyn rusterando_frontend::pages::push::KitchenSink>
         });
+    // The /kitchen page's board: the displays' snapshot and moves.
+    let kitchen_board: rusterando_frontend::pages::push::KitchenBoardHandle =
+        std::sync::Arc::new(rusterando_server::WebBoard);
 
     // Static menu.pdf cache rebuilder. The frontend admin server fns call this
     // (via MenuPdfCacheHandle in context) after menu/extras/branding edits so
@@ -793,6 +847,8 @@ async fn main() {
                     provide_context(sink.clone());
                     // KitchenSinkHandle — None on printerless deploys.
                     provide_context(kitchen_sink.clone());
+                    // KitchenBoardHandle — the /kitchen page's board.
+                    provide_context(kitchen_board.clone());
                     // MenuPdfCacheHandle — drives the nginx offline-fallback refresh.
                     provide_context(menu_pdf_cache.clone());
                     provide_context(live.clone());
@@ -918,12 +974,32 @@ async fn main() {
             "/api/live/board",
             axum::routing::get(live_board_sse_handler),
         )
+        // LoRa lab (admin page's LoRa tab): the tab5-lab Tabs post their
+        // LoRa traffic and pick up queued messages (bearer LAB_KEY); the
+        // admin page listens for news (admin cookie).
+        .route(
+            "/api/lab/lora",
+            axum::routing::post(lab_lora_ingest_handler),
+        )
+        .route("/api/live/lora", axum::routing::get(live_lora_sse_handler))
         // Browser mirror of the kitchen display (crates/kds-web): the page,
         // its live feed and its taps. Admin + Küche only.
         .route("/kitchen/display", axum::routing::get(kds_page_handler))
         .route("/api/kds/feed", axum::routing::get(kds_feed_handler))
         .route("/api/kds/action", axum::routing::post(kds_action_handler))
         .route("/api/kitchen/ws", axum::routing::get(kitchen_ws_handler))
+        .route(
+            "/api/kitchen/devices",
+            axum::routing::get(kitchen_devices_handler),
+        )
+        .route(
+            "/api/kitchen/test-receipt",
+            axum::routing::get(kitchen_test_receipt_handler),
+        )
+        .route(
+            "/api/orders/{id}/bon-58mm",
+            axum::routing::get(order_bon_58mm_handler),
+        )
         // Process-health probe — fd usage + uptime. Designed for an
         // external uptime monitor to poll every minute and alert on
         // `status != "ok"`. Unauthenticated, counters only.
@@ -949,6 +1025,22 @@ async fn main() {
         .route(
             "/admin/kurzliste.pdf",
             axum::routing::get(order_kurzliste_pdf_handler),
+        )
+        // The Tagesangebot for the colour e-ink frame: a PNG in the panel's
+        // six colours (preview, the frame's iPhone app) and the frame's own
+        // 192 000-byte format. Public, like the menu.
+        .route(
+            "/tagesangebot.png",
+            axum::routing::get(eink_offer_png_handler),
+        )
+        .route(
+            "/tagesangebot.eink",
+            axum::routing::get(eink_offer_raw_handler),
+        )
+        // The Speisekarte for the till (CSV, one row per price).
+        .route(
+            "/admin/speisekarte.csv",
+            axum::routing::get(menu_csv_handler),
         )
         // Apple Universal Links / Keychain webcredentials manifest. iOS
         // fetches this once after install, caches it for ~24h. Apple is
@@ -985,6 +1077,9 @@ async fn main() {
         // before resolve_tenant so it runs after it inbound: the session is
         // verified against the request's tenant.
         .layer(axum::middleware::from_fn(admin_auth_middleware))
+        // Staff pages: kept out of search engines by a response header. Not
+        // listed in robots.txt, which anyone can read.
+        .layer(axum::middleware::from_fn(noindex_staff_middleware))
         // Tenant routing: resolve the per-request Tenant from X-Tenant/Host and
         // stash it in extensions BEFORE the Leptos handlers AND the i18n guard
         // run (they read it back — the handlers to swap the pool, the guard to
@@ -1055,7 +1150,7 @@ async fn main() {
         }
     };
     // Label the listen line with the active tenant (the DB filename stem,
-    // e.g. "flizza" / "davidspizzeria") rather than a hardcoded name, so
+    // e.g. "beispiel" / "musterpizzeria") rather than a hardcoded name, so
     // multi-tenant runs are self-evident in the logs.
     let tenant = std::env::var("DATABASE_URL")
         .ok()
@@ -1182,14 +1277,38 @@ struct QrParams {
     size: Option<u32>,
 }
 
-/// Bytes of the AASA manifest, baked into the binary at compile time so
-/// deploys can never accidentally serve a redirected or empty response.
-/// Edit `public/.well-known/apple-app-site-association` to change.
+/// Placeholder AASA manifest (example Team ID + bundle id), baked in so the
+/// route never serves a redirect or an empty body. A shop's real one is its
+/// own: `$SITE_OVERLAY_DIR/apple-app-site-association` (site overlay,
+/// `site/<profile>/` in the deploy script), read once at first request.
 const APPLE_APP_SITE_ASSOCIATION: &[u8] = include_bytes!("../assets/apple-app-site-association");
+
+fn apple_app_site_association() -> &'static [u8] {
+    static AASA: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    AASA.get_or_init(|| {
+        let Some(dir) = std::env::var("SITE_OVERLAY_DIR").ok().filter(|d| !d.trim().is_empty()) else {
+            return APPLE_APP_SITE_ASSOCIATION.to_vec();
+        };
+        let path = std::path::Path::new(&dir).join("apple-app-site-association");
+        match std::fs::read(&path) {
+            // Only a well-formed manifest replaces the placeholder: a broken
+            // one would break Universal Links until the next deploy.
+            Ok(bytes) if serde_json::from_slice::<serde_json::Value>(&bytes).is_ok() => {
+                tracing::info!("AASA from {}", path.display());
+                bytes
+            }
+            Ok(_) => {
+                tracing::warn!("AASA at {} is not valid JSON — placeholder served", path.display());
+                APPLE_APP_SITE_ASSOCIATION.to_vec()
+            }
+            Err(_) => APPLE_APP_SITE_ASSOCIATION.to_vec(),
+        }
+    })
+}
 
 /// Process-health check for external uptime monitors. Returns the
 /// current file-descriptor count + soft limit + percentage so a
-/// monitoring service (or `curl https://davidspizzeria.de/api/healthz |
+/// monitoring service (or `curl https://<shop-domain>/api/healthz |
 /// jq .status`) can alert before the box runs out of fds again. The
 /// `status` field is the same `ok`/`warn`/`crit` ladder the periodic
 /// in-process logger uses — see `health::status_for_pct`. The endpoint
@@ -1226,14 +1345,16 @@ async fn apple_app_site_association_handler() -> impl axum::response::IntoRespon
             // Apple recommends short TTL; this lets us iterate during dev.
             (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
-        APPLE_APP_SITE_ASSOCIATION,
+        apple_app_site_association(),
     )
 }
 
 /// The only crawlable, indexable pages. Everything else the app serves
 /// is transactional (`/checkout`, `/orders/{id}`) or staff-only
 /// (`/admin/*`, `/kitchen/*`, `/driver/*`) — those are excluded from the
-/// sitemap and `Disallow`ed in robots.txt below. Paths are relative to
+/// sitemap; the transactional ones are `Disallow`ed in robots.txt below, the
+/// staff ones get a noindex header instead (`noindex_staff_middleware`), so
+/// robots.txt doesn't point at them. Paths are relative to
 /// the site root, no trailing slash except the empty home path.
 const PUBLIC_PAGES: &[&str] = &["", "menu", "datenschutz", "impressum"];
 
@@ -1432,9 +1553,6 @@ async fn robots_handler(
 
     let body = format!(
         "User-agent: *\n\
-         Disallow: /admin\n\
-         Disallow: /kitchen\n\
-         Disallow: /driver\n\
          Disallow: /checkout\n\
          Disallow: /orders/\n\
          Allow: /\n\
@@ -1570,6 +1688,92 @@ async fn live_shop_sse_handler(
     )
 }
 
+/// `POST /api/lab/lora` — LoRa events from the tab5-lab Tabs; answers with
+/// the messages queued for that Tab on the admin page (lab_lora.rs).
+async fn lab_lora_ingest_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use rusterando_server::lab_lora;
+
+    let auth = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    if !lab_lora::authorized(auth) {
+        return (StatusCode::FORBIDDEN, "key").into_response();
+    }
+    let post: lab_lora::Post = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("json: {e}")).into_response(),
+    };
+    if !lab_lora::valid_device(&post.device) {
+        return (StatusCode::BAD_REQUEST, "device").into_response();
+    }
+    let (db, slug) = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => (t.pool.clone(), t.slug.clone()),
+        None => (state.db.clone(), String::new()),
+    };
+    match lab_lora::ingest(&db, &slug, &post).await {
+        Ok(send) => {
+            let body = serde_json::json!({ "send": send }).to_string();
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::warn!("lab lora: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "db").into_response()
+        }
+    }
+}
+
+/// `/api/live/lora` — admin-only SSE: a bare `lora` ping whenever a Tab
+/// reported LoRa traffic for this shop; /admin/lora refetches its view.
+async fn live_lora_sse_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+    StaffRole(role): StaffRole,
+) -> axum::response::Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use axum::response::IntoResponse;
+    use futures::StreamExt;
+
+    if !is_admin(role) {
+        return axum::http::StatusCode::FORBIDDEN.into_response();
+    }
+    let slug = tenant
+        .map(|axum::extract::Extension(t)| t.slug)
+        .unwrap_or_default();
+    let rx = rusterando_server::lab_lora::subscribe();
+    let stream = tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |res| {
+        // A lagged receiver missed some: one ping covers them.
+        let news = match res {
+            Ok(tenant) => tenant == slug,
+            Err(_) => true,
+        };
+        async move { news.then(|| Ok::<_, std::convert::Infallible>(Event::default().data("lora"))) }
+    });
+    // Close on shutdown so this stream never blocks the graceful drain.
+    let stream = stream.take_until(wait_for_shutdown(state.shutdown.clone()));
+    let sse =
+        Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(5)));
+    (
+        [(
+            axum::http::header::HeaderName::from_static("x-accel-buffering"),
+            "no",
+        )],
+        sse,
+    )
+        .into_response()
+}
+
 /// `/api/live/board` — staff-only SSE: a bare `changed` ping whenever an
 /// order's status changes, a customer writes or reads a message, or a new
 /// order reaches the kitchen. Carries no order data: /admin/orders, /kitchen
@@ -1683,6 +1887,7 @@ init({{ module_or_path: "/pkg/kds/kds_web_bg.wasm?v={v}" }});
 async fn kds_feed_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     StaffRole(role): StaffRole,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
     use axum::response::IntoResponse;
@@ -1695,7 +1900,18 @@ async fn kds_feed_handler(
     let Some(chan) = state.kitchen.as_ref() else {
         return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let stream = tokio_stream::wrappers::ReceiverStream::new(chan.board_feed())
+    // `?picture=1`: this display drives the e-ink frame — the feed adds the
+    // picture's tag (KitchenEvent::Picture, kitchen-protocol 2.4).
+    let picture = q
+        .contains_key("picture")
+        .then(|| rusterando_server::eink::PictureSource {
+            branding: state.branding.clone(),
+            site: rusterando_frontend::pages::home::site_url(),
+            // Which device asks: whether it drives the frame is switched on
+            // /admin/drucker. Older firmware sends none.
+            device: q.get("device").map(|d| d.trim().to_string()).filter(|d| !d.is_empty()),
+        });
+    let stream = tokio_stream::wrappers::ReceiverStream::new(chan.board_feed(picture))
         .filter_map(|msg| async move {
             let bytes = postcard::to_allocvec(&msg.event).ok()?;
             Some(Ok::<_, std::convert::Infallible>(Event::default().data(
@@ -1742,6 +1958,116 @@ async fn kds_action_handler(
     }
 }
 
+/// `/api/kitchen/test-receipt` — the test receipt for a kitchen device's own
+/// "Testdruck" button: the admin test print's fake order with the shop's
+/// receipt settings and the live theme's logos, for the asking device only —
+/// nothing is broadcast, no order is created. Body:
+/// `encode_versioned(postcard(ReceiptProgram))`. `?delivery=true` /
+/// `?prepaid=true` pick the variant (default: pickup, unpaid); with
+/// `?caps=raster-bits` the logo comes server-rendered, as for live jobs.
+async fn kitchen_test_receipt_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    StaffRole(role): StaffRole,
+    axum::extract::Query(q): axum::extract::Query<TestReceiptQuery>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    if !kds_allowed(role) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let theme = rusterando_server::kitchen::printer_theme(&state.db).await;
+    let program =
+        rusterando_server::kitchen::compose_test_program(&state.db, q.delivery, q.prepaid, &theme)
+            .await;
+    // Through the logo store like a live job (without a kitchen channel the
+    // SVG stays inline, which every device can still print).
+    let program = match state.kitchen.as_ref() {
+        Some(chan) => {
+            let caps = rusterando_server::receipt_logos::WireCaps::from_param(&q.caps);
+            chan.logos().wire_program(program, &caps).await
+        }
+        None => program,
+    };
+    match postcard::to_allocvec(&program) {
+        Ok(bytes) => (
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            kitchen_protocol::encode_versioned(&bytes),
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// `/api/orders/{id}/bon-58mm` — one order's Bon as ESC/POS for the 58-mm
+/// printer built into a Sunmi handheld: what its print buttons print
+/// (components/device_print.rs). Print-on-tap for the asking device only —
+/// nothing is broadcast, no outbox row, the kitchen printer is untouched.
+/// Marked as a reprint: the kitchen already has the original. Admin + Küche.
+/// A `test_bon_id` instead of an order id: the Bon-Editor's sample (admin).
+async fn order_bon_58mm_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    StaffRole(role): StaffRole,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    if !kds_allowed(role) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let test = rusterando_frontend::components::device_print::parse_test_bon_id(&id);
+    let program = match test {
+        Some((delivery, prepaid, theme)) => {
+            // The Bon-Editor is admin-only, so is its sample.
+            if role != Some(rusterando_frontend::pages::session::Role::Admin) {
+                return StatusCode::FORBIDDEN.into_response();
+            }
+            rusterando_server::kitchen::compose_test_program(&state.db, delivery, prepaid, &theme)
+                .await
+        }
+        None => match rusterando_server::kitchen::compose_order_program(&state.db, &id, true).await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(order = %id, error = %e, "58mm bon: no such order");
+                return StatusCode::NOT_FOUND.into_response();
+            }
+        },
+    };
+    // The Bon-Designer hands logos over as SVG; rasterize them here at the
+    // narrow head's width (render_for asks for two thirds of the 80-mm one).
+    let bytes = receipt_escpos::render_for(
+        &program,
+        &mut |_, width, svg| receipt_escpos::svg::rasterize(svg, width).ok(),
+        receipt_escpos::Paper::Mm58,
+    );
+    match bytes {
+        Ok(bytes) => (
+            [
+                (header::CONTENT_TYPE, "application/octet-stream"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!(order = %id, error = %e, "58mm bon: render failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TestReceiptQuery {
+    #[serde(default)]
+    delivery: bool,
+    #[serde(default)]
+    prepaid: bool,
+    #[serde(default)]
+    caps: String,
+}
+
 /// A kitchen device's name (`kitchen_clients.shop_slug`), as the Pis use it.
 fn valid_device_slug(slug: &str) -> bool {
     !slug.is_empty()
@@ -1760,6 +2086,11 @@ struct KitchenDeviceQuery {
     arch: String,
     /// The last seq the device received; absent on its very first connect.
     last_seen: Option<u64>,
+    /// What the device can take (kitchen-protocol 2.3+), comma-separated:
+    /// `raster-bits` = logos as server-rendered rasters. Absent on older
+    /// firmware, which keeps getting the SVG.
+    #[serde(default)]
+    caps: String,
 }
 
 /// Server ping interval on a kitchen device's WebSocket.
@@ -1775,6 +2106,73 @@ const KITCHEN_WS_SILENCE: std::time::Duration = std::time::Duration::from_secs(7
 /// PrinterPresent) back. Same rules as the SSH tunnel's clients (unacked
 /// replay after `last_seen`, then live); without `last_seen` it starts from
 /// now. Küche login like the browser display; through nginx, no tunnel.
+/// `/api/kitchen/devices` — the kitchen devices and whether each is
+/// connected now (a message within [`DEVICE_ONLINE_WITHIN`]; the Tab5s send
+/// a heartbeat every 30 s). A Tab5 with network asks before it relays the
+/// board over LoRa to one that says it has none (kds-tab5 relay.rs). Küche
+/// + Admin.
+/// What a relaying device adds to its `/api/kitchen/devices` check: the
+/// devices it hears over LoRa (`name:rssi:secs,…`), for /admin/drucker.
+#[derive(serde::Deserialize, Default)]
+struct LoraHeard {
+    via: Option<String>,
+    lora: Option<String>,
+}
+
+async fn kitchen_devices_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    StaffRole(role): StaffRole,
+    axum::extract::Query(heard): axum::extract::Query<LoraHeard>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if !kds_allowed(role) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if let LoraHeard {
+        via: Some(via),
+        lora: Some(lora),
+    } = heard
+    {
+        rusterando_frontend::pages::admin::printer_status::lora_seen::record(
+            &via,
+            &lora,
+            chrono::Utc::now().timestamp(),
+        );
+    }
+    let rows: Vec<(String, i64)> = match sqlx::query_as(
+        "SELECT shop_slug, strftime('%s','now') - last_seen_at FROM kitchen_clients ORDER BY shop_slug",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "kitchen devices");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let devices: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(name, ago)| {
+            serde_json::json!({
+                "name": name,
+                "online": ago <= DEVICE_ONLINE_WITHIN,
+                "seen_secs_ago": ago,
+            })
+        })
+        .collect();
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        axum::Json(devices),
+    )
+        .into_response()
+}
+
+/// Seconds since a device's last message that still count as connected.
+const DEVICE_ONLINE_WITHIN: i64 = 75;
+
 async fn kitchen_ws_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     StaffRole(role): StaffRole,
@@ -1818,6 +2216,7 @@ async fn kitchen_ws_session(
             .map(|bytes| Message::Binary(bytes.into()))
     }
 
+    let caps = rusterando_server::receipt_logos::WireCaps::from_param(&q.caps);
     let (slug, version, arch) = (q.slug, q.version, q.arch);
     let mut feed = chan
         .print_feed(
@@ -1849,6 +2248,8 @@ async fn kitchen_ws_session(
                 // The feed ends when it lagged: closing makes the device
                 // reconnect with its last seq and catch up from the outbox.
                 let Some(msg) = msg else { break "feed closed" };
+                // Logos resolved for this device: rasters or SVG.
+                let msg = chan.logos().wire_message(msg, &caps).await;
                 let Ok(bytes) = postcard::to_allocvec(&msg) else { continue };
                 if socket.send(Message::Binary(bytes.into())).await.is_err() {
                     break "send failed";
@@ -2067,7 +2468,7 @@ async fn pdf_cover_upload_handler(
     // Per-request tenant (from resolve_tenant). The cover record MUST land in
     // the current tenant's DB, not the global pool — without this, every
     // tenant's upload went into rusterando.db and their own PDF showed the
-    // baked-default (davids) cover.
+    // baked-default cover.
     tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
     StaffRole(role): StaffRole,
     mut multipart: axum::extract::Multipart,
@@ -2626,6 +3027,188 @@ async fn order_kurzliste_pdf_handler(
     }
 }
 
+/// `/admin/speisekarte.csv` — the whole menu for the till (a register with a
+/// Swissbit TSE imports it): one row per price, extras and paid options,
+/// staged "Neue Preise" beside the current ones. Admin only, tenant aware.
+async fn menu_csv_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    StaffRole(role): StaffRole,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+) -> impl axum::response::IntoResponse {
+    use axum::http::header;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if !is_admin(role) {
+        return (StatusCode::UNAUTHORIZED, "nicht angemeldet").into_response();
+    }
+    let (pool, branding) = match tenant.as_ref() {
+        Some(axum::extract::Extension(t)) => (t.pool.clone(), t.handles.branding.get()),
+        None => (state.db.clone(), state.branding.get()),
+    };
+    match rusterando_server::menu_export::rows(&pool).await {
+        Ok(rows) => {
+            let day = chrono::Local::now().format("%Y-%m-%d");
+            let shop = sanitize_filename(&branding.shop_name.to_lowercase());
+            (
+                [
+                    (header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{shop}-speisekarte-{day}.csv\""),
+                    ),
+                    (header::CACHE_CONTROL, "no-store".to_string()),
+                ],
+                rusterando_server::menu_export::to_csv(&rows),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("speisekarte csv: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Export-Fehler").into_response()
+        }
+    }
+}
+
+/// The last e-ink picture: (what it shows, PNG, frame bytes, frame bytes
+/// zlib-compressed). Rendered again only when the offer, the shop or its
+/// address changes.
+type EinkPics = (Vec<u8>, Vec<u8>, Vec<u8>);
+type EinkCache = std::sync::Mutex<Option<(String, std::sync::Arc<EinkPics>)>>;
+static EINK_CACHE: std::sync::OnceLock<EinkCache> = std::sync::OnceLock::new();
+
+/// The Tagesangebot as the e-ink frame shows it, and its ETag.
+async fn eink_offer(
+    state: &AppState,
+    tenant: Option<&rusterando_server::tenant::Tenant>,
+) -> anyhow::Result<(String, std::sync::Arc<EinkPics>)> {
+    let (pool, branding, site) = match tenant {
+        Some(t) => (
+            t.pool.clone(),
+            t.handles.branding.get(),
+            t.public_url.clone(),
+        ),
+        None => (
+            state.db.clone(),
+            state.branding.get(),
+            rusterando_frontend::pages::home::site_url(),
+        ),
+    };
+    let data = rusterando_server::eink::offer(&pool, &branding, &site).await;
+    let etag = format!("\"{}\"", rusterando_server::eink::tag(&data));
+    let key = serde_json::to_string(&data)?;
+    let cache = EINK_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Some((k, pic)) = cache.lock().ok().and_then(|c| c.clone()) {
+        if k == key {
+            return Ok((etag, pic));
+        }
+    }
+    let pic = tokio::task::spawn_blocking(move || -> anyhow::Result<EinkPics> {
+        use std::io::Write;
+        let (png, frame) = rusterando_server::pdf::render_eink_offer(&data)?;
+        // 192 KB of mostly plain board compress to ~13 KB: what a device
+        // fetches (its LAN module lost step on the full download).
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&frame)?;
+        Ok((png, frame, z.finish()?))
+    })
+    .await??;
+    let pic = std::sync::Arc::new(pic);
+    if let Ok(mut c) = cache.lock() {
+        *c = Some((key.clone(), pic.clone()));
+    }
+    Ok((etag, pic))
+}
+
+async fn eink_offer_response(
+    state: AppState,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+    headers: axum::http::HeaderMap,
+    png: bool,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    match eink_offer(&state, tenant.as_ref().map(|axum::extract::Extension(t)| t)).await {
+        Ok((etag, pic)) => {
+            // The frame compressed for clients that ask (the kitchen
+            // devices): its own ETag, as another representation.
+            let deflate = !png
+                && headers
+                    .get(header::ACCEPT_ENCODING)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| {
+                        v.split(',')
+                            .any(|e| e.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("deflate"))
+                    });
+            let etag = if deflate {
+                format!("{}-z\"", etag.trim_end_matches('"'))
+            } else {
+                etag
+            };
+            if headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok())
+                == Some(etag.as_str())
+            {
+                return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+            }
+            // Named, so a phone saves them as such: the PNG shows in the
+            // browser, the raw frame downloads (the frame's app sends it
+            // byte for byte).
+            let (kind, body, disposition) = if png {
+                (
+                    "image/png",
+                    pic.0.clone(),
+                    "inline; filename=\"tagesangebot.png\"",
+                )
+            } else {
+                (
+                    "application/octet-stream",
+                    if deflate { pic.2.clone() } else { pic.1.clone() },
+                    "attachment; filename=\"tagesangebot.eink\"",
+                )
+            };
+            let mut extra = vec![(header::VARY, "Accept-Encoding".to_string())];
+            if deflate {
+                extra.push((header::CONTENT_ENCODING, "deflate".to_string()));
+            }
+            (
+                [
+                    (header::CONTENT_TYPE, kind.to_string()),
+                    (header::CONTENT_DISPOSITION, disposition.to_string()),
+                    (header::ETAG, etag),
+                    (header::CACHE_CONTROL, "no-cache".to_string()),
+                ],
+                axum::response::AppendHeaders(extra),
+                body,
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("tagesangebot e-ink: {e:#}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Bild-Fehler").into_response()
+        }
+    }
+}
+
+/// `/tagesangebot.png` — the e-ink Tagesangebot as a picture.
+async fn eink_offer_png_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    eink_offer_response(state, tenant, headers, true).await
+}
+
+/// `/tagesangebot.eink` — the same in the frame's format (192 000 bytes).
+async fn eink_offer_raw_handler(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    eink_offer_response(state, tenant, headers, false).await
+}
+
 /// Keep only filename-safe chars for a Content-Disposition filename.
 fn sanitize_filename(s: &str) -> String {
     s.chars()
@@ -3096,6 +3679,9 @@ struct MenuPdfParams {
     /// instead of the live ones — the file the admin sends to the print
     /// shop before activating. Anything else = live prices.
     prices: Option<String>,
+    /// `?marks=1` (with `format=a5-zickzack`): crop + fold marks outside
+    /// the bleed, for print shops that want them.
+    marks: Option<String>,
 }
 
 async fn menu_pdf_handler(
@@ -3105,7 +3691,7 @@ async fn menu_pdf_handler(
     // `None` on the apex / single-tenant → fall back to the global pool.
     // This raw axum handler is OUTSIDE the Leptos per-request context swap, so
     // without this it always rendered the global (parent) tenant's menu — e.g.
-    // flizza.localhost/menu.pdf returned rusterando's PDF.
+    // beispiel.localhost/menu.pdf returned rusterando's PDF.
     tenant: Option<axum::extract::Extension<rusterando_server::tenant::Tenant>>,
     StaffRole(role): StaffRole,
 ) -> impl axum::response::IntoResponse {
@@ -3115,7 +3701,9 @@ async fn menu_pdf_handler(
 
     // Only known formats; anything else falls back to the tri-fold default so
     // a typo in the query never errors the endpoint.
+    let marks = matches!(p.marks.as_deref(), Some("1") | Some("true") | Some("yes"));
     let format = match p.format.as_deref() {
+        Some("a5-zickzack") if marks => "a5-zickzack-marks",
         Some("a5-zickzack") => "a5-zickzack",
         _ => "trifold",
     };
@@ -3169,7 +3757,7 @@ async fn menu_pdf_handler(
     // Download filename: `<menu-domain>_<tenant>.pdf` — the shop name as the
     // "menu domain" (slugified) plus the tenant slug, so a customer who saves
     // multiple shops' menus gets distinct files instead of every tenant
-    // sharing one name. e.g. `flizza-pizzeria_flizza-speisekarte.pdf`.
+    // sharing one name. e.g. `beispiel-pizzeria_beispiel-speisekarte.pdf`.
     let domain = rusterando_shared::models::seo_slug(&branding.display_name());
     let domain = if domain.is_empty() {
         "menu".to_string()
@@ -3181,10 +3769,10 @@ async fn menu_pdf_handler(
     } else {
         format!("_{slug}")
     };
-    let fmt_part = if format == "a5-zickzack" {
-        "-a5-zickzack"
-    } else {
-        ""
+    let fmt_part = match format {
+        "a5-zickzack" => "-a5-zickzack",
+        "a5-zickzack-marks" => "-a5-zickzack-schnittmarken",
+        _ => "",
     };
     let filename = format!("{domain}{tenant_part}-speisekarte{fmt_part}{variant}{prices_part}.pdf");
     // The staged-price render is an admin working file: never let a shared
@@ -3250,6 +3838,9 @@ async fn server_fn_handler(
             std::sync::Arc::new(k.clone())
                 as std::sync::Arc<dyn rusterando_frontend::pages::push::KitchenSink>
         });
+    // The /kitchen page's board: the displays' snapshot and moves.
+    let kitchen_board: rusterando_frontend::pages::push::KitchenBoardHandle =
+        std::sync::Arc::new(rusterando_server::WebBoard);
 
     leptos_axum::handle_server_fns_with_context(
         {
@@ -3294,6 +3885,7 @@ async fn server_fn_handler(
                 provide_context(apns.clone());
                 provide_context(sink.clone());
                 provide_context(kitchen_sink.clone());
+                provide_context(kitchen_board.clone());
                 provide_context(live.clone());
                 provide_context(uploads.clone());
                 // DeploymentHandle — read by the deployment_info server fn.
@@ -3551,6 +4143,28 @@ fn is_admin(role: Option<rusterando_frontend::pages::session::Role>) -> bool {
 /// 303 redirect to `/admin/login` — 303 is the right status for "your
 /// GET turned into a redirect because of policy", and works on every
 /// browser + the iOS WebView shell.
+/// `X-Robots-Tag: noindex` on the staff pages (admin, kitchen, driver,
+/// sysadmin) instead of naming them in robots.txt.
+async fn noindex_staff_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let staff = {
+        let path = req.uri().path();
+        ["/admin", "/kitchen", "/driver", "/sysadmin"]
+            .iter()
+            .any(|p| path == *p || path.starts_with(&format!("{p}/")))
+    };
+    let mut res = next.run(req).await;
+    if staff {
+        res.headers_mut().insert(
+            axum::http::header::HeaderName::from_static("x-robots-tag"),
+            axum::http::HeaderValue::from_static("noindex, nofollow"),
+        );
+    }
+    res
+}
+
 async fn admin_auth_middleware(
     req: axum::extract::Request,
     next: axum::middleware::Next,

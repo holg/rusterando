@@ -69,7 +69,7 @@ if ! lsof -i ":${SITE_PORT}" >/dev/null 2>&1; then
     # Dev (unhashed) builds: bridge wasm-bindgen's hardcoded `<out>_bg.wasm`
     # name to cargo-leptos's `<out>.wasm` with a symlink. The leptos output
     # name is `rusterando` (Cargo.toml [package.metadata.leptos].name), NOT
-    # the old `davidspizzeria` — getting this wrong 404s the wasm and
+    # a deployment's own LEPTOS_OUTPUT_NAME — getting this wrong 404s the wasm and
     # silently breaks hydration (the page renders but never comes alive).
     ( for _ in $(seq 1 120); do
         if [[ -f target/site/pkg/rusterando.wasm ]]; then

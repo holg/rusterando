@@ -22,6 +22,9 @@ pub struct PiStatus {
     /// Seconds since last_seen (i64::MAX-ish sentinel if never).
     pub seconds_since_seen: i64,
     pub update_armed: bool,
+    /// This device keeps the colour e-ink frame up to date (switched here).
+    #[serde(default)]
+    pub eink: bool,
     /// Server's target version for this Pi's arch, if an artifact is staged.
     pub target_version: Option<String>,
     /// True when the staged target isn't an update for this device: the same
@@ -42,6 +45,85 @@ pub struct PiStatus {
     /// Receipts not confirmed yet, and the age of the oldest one.
     pub waiting: i64,
     pub oldest_waiting_secs: i64,
+    /// Heard over LoRa by a connected device (its relay reports it): which
+    /// one, how long ago, at what RSSI. `None` = never (since the restart).
+    #[serde(default)]
+    pub lora_via: Option<String>,
+    #[serde(default)]
+    pub lora_secs: Option<i64>,
+    #[serde(default)]
+    pub lora_rssi: Option<i16>,
+}
+
+/// LoRa heard this recently: the device is reachable (over the relay).
+pub const LORA_FRESH_SECS: i64 = 90;
+
+/// Kitchen devices heard over LoRa by a connected one: its relay reports
+/// them with every `/api/kitchen/devices` check (`?via=…&lora=…`). Kept in
+/// memory by device name (unique: from the MAC); a restart forgets them
+/// until the next report, 30 s later.
+#[cfg(feature = "ssr")]
+pub mod lora_seen {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    #[derive(Clone, Debug)]
+    pub struct Seen {
+        pub via: String,
+        /// Unix seconds it was last heard.
+        pub at: i64,
+        pub rssi: i16,
+    }
+
+    fn map() -> &'static Mutex<HashMap<String, Seen>> {
+        static MAP: OnceLock<Mutex<HashMap<String, Seen>>> = OnceLock::new();
+        MAP.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn valid(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 40
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
+
+    /// `lora` as the relay sends it: `name:rssi:secs,…`.
+    pub fn record(via: &str, lora: &str, now: i64) {
+        if !valid(via) {
+            return;
+        }
+        let Ok(mut map) = map().lock() else { return };
+        for entry in lora.split(',').take(16) {
+            let mut f = entry.rsplitn(3, ':');
+            let (Some(secs), Some(rssi), Some(name)) = (f.next(), f.next(), f.next()) else {
+                continue;
+            };
+            let (Ok(secs), Ok(rssi)) = (secs.parse::<i64>(), rssi.parse::<i16>()) else {
+                continue;
+            };
+            if !valid(name) || map.len() >= 256 && !map.contains_key(name) {
+                continue;
+            }
+            let at = now - secs.clamp(0, 3600);
+            // The freshest word wins (two devices may hear it).
+            if map.get(name).is_some_and(|s| s.at > at) {
+                continue;
+            }
+            map.insert(
+                name.to_string(),
+                Seen {
+                    via: via.to_string(),
+                    at,
+                    rssi,
+                },
+            );
+        }
+    }
+
+    pub fn get(name: &str) -> Option<Seen> {
+        map().lock().ok()?.get(name).cloned()
+    }
 }
 
 /// SSR-only DB row shape for `kitchen_clients`. Kept separate from the
@@ -54,6 +136,7 @@ struct ClientRow {
     arch: String,
     last_seen_at: i64,
     update_armed: i64,
+    eink: i64,
     last_update_to: String,
     last_update_ok: i64,
     last_update_error: String,
@@ -69,7 +152,7 @@ pub async fn list_pi_status() -> Result<Vec<PiStatus>, ServerFnError> {
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
     let rows: Vec<ClientRow> = sqlx::query_as(
-        "SELECT shop_slug, version, arch, last_seen_at, update_armed, \
+        "SELECT shop_slug, version, arch, last_seen_at, update_armed, eink, \
                 last_update_to, last_update_ok, last_update_error, last_update_at, has_printer \
          FROM kitchen_clients ORDER BY shop_slug",
     )
@@ -119,13 +202,18 @@ pub async fn list_pi_status() -> Result<Vec<PiStatus>, ServerFnError> {
                 (now - r.last_seen_at).max(0)
             };
 
+            let lora = lora_seen::get(&r.shop_slug);
             PiStatus {
+                lora_via: lora.as_ref().map(|l| l.via.clone()),
+                lora_secs: lora.as_ref().map(|l| (now - l.at).max(0)),
+                lora_rssi: lora.as_ref().map(|l| l.rssi),
                 shop_slug: r.shop_slug,
                 version: r.version,
                 arch: r.arch,
                 last_seen_at: r.last_seen_at,
                 seconds_since_seen,
                 update_armed: r.update_armed != 0,
+                eink: r.eink != 0,
                 target_version,
                 up_to_date,
                 last_update_to: r.last_update_to,
@@ -197,6 +285,26 @@ pub async fn kitchen_display_alert(message: String) -> Result<String, ServerFnEr
     }
 }
 
+/// Switch which device keeps the colour e-ink frame (the Tagesangebot) up to
+/// date: stored here, survives restarts and power-off. The board feeds look
+/// again at once (kitchen_board.rs); a device switched off gets an empty
+/// tag and leaves the frame alone.
+#[server(name = SetDeviceEink, prefix = "/api", endpoint = "set_device_eink")]
+pub async fn set_device_eink(shop_slug: String, on: bool) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    sqlx::query("UPDATE kitchen_clients SET eink = ?2 WHERE shop_slug = ?1")
+        .bind(&shop_slug)
+        .bind(if on { 1 } else { 0 })
+        .execute(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("e-ink switch: {e}")))?;
+    crate::pages::daily_offer::ssr::picture_changed();
+    Ok(())
+}
+
 #[server(name = SetPiUpdateArmed, prefix = "/api", endpoint = "set_pi_update_armed")]
 pub async fn set_pi_update_armed(shop_slug: String, armed: bool) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
@@ -213,13 +321,48 @@ pub async fn set_pi_update_armed(shop_slug: String, armed: bool) -> Result<(), S
     Ok(())
 }
 
+/// A device counts as gone (and may be removed from the list) after this
+/// long without a Hello or heartbeat — the card shows it red from here on.
+pub const FORGET_AFTER_SECS: i64 = 600;
+
+/// "Entfernen": drop a kitchen device that is gone for good (replaced, or
+/// switched off) from the list — and from the printer-offline monitor,
+/// which otherwise alerts for it again after every server restart. Only
+/// while it is offline; should it ever connect again, its Hello adds it
+/// back. Admin-only.
+#[server(name = ForgetKitchenClient, prefix = "/api", endpoint = "forget_kitchen_client")]
+pub async fn forget_kitchen_client(shop_slug: String) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+
+    let done = sqlx::query(
+        "DELETE FROM kitchen_clients WHERE shop_slug = ?1 \
+         AND (last_seen_at = 0 OR strftime('%s','now') - last_seen_at >= ?2)",
+    )
+    .bind(&shop_slug)
+    .bind(FORGET_AFTER_SECS)
+    .execute(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("forget device: {e}")))?;
+    if done.rows_affected() == 0 {
+        return Err(ServerFnError::new(format!(
+            "{shop_slug} ist gerade verbunden (oder schon entfernt)."
+        )));
+    }
+    Ok(())
+}
+
 #[component]
 pub fn PrinterStatusPage() -> impl IntoView {
     let armer = ServerAction::<SetPiUpdateArmed>::new();
+    let einker = ServerAction::<SetDeviceEink>::new();
+    let forgetter = ServerAction::<ForgetKitchenClient>::new();
     let alerter = ServerAction::<KitchenDisplayAlert>::new();
     let alert_text = RwSignal::new(String::new());
     let rows = Resource::new(
-        move || armer.version().get(),
+        move || (armer.version().get(), forgetter.version().get(), einker.version().get()),
         |_| async move { list_pi_status().await },
     );
 
@@ -256,6 +399,9 @@ pub fn PrinterStatusPage() -> impl IntoView {
                     })}
                 </div>
 
+                {move || forgetter.value().get().and_then(|r| r.err()).map(|e| view! {
+                    <p class="error">{e.to_string()}</p>
+                })}
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
                     {move || rows.get().map(|res| match res {
                         Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
@@ -264,7 +410,7 @@ pub fn PrinterStatusPage() -> impl IntoView {
                         }
                         Ok(list) => view! {
                             <div class="pi-cards">
-                                {list.into_iter().map(|p| view! { <PiCard p armer/> }).collect_view()}
+                                {list.into_iter().map(|p| view! { <PiCard p armer einker forgetter/> }).collect_view()}
                             </div>
                         }.into_any(),
                     })}
@@ -276,12 +422,14 @@ pub fn PrinterStatusPage() -> impl IntoView {
 
 /// The kitchen device generations, by the arch each one reports:
 /// Raspberry Pi 4, then the STM32MP135F-DK (touch display, still Linux),
-/// then the all-in-one M5Stack Tab5.
+/// then the all-in-one M5Stack Tab5 and the 7" Guition JC1060P470 (same
+/// firmware, its own update image).
 fn device_model(arch: &str) -> Option<&'static str> {
     match arch {
         "aarch64-unknown-linux-gnu" => Some("RPi4"),
         "armv7-unknown-linux-gnueabihf" => Some("STM32MP135F-DK"),
         "esp32p4" => Some("Tab5"),
+        "esp32p4-jc1060p470" => Some("JC1060P470"),
         _ => None,
     }
 }
@@ -353,12 +501,22 @@ fn ago(secs: i64) -> String {
 }
 
 #[component]
-fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
-    // Connection freshness: green <90s, amber <10min, red otherwise.
-    let (conn_cls, conn_label) = if p.seconds_since_seen == i64::MAX {
-        ("pi-conn offline", "nie gesehen".to_string())
-    } else if p.seconds_since_seen < 90 {
+fn PiCard(
+    p: PiStatus,
+    armer: ServerAction<SetPiUpdateArmed>,
+    einker: ServerAction<SetDeviceEink>,
+    forgetter: ServerAction<ForgetKitchenClient>,
+) -> impl IntoView {
+    // Connection freshness: green <90s, orange "LoRa" when only the relay
+    // still hears it, amber <10min, red otherwise.
+    let tcp_online = p.seconds_since_seen < 90;
+    let lora_fresh = p.lora_secs.is_some_and(|s| s < LORA_FRESH_SECS);
+    let (conn_cls, conn_label) = if tcp_online {
         ("pi-conn online", "online".to_string())
+    } else if lora_fresh {
+        ("pi-conn lora", "LoRa".to_string())
+    } else if p.seconds_since_seen == i64::MAX {
+        ("pi-conn offline", "nie gesehen".to_string())
     } else if p.seconds_since_seen < 600 {
         ("pi-conn stale", format!("vor {}s", p.seconds_since_seen))
     } else {
@@ -386,6 +544,29 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
     let shop_for_arm = p.shop_slug.clone();
     let shop_for_disarm = p.shop_slug.clone();
     let armed = p.update_armed;
+    // Not on TCP/IP: when it was, and what LoRa says.
+    let link_line = (!tcp_online).then(|| {
+        let tcp = if p.seconds_since_seen == i64::MAX {
+            "TCP/IP nie".to_string()
+        } else {
+            format!("TCP/IP {}", ago(p.seconds_since_seen))
+        };
+        let via = p.lora_via.clone().unwrap_or_default();
+        let rssi = p
+            .lora_rssi
+            .map(|r| format!(", {r} dBm"))
+            .unwrap_or_default();
+        match p.lora_secs {
+            Some(s) if s < LORA_FRESH_SECS => (true, format!("{tcp} · LoRa über {via}{rssi}")),
+            Some(s) => (false, format!("{tcp} · LoRa {} (über {via})", ago(s))),
+            None => (false, tcp),
+        }
+    });
+    // Gone devices get "Entfernen", with a second tap to confirm — not while
+    // LoRa still hears them.
+    let gone = p.seconds_since_seen >= FORGET_AFTER_SECS && !lora_fresh;
+    let shop_for_forget = p.shop_slug.clone();
+    let confirm_forget = RwSignal::new(false);
 
     view! {
         <div class="pi-card">
@@ -400,10 +581,40 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
                 <dd class=ver_cls>{ver_label}</dd>
                 <dt>"Arch"</dt>
                 <dd class="muted">{p.arch.clone()}</dd>
+                {link_line.map(|(fresh, text)| {
+                    let cls = if fresh { "lora" } else { "muted" };
+                    view! { <><dt>"Verbindung"</dt><dd class=cls>{text}</dd></> }
+                })}
                 {
                     let (cls, txt) = printer_line(&p);
                     view! { <><dt>"Drucker"</dt><dd class=cls>{txt}</dd></> }
                 }
+                // The Tab5s and the 7" can drive the colour e-ink frame.
+                {p.arch.starts_with("esp32p4").then(|| {
+                    let shop = p.shop_slug.clone();
+                    let on = p.eink;
+                    view! {
+                        <>
+                            <dt>"E-Ink-Rahmen"</dt>
+                            <dd>
+                                <label class="pi-eink">
+                                    <input type="checkbox" prop:checked=on
+                                        on:change=move |ev| {
+                                            einker.dispatch(SetDeviceEink {
+                                                shop_slug: shop.clone(),
+                                                on: event_target_checked(&ev),
+                                            });
+                                        }/>
+                                    {if on {
+                                        " zeigt das Tagesangebot auf dem Rahmen (Bluetooth)"
+                                    } else {
+                                        " aus"
+                                    }}
+                                </label>
+                            </dd>
+                        </>
+                    }
+                })}
                 {(!p.last_update_to.is_empty()).then(|| {
                     let cls = if p.last_update_ok { "ok" } else { "error" };
                     let txt = if p.last_update_ok {
@@ -436,6 +647,21 @@ fn PiCard(p: PiStatus, armer: ServerAction<SetPiUpdateArmed>) -> impl IntoView {
                 } else {
                     view! { <span class="muted small">"Kein Update verfügbar"</span> }.into_any()
                 }}
+                {gone.then(|| {
+                    let shop = shop_for_forget.clone();
+                    view! {
+                        <button class="btn ghost small" title="Gerät aus der Liste entfernen. Verbindet es sich wieder, erscheint es von selbst."
+                            on:click=move |_| {
+                                if confirm_forget.get_untracked() {
+                                    forgetter.dispatch(ForgetKitchenClient { shop_slug: shop.clone() });
+                                } else {
+                                    confirm_forget.set(true);
+                                }
+                            }>
+                            {move || if confirm_forget.get() { "Wirklich entfernen?" } else { "Entfernen" }}
+                        </button>
+                    }
+                })}
             </div>
         </div>
     }
@@ -460,5 +686,48 @@ mod tests {
     fn linux_boards_update_whenever_the_version_differs() {
         assert!(update_wanted("0.3.0", "0.3.1"));
         assert!(!update_wanted("0.3.1", "0.3.1"));
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod lora_seen_tests {
+    use super::lora_seen::{get, record};
+
+    #[test]
+    fn reports_are_parsed_and_the_freshest_wins() {
+        record(
+            "tab5-aaaa01",
+            "tab5-bbbb01:-48:12,cardputer-cccc01:-71:3",
+            1_000,
+        );
+        let b = get("tab5-bbbb01").expect("heard");
+        assert_eq!((b.via.as_str(), b.at, b.rssi), ("tab5-aaaa01", 988, -48));
+        assert_eq!(get("cardputer-cccc01").map(|c| c.rssi), Some(-71));
+        // An older word from another device doesn't replace a fresher one.
+        record("tab5-dddd01", "tab5-bbbb01:-60:30", 1_000);
+        assert_eq!(
+            get("tab5-bbbb01").map(|b| b.via),
+            Some("tab5-aaaa01".to_string())
+        );
+        // A newer one does.
+        record("tab5-dddd01", "tab5-bbbb01:-60:0", 1_010);
+        assert_eq!(
+            get("tab5-bbbb01").map(|b| (b.via, b.at)),
+            Some(("tab5-dddd01".to_string(), 1_010))
+        );
+    }
+
+    #[test]
+    fn junk_is_ignored() {
+        record(
+            "tab5-eeee01",
+            "no-colons,x:y:z,bad name!:-1:1,tab5-ffff01:-50",
+            1_000,
+        );
+        record("bad via!", "tab5-gggg01:-50:1", 1_000);
+        assert!(get("no-colons").is_none());
+        assert!(get("bad name!").is_none());
+        assert!(get("tab5-ffff01").is_none());
+        assert!(get("tab5-gggg01").is_none());
     }
 }

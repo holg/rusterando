@@ -9,13 +9,13 @@ DerivedData/
 *.dSYM.zip
 
 # Local overlay holding your Apple Team ID + all tenant-specific
-# targets (Davids, your-publisher Rusterando, anything else you
+# targets (your shop's, your-publisher Rusterando, anything else you
 # ship). project.local.example.yml is the public template.
 project.local.yml
 
 # Tenant-specific plist + entitlements files. The *-Example variants
 # are placeholder values for the public example target in project.yml
-# and stay tracked. Anything else (Info-Davids, DavidsPizzeria.*,
+# and stay tracked. Anything else (Info-MyShop, MyShop.*,
 # Info-RusterandoPublic, etc.) is per-developer signing config and
 # must not be committed.
 Info-*.plist

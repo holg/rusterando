@@ -12,9 +12,42 @@ publish = false
 # riscv32imafc-esp-espidf with its own toolchain settings (.cargo/config.toml).
 # Build, flash and monitor with scripts/build_kds_tab5.sh.
 
+
+# Its own workspace: builds the same from a checkout nested in another
+# (a git worktree under .claude/worktrees/).
+[workspace]
+
 [[bin]]
 name = "kds-tab5"
 harness = false
+
+# The M5Stack Cardputer ADV (ESP32-S3, 240×135, keyboard, LoRa cap): its own
+# main and screen in src/cardputer/, the feed, Wi-Fi, updates and the LoRa
+# relay shared with the Tab5. `BOARD=cardputer scripts/build_kds_tab5.sh`.
+[[bin]]
+name = "kds-cardputer"
+path = "src/cardputer/main.rs"
+required-features = ["cardputer"]
+harness = false
+
+[features]
+default = ["printer", "lora"]
+# The receipt printer (Tab5, JC1060P470): Bons as ESC/POS with SVG logos.
+# Off for the Cardputer, which doesn't print (and whose Xtensa compiler
+# can't build tiny-skia).
+printer = ["dep:receipt-escpos"]
+# The LoRa side (Tab5, Cardputer): the relay's sealing (chacha20poly1305),
+# the phone login and LoRa reports (hmac, serde_json). Not on the 7", which
+# has no LoRa: built with `--no-default-features --features
+# jc1060p470,printer` (scripts/build_kds_tab5.sh).
+lora = ["dep:hmac", "dep:serde_json", "dep:chacha20poly1305"]
+# The 7" Guition JC1060P470 (ESP32-P4, 1024×600, Ethernet) instead of the
+# Tab5: its own board package (boards/jc1060p470), components and sdkconfig,
+# chosen by `BOARD=jc1060p470 scripts/build_kds_tab5.sh` (never by hand: the
+# component list and sdkconfig come from the script's environment).
+jc1060p470 = []
+# The M5Stack Cardputer ADV (bin kds-cardputer, see above).
+cardputer = []
 
 [profile.release]
 opt-level = "s"
@@ -40,16 +73,28 @@ slint = { version = "1.18", default-features = false, features = ["compat-1-18",
 kds-ui = { path = "../kds-ui", default-features = false, features = ["mcu"] }
 # The live feed and the print channel: same wire format as the board and
 # the browser mirror.
-kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.3.0" }
 # Receipt → ESC/POS bytes, the same code as the board's printer client.
-receipt-escpos = { path = "../receipt-escpos", version = "0.2.0", features = ["svg"] }
+receipt-escpos = { path = "../receipt-escpos", version = "0.2.0", features = ["svg"], optional = true }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 # Update images are checked against the server's SHA-256 before booting them.
 sha2 = "0.10"
 base64 = "0.22"
+# The Terminal page (Tab5, tab5-lab's modules): the phone's login
+# (HMAC-SHA256) and the LoRa reports to /admin/lora (JSON).
+hmac = { version = "0.12", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+# The LoRa relay (relay.rs): sealed (orders carry customer data) and
+# deflated (airtime).
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"], optional = true }
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 
 [build-dependencies]
 embuild = "0.33"
+# The Cardputer's own screen (src/cardputer/ui.slint), compiled only with
+# feature `cardputer`; the Tab5's screen comes from kds-ui.
+slint-build = "1.18"
 
 [package.metadata.esp-idf-sys]
 # 5.4.x: supports the chip's revision v1.x by default (sdkconfig sets
@@ -82,3 +127,12 @@ remote_component = { name = "espressif/esp_websocket_client", version = "==1.6.1
 remote_component = { name = "espressif/m5stack_tab5_noglib", version = "==1.3.2" }
 bindings_header = "src/bsp.h"
 bindings_module = "bsp"
+
+# The Terminal page's phone link (Tab5): the Nordic UART Service on NimBLE,
+# the radio being the C6's through esp_hosted (tab5-lab's component, shared).
+# Rust bindings in esp_idf_svc::sys::lab_ble. Not on the JC1060P470 (its
+# own component list, boards/jc1060p470/components.toml.in).
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["../tab5-lab/components/lab_ble"]
+bindings_header = "../tab5-lab/components/lab_ble/include/lab_ble.h"
+bindings_module = "lab_ble"

@@ -20,12 +20,14 @@ use crate::components::test_mode_banner::TestModeBanner;
 use crate::pages::admin::address_attempts::AddressAttemptsPage;
 use crate::pages::admin::broadcast::BroadcastAdminPage;
 use crate::pages::admin::customers::{AdminCustomerDetailPage, AdminCustomersPage};
+use crate::pages::admin::daily_offer::DailyOfferAdminPage;
 use crate::pages::admin::extras_admin::ExtrasAdminPage;
 use crate::pages::admin::history::AdminHistoryPage;
 use crate::pages::admin::home::AdminHomePage;
 use crate::pages::admin::home_admin::HomeAdminPage;
 use crate::pages::admin::hours::HoursAdminPage;
 use crate::pages::admin::login::AdminLoginPage;
+use crate::pages::admin::lora::LoraPage;
 use crate::pages::admin::menu_admin::AdminMenuPage;
 use crate::pages::admin::next_prices::NextPricesAdminPage;
 use crate::pages::admin::orders::{AdminOrderDetailPage, AdminOrdersPage};
@@ -65,7 +67,12 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
             "warm".to_string()
         }
     };
-    let html_class = format!("theme-{theme_class}");
+    // The admin is always light (the shop's dark looks are for customers).
+    let html_class = if is_admin_path(&current_path()) {
+        "theme-warm".to_string()
+    } else {
+        format!("theme-{theme_class}")
+    };
 
     // SSR-time bootstrap data. We bake the shop name and the runtime
     // i18n_enabled flag into an inline `<script>` so the hydrate
@@ -110,8 +117,20 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 .unwrap_or_default();
             let pack_js_json =
                 serde_json::to_string(&pack_js).unwrap_or_else(|_| "\"\"".to_string());
+            // The site theme and the one visitors may switch to; their
+            // stored choice (localStorage `dp_theme`) goes on <html> right
+            // here, in <head>, before anything is painted. The admin stays
+            // light whatever was chosen.
+            let (theme, theme_alt) = use_context::<crate::pages::settings::ThemeHandle>()
+                .map(|h| (h.get(), h.get_alt()))
+                .unwrap_or_else(|| ("warm".to_string(), String::new()));
+            let theme_json = serde_json::to_string(&theme).unwrap_or_else(|_| "\"warm\"".into());
+            let alt_json = serde_json::to_string(&theme_alt).unwrap_or_else(|_| "\"\"".into());
             let js = format!(
-                "window.__appBootstrap = {{ shop_name: {name_json}, i18n_enabled: {i18n_on}, stripe_sandbox: {stripe_sandbox}, i18n_pack_js: {pack_js_json} }};"
+                "window.__appBootstrap = {{ shop_name: {name_json}, i18n_enabled: {i18n_on}, stripe_sandbox: {stripe_sandbox}, i18n_pack_js: {pack_js_json}, theme: {theme_json}, theme_alt: {alt_json} }};\n\
+                 (function(){{try{{var b=window.__appBootstrap,t=localStorage.getItem('dp_theme'),p=location.pathname.split('/');\
+                 if(p[1]==='admin'||(p[1].length===2&&p[2]==='admin')){{document.documentElement.className='theme-warm';return;}}\
+                 if(b.theme_alt&&t&&(t===b.theme||t===b.theme_alt)){{document.documentElement.className='theme-'+t;}}}}catch(e){{}}}})();"
             );
             // Cached Restaurant JSON-LD (built at boot, rebuilt on edits).
             // Read here SYNCHRONOUSLY and baked into <head> below — the shell
@@ -362,6 +381,8 @@ pub fn App() -> impl IntoView {
                     <Route path=(StaticSegment("admin"), StaticSegment("settings")) view=SettingsAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("printer")) view=PrinterAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("drucker")) view=PrinterStatusPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("lora")) view=LoraPage/>
+                    <Route path=(StaticSegment("admin"), StaticSegment("tagesangebot")) view=DailyOfferAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("broadcast")) view=BroadcastAdminPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("orders")) view=AdminOrdersPage/>
                     <Route path=(StaticSegment("admin"), StaticSegment("orders"), ParamSegment("id")) view=AdminOrderDetailPage/>
@@ -395,6 +416,14 @@ pub fn App() -> impl IntoView {
             <CartDrawer/>
         </Router>
     }
+}
+
+/// An admin page (`/admin…`, also behind a `/<lang>/` prefix): always in
+/// the light theme, without the sun/moon switch.
+pub(crate) fn is_admin_path(path: &str) -> bool {
+    let mut parts = path.split('/').skip(1);
+    let first = parts.next();
+    first == Some("admin") || (first.is_some_and(|p| p.len() == 2) && parts.next() == Some("admin"))
 }
 
 /// Best-effort read of the current URL path. Used by the i18n

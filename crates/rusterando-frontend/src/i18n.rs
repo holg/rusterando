@@ -20,7 +20,7 @@
 //!     easily with feature-flagged builds.
 //!   - We don't need the compile-time key validation in v1 — a tiny
 //!     missing-key check on CI will do.
-//!   - Davids' OSS forks that stay German-only pay zero compile cost
+//!   - OSS forks that stay German-only pay zero compile cost
 //!     for the 7 other locale files.
 //!
 //! Call sites: always `crate::t!("dotted.key")`. The macro is identical

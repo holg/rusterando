@@ -11,7 +11,7 @@ options:
 # built by anyone without leaking publisher-specific config.
 #
 # To ship the app under YOUR Apple Developer account (whether as
-# "Davids Pizzeria", "Rusterando", or anything else):
+# "Musterpizzeria", "Rusterando", or anything else):
 #
 #   1. cp project.local.example.yml project.local.yml
 #   2. Fill in your DEVELOPMENT_TEAM (Apple Team ID).
@@ -36,7 +36,7 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     # NOTE: the shippable per-tenant targets set their version in their
-    # Info-*.plist (e.g. Info-Davids.plist), which OVERRIDES these. These are
+    # Info-*.plist (e.g. Info-MyShop.plist), which OVERRIDES these. These are
     # only the fallback for the OSS example target. Keep the real version in
     # the tenant plist.
     MARKETING_VERSION: "0.1.0"

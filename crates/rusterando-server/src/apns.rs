@@ -316,7 +316,7 @@ fn short_token(token: &str) -> String {
 
 /// Plumb ApnsHandle through the trait the frontend exposes, so server
 /// fns in the frontend crate can broadcast without taking a direct
-/// dependency on davidspizzeria-server.
+/// dependency on rusterando-server.
 #[async_trait]
 impl BroadcastSink for ApnsHandle {
     async fn broadcast(

@@ -59,7 +59,8 @@ KDS_UI_SCALE=2.647 cargo run --release --features mcu --example screenshots -- .
 # credentials, never committed: tmp/tab5-wifi.env (KEY=VALUE, read literally)
 #   WIFI_SSID / WIFI_PASS, WIFI2_… … WIFI5_…   up to five networks
 #   KITCHEN_PASSWORD                            the shop's Küche password
-#   SHOP_URL                                    default https://davidspizzeria.de
+#   SHOP_URL                                    the shop server, e.g. https://shop.example.com
+#                                               (no default: required with KITCHEN_PASSWORD)
 #   KITCHEN_SLUG                                optional fixed device name; without it each
 #                                               Tab5 names itself tab5-<last 3 MAC bytes>
 PROFILE=release scripts/build_kds_tab5.sh flash     # build + flash + short monitor
@@ -75,12 +76,58 @@ The firmware reports its version as
 `<crate version>-<commit>[-dirty]-<YYYYMMDD-HHMM>` (`ota::VERSION`, set by
 the script): every build carries its build time, USB builds too.
 
+## 7" board: Guition JC1060P470
+
+The same firmware on Guition's 7" JC1060P470 (ESP32-P4 rev v1.3, 1024×600
+JD9165 panel, GT911 touch, IP101 Ethernet, ESP32-C6 for Wi-Fi, no battery):
+the same screen, about 1.4× larger (KDS_UI_SCALE 2.133).
+
+```bash
+BOARD=jc1060p470 PROFILE=release scripts/build_kds_tab5.sh flash
+BOARD=jc1060p470 PROFILE=release scripts/build_kds_tab5.sh stage   # update slot esp32p4-jc1060p470
+```
+
+- **Build:** cargo feature `jc1060p470` (set by the script), the board
+  package in `boards/jc1060p470/bsp` (C, Espressif's board-package function
+  names, so display, touch and USB printing are shared Rust code), its own
+  sdkconfig on top of the shared one, its own component list and target dir
+  (`target/jc1060p470`). Board-specific Rust: `src/jc1060p470/`.
+- **Network, chosen at start by the cable:**
+  - **LAN mode** (a cable, and an address from DHCP): the cable is the uplink,
+    and the board runs the shop's hotspot through the C6 — the STM32 board's
+    network: `HOTSPOT_SSID` / `HOTSPOT_PASS` from `tmp/tab5-wifi.env`
+    ("rusterando"), 192.168.72.1/24, DHCP, NAT to the LAN. A Tab5 joins it
+    with what it already knows.
+  - **Wi-Fi mode** (no cable): a Wi-Fi client like the Tab5, no hotspot. A
+    cable plugged in later restarts the board into LAN mode.
+- **Updates:** reports arch `esp32p4-jc1060p470`, its own update image —
+  a Tab5 image is never offered to it. Device name `jc1060-<last 3 MAC bytes>`.
+- **Panel:** Guition ships two panels behind the JD9165 ("V2" after the
+  material number on the rear label = the newer one). The init table is
+  the V2 one, read out of the factory firmware; a V1 panel needs another.
+  Clocks: 48 MHz pixel clock with 720 Mbps DSI lanes, so ESP-IDF 5.4.4's
+  pixel → lane-clock conversion is exact — with Guition's 52 MHz / 750 Mbps
+  it truncates, and the whole picture flickers (details in
+  `boards/jc1060p470/bsp/src/bsp_display.c`).
+- **Gong:** ES8311 codec and NS4150 amplifier are on board and set up
+  (`bsp_audio.c`, the Tab5's `gong.rs`), but no speaker comes with it: plug
+  one (e.g. Waveshare "2030 Cavity Speaker (B)", 8 Ω 2 W, 2-pin PH1.25)
+  into the MX1.25 socket **left of the micro-SD slot** — the one right of it
+  is the lithium battery input. "Alarm testen" on the Start page plays it.
+  No Bluetooth speaker: the C6 does Bluetooth LE only, speakers need
+  Classic Bluetooth (A2DP).
+- **USB printer:** the "high-speed" USB-C port (USB host), with an OTG
+  adapter or a C-to-B cable; flashing and the console use the other one
+  (from the schematic, not tested with a printer yet).
+- **Factory firmware:** verified backup in `tmp/p4-7-backup/` (restore
+  steps in its README).
+
 ## Updates over the network
 
 ```bash
 PROFILE=release scripts/build_kds_tab5.sh stage
 # → <DEPLOY_REMOTE_BASE>/artifacts/printer/esp32p4/{rusterando-printer,version}
-#   on SSH_HOST (from .env.davids, or STAGE_ENV=<file>)
+#   on SSH_HOST (from .env, or STAGE_ENV=<file>)
 ```
 
 Then arm the device on **/admin/drucker** (the same switch as for the STM
@@ -107,12 +154,22 @@ image.
 
 ## Printing details
 
-- **Logos:** the server sends them as SVG; the Tab5 renders them with the
-  same code as the STM board (`receipt-escpos`, feature `svg`: resvg +
-  bundled Poppins), cached by content hash. The renderer runs on its own
-  thread with a 128 KB stack in **PSRAM** — resvg peaks at about 80 KB, and
-  a stack that size in internal RAM starves TLS's SHA engine (every
-  handshake failed). That thread never touches flash.
+- **Logos:** since kitchen-protocol 2.3 the server renders them and sends
+  the finished 1-bit raster (`RasterBits`) — the device asks for it with
+  `caps=raster-bits` and just prints it (crates/kitchen-protocol/RECEIPT_LOGOS.md).
+  From an older server they still come as SVG, rendered here with the same
+  code as the STM board (`receipt-escpos`, feature `svg`: resvg + bundled
+  Poppins), cached by content hash; that renderer leaves the firmware once
+  every server is on 2.3. The renderer runs on its own
+  thread with a **1 MB stack in PSRAM**: resvg recurses per SVG group, and
+  the shop's composed receipt logo peaks at 232 KB (128 KB overflowed — the
+  device restarted on its first real order, 2026-11-05). A big stack in
+  internal RAM starves TLS's SHA engine (every handshake failed). That
+  thread never touches flash. The log shows the peak after every new logo.
+- **Diagnostics:** `KDS_DRY_RENDER=1` (render every job even without a
+  printer) and `KDS_REPLAY_JOB=<hex file>` (run one stored job at start,
+  e.g. `sqlite3 … "SELECT hex(payload) FROM kitchen_outbox WHERE id=…"`)
+  reproduce printing problems at the desk, without a printer.
 - **Offline:** the screen keeps the last board ("letzter Stand"). Board taps
   ("fertig", …) made without a connection are queued and sent in order once
   the server is reachable (up to 10 min old); the server checks each against

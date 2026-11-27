@@ -1,6 +1,6 @@
 //! Admin CRUD for the pizza-extras catalog.
 //!
-//! David maintains the list of extras (Tabasco, Extra Käse, Krabben, …) plus
+//! The admin maintains the list of extras (Tabasco, Extra Käse, Krabben, …) plus
 //! their per-piece price and availability. The menu page's extras picker is
 //! driven entirely by this table — flipping `is_available = 0` on Tabasco
 //! removes it from the picker the moment the page next loads.
@@ -196,8 +196,8 @@ pub async fn create_extra(label: String, price_cents: i64) -> Result<String, Ser
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
 
-    // Slug from label so the id stays human-readable when David inspects the
-    // DB. Collisions are vanishingly rare (he picks unique extra names);
+    // Slug from label so the id stays human-readable when the admin inspects the
+    // DB. Collisions are vanishingly rare (admins pick unique extra names);
     // fall back to a uuid suffix on conflict.
     let base = slugify(label.trim());
     let id = format!("ex-{base}");

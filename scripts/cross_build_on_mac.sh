@@ -458,7 +458,9 @@ fi
 if [ $LEPTOS_RC -eq 0 ]; then
   if [ "${PRINTER_ONLY:-0}" != "1" ]; then
     echo "Server build completed successfully!"
-    BINARY_PATH="target/$TARGET_TRIPLE/$PROFILE/davidspizzeria-server"
+    # The server binary's name: cargo-leptos's bin-package in Cargo.toml.
+    SERVER_BIN="$(sed -n 's/^bin-package = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+    BINARY_PATH="target/$TARGET_TRIPLE/$PROFILE/${SERVER_BIN:-rusterando-server}"
     if [ -f "$BINARY_PATH" ]; then
       echo "Server binary size: $(du -h "$BINARY_PATH" | cut -f1)"
     fi

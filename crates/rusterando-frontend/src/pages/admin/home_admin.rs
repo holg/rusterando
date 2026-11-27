@@ -11,8 +11,8 @@ use leptos::task::spawn_local;
 
 use crate::pages::admin::shell::AdminShell;
 use crate::pages::home_content::{
-    get_home_content, list_offers_admin, DeleteGalleryItem, DeleteOffer, GalleryItem, HomeContent,
-    Offer, UpdateHero, UpsertGalleryItem, UpsertOffer,
+    get_home_content, list_offer_item_choices, list_offers_admin, DeleteGalleryItem, DeleteOffer,
+    GalleryItem, HomeContent, Offer, OfferItemChoice, UpdateHero, UpsertGalleryItem, UpsertOffer,
 };
 
 #[component]
@@ -37,7 +37,11 @@ pub fn HomeAdminPage() -> impl IntoView {
     );
     let offers_admin = Resource::new(
         move || (saver_offer.version().get(), deleter_offer.version().get()),
-        |_| async move { list_offers_admin().await },
+        |_| async move {
+            let rows = list_offers_admin().await?;
+            let choices = list_offer_item_choices().await.unwrap_or_default();
+            Ok::<_, ServerFnError>((rows, choices))
+        },
     );
 
     view! {
@@ -62,8 +66,13 @@ pub fn HomeAdminPage() -> impl IntoView {
                 <Suspense fallback=|| view! { <p class="loading">"Lädt…"</p> }>
                     {move || offers_admin.get().map(|res| match res {
                         Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
-                        Ok(rows) => view! {
-                            <OffersEditor rows saver=saver_offer deleter=deleter_offer/>
+                        Ok((rows, choices)) => view! {
+                            <p class="hint">
+                                "Eine Karte mit Menü-Artikel zeigt Preis und Zutaten-Zeilen live aus der "
+                                "Speisekarte — sie stimmen immer. „In den Warenkorb“ öffnet den Artikel "
+                                "mit Größe und Extras. Ohne Artikel gelten die festen Texte."
+                            </p>
+                            <OffersEditor rows choices saver=saver_offer deleter=deleter_offer/>
                         }.into_any(),
                     })}
                 </Suspense>
@@ -198,18 +207,20 @@ fn HeroBackgroundPicker(path: RwSignal<String>) -> impl IntoView {
 #[component]
 fn OffersEditor(
     rows: Vec<Offer>,
+    choices: Vec<OfferItemChoice>,
     saver: ServerAction<UpsertOffer>,
     deleter: ServerAction<DeleteOffer>,
 ) -> impl IntoView {
     let new_offer_form = RwSignal::new(false);
+    let choices = StoredValue::new(choices);
     view! {
         <div class="home-admin-list">
             {rows.into_iter().map(|o| view! {
-                <OfferRowEditor o saver deleter/>
+                <OfferRowEditor o choices saver deleter/>
             }).collect_view()}
 
             {move || if new_offer_form.get() {
-                view! { <NewOfferForm saver close=move || new_offer_form.set(false)/> }.into_any()
+                view! { <NewOfferForm choices saver close=move || new_offer_form.set(false)/> }.into_any()
             } else {
                 view! {
                     <button class="btn ghost" on:click=move |_| new_offer_form.set(true)>
@@ -221,14 +232,38 @@ fn OffersEditor(
     }
 }
 
+/// The "Menü-Artikel" picker and, for a linked card, what it shows live.
+#[component]
+fn ItemPicker(item: RwSignal<String>, choices: StoredValue<Vec<OfferItemChoice>>) -> impl IntoView {
+    let preview = move || {
+        let id = item.get();
+        choices.with_value(|all| all.iter().find(|c| c.id == id).map(|c| c.preview.clone()))
+    };
+    view! {
+        <label>
+            <span>"Menü-Artikel"</span>
+            <select prop:value=move || item.get()
+                on:change=move |ev| item.set(event_target_value(&ev))>
+                <option value="">"— keiner (feste Texte) —"</option>
+                {choices.with_value(|all| all.iter().map(|c| view! {
+                    <option value=c.id.clone()>{c.label.clone()}</option>
+                }).collect_view())}
+            </select>
+        </label>
+        {move || preview().map(|p| view! { <p class="hint">"Live aus der Speisekarte: " {p}</p> })}
+    }
+}
+
 #[component]
 fn OfferRowEditor(
     o: Offer,
+    choices: StoredValue<Vec<OfferItemChoice>>,
     saver: ServerAction<UpsertOffer>,
     deleter: ServerAction<DeleteOffer>,
 ) -> impl IntoView {
     let id = o.id.clone();
     let id_for_delete = o.id.clone();
+    let item = RwSignal::new(o.menu_item_id.clone().unwrap_or_default());
     let title = RwSignal::new(o.title);
     let price = RwSignal::new(o.price_label);
     let blurb = RwSignal::new(o.blurb);
@@ -236,6 +271,7 @@ fn OfferRowEditor(
     let image_path = RwSignal::new(o.image_path.unwrap_or_default());
     let active = RwSignal::new(o.active);
     let position = RwSignal::new(o.position);
+    let linked = move || !item.get().is_empty();
 
     let on_save = move |_| {
         saver.dispatch(UpsertOffer {
@@ -247,6 +283,7 @@ fn OfferRowEditor(
             image_path: image_path.get(),
             active: active.get(),
             position: position.get(),
+            menu_item_id: item.get(),
         });
     };
     let on_delete = move |_| {
@@ -257,26 +294,31 @@ fn OfferRowEditor(
 
     view! {
         <div class="home-admin-card">
+            <ItemPicker item choices/>
             <label>
-                <span>"Titel"</span>
+                <span>{move || if linked() { "Titel (leer = Name des Artikels)" } else { "Titel" }}</span>
                 <input type="text" prop:value=move || title.get()
                     on:input=move |ev| title.set(event_target_value(&ev))/>
             </label>
+            {move || (!linked()).then(|| view! {
+                <label>
+                    <span>"Preis-Text"</span>
+                    <input type="text" prop:value=move || price.get()
+                        on:input=move |ev| price.set(event_target_value(&ev))/>
+                </label>
+            })}
             <label>
-                <span>"Preis-Text"</span>
-                <input type="text" prop:value=move || price.get()
-                    on:input=move |ev| price.set(event_target_value(&ev))/>
-            </label>
-            <label>
-                <span>"Beschreibung"</span>
+                <span>"Kurztext (optional, z. B. „perfekt für die kleine Runde“)"</span>
                 <input type="text" prop:value=move || blurb.get()
                     on:input=move |ev| blurb.set(event_target_value(&ev))/>
             </label>
-            <label>
-                <span>"Zusatzzeile (optional)"</span>
-                <input type="text" prop:value=move || add_on.get()
-                    on:input=move |ev| add_on.set(event_target_value(&ev))/>
-            </label>
+            {move || (!linked()).then(|| view! {
+                <label>
+                    <span>"Zusatzzeile (optional)"</span>
+                    <input type="text" prop:value=move || add_on.get()
+                        on:input=move |ev| add_on.set(event_target_value(&ev))/>
+                </label>
+            })}
             <ImagePicker path=image_path/>
             <div class="row-toggles">
                 <label>
@@ -304,14 +346,17 @@ fn OfferRowEditor(
 
 #[component]
 fn NewOfferForm(
+    choices: StoredValue<Vec<OfferItemChoice>>,
     saver: ServerAction<UpsertOffer>,
     close: impl Fn() + 'static + Copy + Send,
 ) -> impl IntoView {
+    let item = RwSignal::new(String::new());
     let title = RwSignal::new(String::new());
     let price = RwSignal::new(String::new());
     let blurb = RwSignal::new(String::new());
     let add_on = RwSignal::new(String::new());
     let image_path = RwSignal::new(String::new());
+    let linked = move || !item.get().is_empty();
 
     let on_save = move |_| {
         saver.dispatch(UpsertOffer {
@@ -323,6 +368,7 @@ fn NewOfferForm(
             image_path: image_path.get(),
             active: true,
             position: 100,
+            menu_item_id: item.get(),
         });
         close();
     };
@@ -330,22 +376,27 @@ fn NewOfferForm(
     view! {
         <div class="home-admin-card">
             <h4>"Neues Angebot"</h4>
-            <label><span>"Titel"</span>
+            <ItemPicker item choices/>
+            <label><span>{move || if linked() { "Titel (leer = Name des Artikels)" } else { "Titel" }}</span>
                 <input type="text" prop:value=move || title.get()
                     on:input=move |ev| title.set(event_target_value(&ev))/>
             </label>
-            <label><span>"Preis"</span>
-                <input type="text" prop:value=move || price.get()
-                    on:input=move |ev| price.set(event_target_value(&ev))/>
-            </label>
-            <label><span>"Beschreibung"</span>
+            {move || (!linked()).then(|| view! {
+                <label><span>"Preis-Text"</span>
+                    <input type="text" prop:value=move || price.get()
+                        on:input=move |ev| price.set(event_target_value(&ev))/>
+                </label>
+            })}
+            <label><span>"Kurztext (optional)"</span>
                 <input type="text" prop:value=move || blurb.get()
                     on:input=move |ev| blurb.set(event_target_value(&ev))/>
             </label>
-            <label><span>"Zusatzzeile"</span>
-                <input type="text" prop:value=move || add_on.get()
-                    on:input=move |ev| add_on.set(event_target_value(&ev))/>
-            </label>
+            {move || (!linked()).then(|| view! {
+                <label><span>"Zusatzzeile (optional)"</span>
+                    <input type="text" prop:value=move || add_on.get()
+                        on:input=move |ev| add_on.set(event_target_value(&ev))/>
+                </label>
+            })}
             <ImagePicker path=image_path/>
             <div class="row-actions">
                 <button class="btn primary" on:click=on_save>"Anlegen"</button>

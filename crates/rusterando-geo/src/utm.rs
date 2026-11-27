@@ -74,11 +74,11 @@ mod tests {
     #[test]
     fn matches_proj_reference_points() {
         let cases = [
-            // Lüdinghausen centroid (from the cadastre import)
+            // Sample-fixture town centroid (from a cadastre import)
             (391_917.0, 5_736_400.0, 51.768_039_02, 7.433_643_27),
             // Bochum, first row of the NRW export
             (370_279.838, 5_705_335.366, 51.484_274_86, 7.131_745_31),
-            // NE corner of the Lüdinghausen bounding box
+            // NE corner of that town's bounding box
             (399_048.219, 5_743_354.776, 51.831_882_19, 7.534_927_32),
             // SW corner
             (381_287.475, 5_731_482.148, 51.721_687_88, 7.281_348_33),

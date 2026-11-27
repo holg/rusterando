@@ -3,8 +3,10 @@ name = "rusterando-printer"
 # 0.3.0: SVG-on-the-wire logos (kitchen-protocol 2.0.0) — the Pi
 # rasterizes the server-composed logo SVG to 1-bit and caches it by content
 # hash; bundles Poppins + resvg. 0.2.0 was the pure raster interpreter.
+# 0.4.0: announces raster bits (kitchen-protocol 2.3) and prints the
+# server-rendered logos as is; still renders SVG from older servers.
 # The startup log's `version=` proves which build is running on the Pi.
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 # Not a workspace member, so metadata is spelled out instead of inherited.
 license = "AGPL-3.0-or-later"
@@ -41,7 +43,7 @@ path = "src/main.rs"
 [dependencies]
 # Protocol crate. Relative path because this crate isn't a workspace
 # member — `{ workspace = true }` is unavailable here.
-kitchen-protocol = { path = "../kitchen-protocol", version = "2.2.0" }
+kitchen-protocol = { path = "../kitchen-protocol", version = "2.3.0" }
 # The receipt → ESC/POS bytes, shared with the ESP32-P4 kitchen displays.
 receipt-escpos = { path = "../receipt-escpos", version = "0.2.0", features = ["svg"] }
 

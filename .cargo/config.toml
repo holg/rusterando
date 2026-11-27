@@ -1,0 +1,6 @@
+# Dependencies of the Leptos macros (attribute-derive-macro, proc-macro-error2)
+# trip rustc's future-incompatibility check; nothing to fix on our side, so
+# no reminder after every build. `cargo report future-incompatibilities`
+# still shows it on demand.
+[future-incompat-report]
+frequency = "never"

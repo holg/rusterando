@@ -23,6 +23,17 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use esp_idf_svc::sys::{self, bsp, esp};
 
+/// What this device reports as its arch on the print channel: the server
+/// stages one update image per arch (artifacts/printer/<arch>/). The
+/// esp_hosted 2.x build (BOARD=tab5-hosted2) is its own arch: neither image
+/// runs on the other's C6 firmware.
+pub const ARCH: &str = match option_env!("KDS_ARCH") {
+    Some(arch) => arch,
+    None => "esp32p4",
+};
+/// The device on the test receipt.
+pub const MODEL: &str = "Tab5";
+
 /// E2.P7: battery charging enable.
 const CHARGE_EN: u32 = bsp::esp_io_expander_pin_num_t_IO_EXPANDER_PIN_NUM_7;
 /// E2.P5: fast charging, active low.
@@ -117,7 +128,7 @@ pub fn power_off() {
 
 /// This device's name on the server and on the Start page: `KITCHEN_SLUG`
 /// if built with one, else `tab5-` and the last three bytes of the chip's
-/// MAC (`tab5-e2d6d8`), so one image fits every Tab5.
+/// MAC (`tab5-ddeeff`), so one image fits every Tab5.
 pub fn device_name() -> &'static str {
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     NAME.get_or_init(|| {

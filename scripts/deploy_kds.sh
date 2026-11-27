@@ -18,8 +18,10 @@
 #      systemd units + udev rule from systemd/kds/ (first deploy: --setup).
 #   4. Restarts rusterando-kds and tails its journal.
 #
-# Board access: ssh alias `davidspizzeria-kds` (root), override with
-# KDS_SSH_HOST=root@192.168.178.151.
+# Board access: KDS_SSH_HOST — an ssh alias or root@<board IP>, e.g.
+# KDS_SSH_HOST=root@192.0.2.151. Taken from the environment, else from the
+# KDS_SSH_HOST= line of .env in the repo root (only that line is read, the
+# file is not sourced). Unset in both: the script stops before using SSH.
 #
 # Usage:
 #   ./scripts/deploy_kds.sh                 # build + deploy, with confirm
@@ -44,14 +46,13 @@ for a in "$@"; do
     --setup)           DO_SETUP=1 ;;
     --refresh-sysroot) REFRESH_SYSROOT=1 ;;
     -h|--help)
-      sed -n '2,33p' "$0" | sed 's|^# \{0,1\}||'
+      sed -n '2,35p' "$0" | sed 's|^# \{0,1\}||'
       exit 0
       ;;
     *) echo "unknown arg: $a (try --help)" >&2; exit 2 ;;
   esac
 done
 
-KDS_SSH_HOST="${KDS_SSH_HOST:-davidspizzeria-kds}"
 TARGET_TRIPLE="armv7-unknown-linux-gnueabihf"
 CROSS_PREFIX="armv7-unknown-linux-gnueabihf"
 MANIFEST="crates/rusterando-printer/Cargo.toml"
@@ -76,6 +77,22 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 SYSROOT="$REPO_ROOT/tmp/mp135-sysroot"
 
+# One KEY=value line from .env (optional `export `, quotes stripped); the
+# file is never sourced.
+env_value() {
+  [ -f "$REPO_ROOT/.env" ] || return 0
+  sed -n "s/^\(export \)\{0,1\}$1=//p" "$REPO_ROOT/.env" | tail -1 | tr -d '\r' \
+    | sed -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+}
+KDS_SSH_HOST="${KDS_SSH_HOST:-$(env_value KDS_SSH_HOST)}"
+# Called before the first SSH use (a --build-only run with a ready sysroot
+# needs no board).
+need_host() {
+  [ -n "$KDS_SSH_HOST" ] && return 0
+  err "set KDS_SSH_HOST (ssh alias of the kitchen board, or root@<IP>) in the environment or in .env"
+  exit 2
+}
+
 # Board libraries the display build links against (plus what they pull
 # in, for -rpath-link). Copied from the board so the sonames match exactly.
 BOARD_LIBS="usr/lib/libinput.so.10* usr/lib/libxkbcommon.so.0* lib/libudev.so.1*
@@ -87,6 +104,7 @@ BOARD_LIBS="usr/lib/libinput.so.10* usr/lib/libxkbcommon.so.0* lib/libudev.so.1*
 prepare_sysroot() {
   if [ "$REFRESH_SYSROOT" -eq 1 ] || [ ! -e "$SYSROOT/usr/lib/libinput.so.10" ] \
       || [ ! -e "$SYSROOT/usr/lib/libfontconfig.so.1" ]; then
+    need_host
     say "copying board libraries from ${KDS_SSH_HOST} into tmp/mp135-sysroot"
     mkdir -p "$SYSROOT"
     # shellcheck disable=SC2086
@@ -117,7 +135,7 @@ EOF
 }
 
 echo
-say "rusterando kitchen display → ${KDS_SSH_HOST}"
+say "rusterando kitchen display → ${KDS_SSH_HOST:-(KDS_SSH_HOST not set)}"
 
 # ----- 1. build -----
 if [ "$DO_BUILD" -eq 1 ]; then
@@ -172,6 +190,7 @@ if [ "$DO_DEPLOY" -eq 0 ]; then
 fi
 
 # ----- 3. reachability -----
+need_host
 say "checking ${KDS_SSH_HOST}"
 if ! ssh -o ConnectTimeout=8 "$KDS_SSH_HOST" true 2>/dev/null; then
   err "cannot reach ${KDS_SSH_HOST} over SSH"

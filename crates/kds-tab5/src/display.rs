@@ -1,9 +1,10 @@
-//! The Tab5's 5" MIPI-DSI panel through Espressif's board package: it detects
-//! which of the three panel variants is fitted, sets up DSI and the backlight.
+//! The MIPI-DSI panel through the board package, which sets up DSI and the
+//! backlight. Tab5: Espressif's package detects which of three 5" panel
+//! variants is fitted, 720×1280 portrait. JC1060P470: our package
+//! (boards/jc1060p470/bsp), JD9165 7" 1024×600 landscape.
 //!
-//! The panel is 720×1280 portrait, RGB565. Frames are drawn whole from a
-//! buffer in PSRAM; the board package copies them into the panel's own frame
-//! buffer with the 2D-DMA engine.
+//! RGB565. Frames are drawn whole from a buffer in PSRAM; the board package
+//! copies them into the panel's own frame buffer with the 2D-DMA engine.
 
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -18,7 +19,12 @@ pub const HEIGHT: usize = bsp::BSP_LCD_V_RES as usize;
 /// 15 % → 151–163 mA (the rest is processor, Wi-Fi and panel). Clocking the
 /// processor down would save little (60 % at 180 MHz: 198 mA) and stops the
 /// picture stream to the panel, so it stays at 360 MHz (sdkconfig.defaults).
+#[cfg(not(feature = "jc1060p470"))]
 pub const BRIGHTNESS: i32 = 60;
+/// JC1060P470: on mains power, so full brightness — constantly on, without
+/// PWM on the backlight converter's enable pin.
+#[cfg(feature = "jc1060p470")]
+pub const BRIGHTNESS: i32 = 100;
 /// Backlight after a while without anything happening (%).
 pub const DIMMED: i32 = 15;
 
@@ -38,6 +44,10 @@ pub fn set_brightness(percent: i32) {
 pub struct Display {
     panel: bsp::esp_lcd_panel_handle_t,
 }
+
+// SAFETY: created on the main task, then moved to the UI thread, which is
+// the only one drawing; the panel driver keeps no thread-bound state.
+unsafe impl Send for Display {}
 
 impl Display {
     /// Bring up panel and backlight. Needs `board::init` first (I2C bus).

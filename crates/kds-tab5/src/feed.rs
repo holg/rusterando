@@ -14,8 +14,9 @@
 
 use std::collections::VecDeque;
 use std::ffi::{CStr, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -31,10 +32,19 @@ use kitchen_protocol::{ClientMessage, KitchenEvent};
 use crate::ui::UiMsg;
 
 pub const PASSWORD: Option<&str> = option_env!("KITCHEN_PASSWORD");
+/// The shop server, without trailing slash. No default: empty when not
+/// compiled in (demo builds, which never talk to a server).
 pub const SHOP_URL: &str = match option_env!("SHOP_URL") {
     Some(url) => url,
-    None => "https://davidspizzeria.de",
+    None => "",
 };
+// A kitchen build (password compiled in) without SHOP_URL would talk to the
+// wrong host — and could never be updated over the air, since the update
+// comes from that same server. Refuse to build it.
+const _: () = assert!(
+    !(PASSWORD.is_some() && SHOP_URL.is_empty()),
+    "SHOP_URL required when KITCHEN_PASSWORD is set (tmp/tab5-wifi.env)"
+);
 /// Reconnect delay after the feed dropped.
 const RETRY: Duration = Duration::from_secs(5);
 /// After a refused login: don't hammer the server.
@@ -47,6 +57,27 @@ const TAP_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 /// The Küche session (the `Cookie` header value), shared by the feed, the
 /// action sender and the print channel.
 pub type Session = Arc<Mutex<Option<String>>>;
+
+/// The session, once the feed has started: for requests made outside the
+/// feed's threads (the Start page's "Testdruck").
+static SESSION: OnceLock<Session> = OnceLock::new();
+
+/// The feed is connected to the server (the LoRa relay's role: online, it
+/// passes the board on; offline, it takes it).
+static ONLINE: AtomicBool = AtomicBool::new(false);
+
+#[allow(dead_code)]
+pub fn is_online() -> bool {
+    ONLINE.load(Ordering::Relaxed)
+}
+
+/// A tap made on another device, relayed over LoRa: delivered with this
+/// device's session. As `send_action`; `Err` = server not reachable.
+#[allow(dead_code)]
+pub fn deliver_now(msg: &ClientMessage) -> Result<Option<String>> {
+    let session = SESSION.get().ok_or_else(|| anyhow!("no session"))?;
+    deliver(session, msg)
+}
 
 /// The session cookie is kept across restarts (valid for a year), so a
 /// restart goes straight to the feed instead of logging in again.
@@ -69,6 +100,7 @@ pub fn start(
         .and_then(|s| s.get_str(KEY_COOKIE, &mut buf).ok().flatten())
         .map(str::to_string);
     let session: Session = Arc::new(Mutex::new(saved));
+    let _ = SESSION.set(session.clone());
     let store = Arc::new(Mutex::new(store));
     let feed_session = session.clone();
     let action_session = session.clone();
@@ -250,9 +282,24 @@ fn feed_loop(
                 }
             }
         }
+        ONLINE.store(false, Ordering::Relaxed);
         let _ = ui.send(UiMsg::Event(kds_ui::Event::Connected(false)));
         std::thread::sleep(RETRY);
     }
+}
+
+/// The Tab5 and the 7" can drive the e-ink frame (eink.rs): the feed also
+/// asks for the picture's tag (`KitchenEvent::Picture`, kitchen-protocol
+/// 2.4) and says which device it is — the server sends the tag only to the
+/// device switched on /admin/drucker. An older server ignores both. Not the
+/// Cardputer.
+#[cfg(not(feature = "cardputer"))]
+fn feed_query() -> String {
+    format!("?picture=1&device={}", crate::board::device_name())
+}
+#[cfg(feature = "cardputer")]
+fn feed_query() -> String {
+    String::new()
 }
 
 /// Read the event stream until it ends; forward every event to the UI.
@@ -263,7 +310,7 @@ fn read_feed(
     on_connect: impl FnOnce(),
 ) -> Result<()> {
     let headers = [("cookie", cookie), ("accept", "text/event-stream")];
-    let url = format!("{SHOP_URL}/api/kds/feed");
+    let url = format!("{SHOP_URL}/api/kds/feed{}", feed_query());
     let request = client.request(Method::Get, &url, &headers)?;
     let mut response = request.submit()?;
     let status = response.status();
@@ -272,6 +319,7 @@ fn read_feed(
     }
     log::info!("feed: connected");
     on_connect();
+    ONLINE.store(true, Ordering::Relaxed);
     ui.send(UiMsg::Event(kds_ui::Event::Connected(true)))?;
 
     let mut pending: Vec<u8> = Vec::new();
@@ -301,6 +349,11 @@ fn read_feed(
             continue; // keep-alive comment
         }
         if let Some(ev) = decode(&data) {
+            // Also over LoRa to a device without network (relay.rs).
+            #[cfg(not(feature = "jc1060p470"))]
+            if let kds_ui::Event::Board(board) = &ev {
+                crate::relay::board(board.clone());
+            }
             ui.send(UiMsg::Event(ev))?;
         }
     }
@@ -331,6 +384,14 @@ fn decode(data: &str) -> Option<kds_ui::Event> {
         }
         Ok(KitchenEvent::Shop(p)) => Some(kds_ui::Event::Shop(p)),
         Ok(KitchenEvent::Alert { title, text }) => Some(kds_ui::Event::Alert { title, text }),
+        // A new e-ink picture: the frame's business, not the screen's.
+        Ok(KitchenEvent::Picture { tag }) => {
+            #[cfg(not(feature = "cardputer"))]
+            crate::eink::announce(tag);
+            #[cfg(feature = "cardputer")]
+            let _ = tag;
+            None
+        }
         Ok(_) => None,
         Err(e) => {
             log::warn!("feed: undecodable event: {e}");
@@ -391,6 +452,13 @@ fn action_loop(actions: Receiver<ClientMessage>, ui: Sender<UiMsg>, session: Ses
                     }
                 }
                 Err(e) => {
+                    // No server, but a board over LoRa: the tap goes back
+                    // the same way (relay.rs), not into the wait.
+                    #[cfg(not(feature = "jc1060p470"))]
+                    if crate::relay::offer_action(msg.clone()) {
+                        queue.pop_front();
+                        continue;
+                    }
                     log::warn!("action: {e:#} ({} waiting)", queue.len());
                     if !announced {
                         announced = true;
@@ -448,6 +516,36 @@ fn send_action(cookie: &str, msg: &ClientMessage) -> Result<Option<String>> {
     let n = embedded_svc::utils::io::try_read_full(&mut response, &mut buf).map_err(|e| anyhow!("read: {:?}", e.0))?;
     let text = String::from_utf8_lossy(&buf[..n]).trim().to_string();
     Ok(Some(if text.is_empty() { format!("Server: Fehler {status}") } else { text }))
+}
+
+/// `GET {SHOP_URL}{path}` with the Küche session; the body, up to `max`
+/// bytes. Fails without a session (not logged in yet) or on any status but 2xx.
+pub fn get(path: &str, max: usize) -> Result<Vec<u8>> {
+    let cookie = SESSION
+        .get()
+        .and_then(|s| s.lock().ok()?.clone())
+        .ok_or_else(|| anyhow!("nicht angemeldet"))?;
+    let url = format!("{SHOP_URL}{path}");
+    let headers = [("cookie", cookie.as_str())];
+    let mut client = client(Duration::from_secs(20))?;
+    let request = client.request(Method::Get, &url, &headers)?;
+    let mut response = request.submit()?;
+    let status = response.status();
+    if !(200..300).contains(&status) {
+        bail!("Server: Fehler {status}");
+    }
+    let mut body = Vec::new();
+    let mut buf = [0u8; 2048];
+    loop {
+        let n = embedded_svc::io::Read::read(&mut response, &mut buf).map_err(|e| anyhow!("read: {e:?}"))?;
+        if n == 0 {
+            return Ok(body);
+        }
+        if body.len() + n > max {
+            bail!("Antwort größer als {max} B");
+        }
+        body.extend_from_slice(&buf[..n]);
+    }
 }
 
 fn urlencode(s: &str) -> String {

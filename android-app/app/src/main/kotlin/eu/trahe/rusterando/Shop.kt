@@ -25,7 +25,7 @@ import java.util.UUID
 data class Shop(
     val id: String,
     val name: String,
-    /** Without trailing slash. e.g. `https://davidspizzeria.de`. */
+    /** Without trailing slash. e.g. `https://shop.example.com`. */
     val baseUrl: String,
     val activeRole: Role,
     val credentials: Map<Role, String>,

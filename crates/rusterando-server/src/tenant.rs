@@ -1,7 +1,7 @@
 //! Tenancy mode detection — single-tenant (Model A) vs in-process
 //! multi-tenant (Model B). See `docs/multi_tenant.md`.
 //!
-//! Model A is the **fail-safe default**: a real shop (davidspizzeria.de) must
+//! Model A is the **fail-safe default**: a real shop (e.g. musterpizzeria.example) must
 //! never be dragged into multi-tenant mode by accident. Model B requires an
 //! unambiguous positive signal. This module owns the gate logic and produces
 //! the [`DeploymentInfo`] snapshot the admin diagnostics panel reads.
@@ -107,7 +107,7 @@ pub fn log_mode(info: &DeploymentInfo) {
     }
 }
 
-/// `sqlite:./data/davidspizzeria.db?foo=1` -> `davidspizzeria`.
+/// `sqlite:./data/musterpizzeria.db?foo=1` -> `musterpizzeria`.
 fn db_stem(db_url: &str) -> String {
     let path = db_url
         .trim_start_matches("sqlite:")
@@ -126,9 +126,9 @@ fn db_stem(db_url: &str) -> String {
 ///   1. explicit `ENV_GLOB` (operator override),
 ///   2. else, when a parent `ENV_FILE` is set, scope to ITS children:
 ///      `ENV_FILE=.env.rusterando` ⇒ `.env.rusterando*` — so the rusterando
-///      profile owns `.env.rusterando` + `.env.rusterando.flizza` + … and
-///      `.env.davids` / bare `.env` in the same dir are IGNORED (you run the
-///      real rusterando/flizza tenants in place without touching anything),
+///      profile owns `.env.rusterando` + `.env.rusterando.beispiel` + … and
+///      `.env.myshop` / bare `.env` in the same dir are IGNORED (you run the
+///      real rusterando/beispiel tenants in place without touching anything),
 ///   3. else the wide default `.env*`.
 fn env_glob_pattern() -> String {
     if let Some(g) = std::env::var("ENV_GLOB").ok().filter(|s| !s.is_empty()) {
@@ -203,10 +203,10 @@ pub struct Tenant {
     /// Resolved `DATABASE_URL` — the isolation key (distinct per tenant).
     pub database_url: String,
     /// The REAL env filename this tenant was loaded from (e.g.
-    /// `.env.rusterando.flizza`, NOT a reconstructed `.env.<slug>`). For
+    /// `.env.rusterando.beispiel`, NOT a reconstructed `.env.<slug>`). For
     /// diagnostics (`/__whoami`, the admin panel).
     pub env_file: String,
-    /// This tenant's own `PUBLIC_URL` (e.g. `https://flizza.rusterando.de`).
+    /// This tenant's own `PUBLIC_URL` (e.g. `https://beispiel.rusterando.de`).
     /// Parsed from its `.env` at load time, exactly like the passwords —
     /// reading the PROCESS env instead would hand every tenant the apex's
     /// URL, which is how the printed menu's QR code pointed at the showroom
@@ -358,7 +358,7 @@ pub fn valid_slug(s: &str) -> bool {
 }
 
 /// Build a tenant `slug` from its env file at `env_file` (the REAL filename,
-/// which may be a child like `.env.rusterando.flizza`, not `.env.<slug>`).
+/// which may be a child like `.env.rusterando.beispiel`, not `.env.<slug>`).
 /// Parses the env file into a LOCAL map (never mutates the process
 /// environment — that would clobber other tenants), opens its `DATABASE_URL`
 /// (WAL + 5s busy_timeout, matching the Model-A pool), and runs migrations.
@@ -472,13 +472,13 @@ pub enum TenantLoad {
 /// The tenant slug for an env filename.
 ///
 /// When a PARENT profile is active (`ENV_FILE=.env.rusterando`), a child file
-/// `.env.rusterando.flizza` yields the slug `flizza` (the label after the
+/// `.env.rusterando.beispiel` yields the slug `beispiel` (the label after the
 /// parent prefix) — so `.env.rusterando.*` are the rusterando tenants. The
 /// parent file itself (`.env.rusterando`) yields `rusterando`, which is an apex
 /// label and gets skipped as the landing/showroom.
 ///
-/// With NO parent, the slug is everything after `.env.` — so `.env.flizza` →
-/// `flizza`, and `.env.rusterando.flizza` → `rusterando.flizza` (rejected as
+/// With NO parent, the slug is everything after `.env.` — so `.env.beispiel` →
+/// `beispiel`, and `.env.rusterando.beispiel` → `rusterando.beispiel` (rejected as
 /// invalid, with a clear message: dots aren't allowed in a single-label slug).
 pub fn slug_from_filename(file: &str) -> String {
     let parent = std::env::var("ENV_FILE").ok().filter(|s| !s.is_empty());
@@ -550,7 +550,7 @@ pub async fn load_all_tenants(registry: &Tenants) -> Vec<TenantLoad> {
                      contains {bad:?}. A tenant slug must be a single DNS label \
                      (it becomes `<slug>.rusterando.de` + `data/<slug>.sqlite`). \
                      Rename the file to `.env.<single-label>` (e.g. \
-                     `.env.flizza`), or set its slug another way."
+                     `.env.beispiel`), or set its slug another way."
                 ),
             });
             continue;
@@ -590,12 +590,12 @@ pub async fn build_handles(pool: &SqlitePool, public_url: &str) -> TenantHandles
     use rusterando_frontend::branding::{ssr::load_branding, BrandingHandle};
     use rusterando_frontend::pages::seo::{build_restaurant_jsonld, JsonLdHandle};
     use rusterando_frontend::pages::settings::{
-        ssr::{i18n_enabled, orders_paused, theme as theme_ssr},
+        ssr::{i18n_enabled, orders_paused, theme as theme_ssr, theme_alt},
         I18nHandle, OrdersPausedHandle, ThemeHandle,
     };
     use rusterando_frontend::stripe::{ssr::load_mode, StripeModeHandle};
 
-    let theme = ThemeHandle::new(theme_ssr(pool).await);
+    let theme = ThemeHandle::new(theme_ssr(pool).await).with_alt(theme_alt(pool).await);
     let branding = BrandingHandle::new(load_branding(pool).await);
     let jsonld =
         JsonLdHandle::new(build_restaurant_jsonld(pool, &branding.get(), public_url).await);
@@ -720,7 +720,7 @@ fn is_apex_label(label: &str) -> bool {
 }
 
 /// Derive the tenant slug from a request's headers: `X-Tenant` (set by nginx),
-/// else the first label of the `Host` header (so `flizza.localhost:PORT` works
+/// else the first label of the `Host` header (so `beispiel.localhost:PORT` works
 /// header-less for local testing). Lowercased; empty when neither is present.
 /// Shared by the middleware AND `/__whoami` so they can never disagree.
 fn slug_from_headers(headers: &axum::http::HeaderMap) -> String {
@@ -788,7 +788,7 @@ pub async fn resolve_tenant(
 /// Hard host gate for the sys-admin area: `/sysadmin*` pages and the
 /// `/api/sysadmin_*` server fns exist ONLY on the apex host of a multi-tenant
 /// deployment (`rusterando.de`). Everywhere else — a tenant subdomain, a
-/// standalone shop like davidspizzeria.de, or an apex without a loaded
+/// standalone shop like musterpizzeria.example, or an apex without a loaded
 /// parent — they 404 before Leptos ever renders a form. The server fns also
 /// re-check this in-context (defence in depth), but the route must not even
 /// exist off the apex. Register INSIDE `resolve_tenant` so the resolved
@@ -917,8 +917,8 @@ mod tests {
 
     #[test]
     fn db_stem_strips_prefix_and_query() {
-        assert_eq!(db_stem("sqlite:./data/davidspizzeria.db"), "davidspizzeria");
-        assert_eq!(db_stem("sqlite://data/flizza.sqlite?x=1"), "flizza");
+        assert_eq!(db_stem("sqlite:./data/musterpizzeria.db"), "musterpizzeria");
+        assert_eq!(db_stem("sqlite://data/beispiel.sqlite?x=1"), "beispiel");
         assert_eq!(db_stem("sqlite:"), "rusterando");
     }
 
@@ -928,26 +928,26 @@ mod tests {
         assert!(is_non_profile_env(".env.demo.example"));
         assert!(is_non_profile_env(".env.bak"));
         assert!(!is_non_profile_env(".env"));
-        assert!(!is_non_profile_env(".env.davids"));
-        assert!(!is_non_profile_env(".env.rusterando.flizza"));
+        assert!(!is_non_profile_env(".env.myshop"));
+        assert!(!is_non_profile_env(".env.rusterando.beispiel"));
     }
 
     #[test]
     fn slug_derivation_parent_aware() {
         // No parent: slug is everything after `.env.`
         assert_eq!(
-            slug_from_filename_with_parent(".env.flizza", None),
-            "flizza"
+            slug_from_filename_with_parent(".env.beispiel", None),
+            "beispiel"
         );
         assert_eq!(
-            slug_from_filename_with_parent(".env.rusterando.flizza", None),
-            "rusterando.flizza" // dotted -> later rejected by valid_slug
+            slug_from_filename_with_parent(".env.rusterando.beispiel", None),
+            "rusterando.beispiel" // dotted -> later rejected by valid_slug
         );
         // Parent `.env.rusterando`: child yields the label after the prefix.
         let p = Some(".env.rusterando");
         assert_eq!(
-            slug_from_filename_with_parent(".env.rusterando.flizza", p),
-            "flizza"
+            slug_from_filename_with_parent(".env.rusterando.beispiel", p),
+            "beispiel"
         );
         // The parent file itself -> "rusterando" (an apex label -> skipped).
         assert_eq!(
@@ -959,9 +959,9 @@ mod tests {
 
     #[test]
     fn valid_slug_rejects_dots_and_traversal() {
-        assert!(valid_slug("flizza"));
+        assert!(valid_slug("beispiel"));
         assert!(valid_slug("neue-doener"));
-        assert!(!valid_slug("rusterando.flizza")); // dot
+        assert!(!valid_slug("rusterando.beispiel")); // dot
         assert!(!valid_slug("../etc")); // path traversal
         assert!(!valid_slug("")); // empty
     }

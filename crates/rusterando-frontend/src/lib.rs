@@ -20,6 +20,7 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<i18n::GetI18nEnabled>();
     leptos::server_fn::axum::register_explicit::<stripe::GetStripeMode>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListMenu>();
+    leptos::server_fn::axum::register_explicit::<pages::menu::GetMenuItem>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListAdminMenu>();
     leptos::server_fn::axum::register_explicit::<pages::menu::ListMenuCategory>();
     leptos::server_fn::axum::register_explicit::<pages::lieferservice::LoadDeliveryArea>();
@@ -37,6 +38,7 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::cart::GetCart>();
     leptos::server_fn::axum::register_explicit::<pages::cart::AddToCart>();
     leptos::server_fn::axum::register_explicit::<pages::cart::UpdateCartLine>();
+    leptos::server_fn::axum::register_explicit::<pages::cart::ReplaceCartLine>();
     leptos::server_fn::axum::register_explicit::<pages::cart::ClearCart>();
     leptos::server_fn::axum::register_explicit::<pages::order::LoadCheckoutContext>();
     leptos::server_fn::axum::register_explicit::<pages::order::PlaceOrder>();
@@ -117,11 +119,27 @@ pub fn register_server_fns() {
     leptos::server_fn::axum::register_explicit::<pages::settings::UpdateSetting>();
     leptos::server_fn::axum::register_explicit::<pages::admin::printer_status::ListPiStatus>();
     leptos::server_fn::axum::register_explicit::<pages::admin::printer_status::SetPiUpdateArmed>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::printer_status::SetDeviceEink>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::printer_status::ForgetKitchenClient>(
+    );
+    leptos::server_fn::axum::register_explicit::<pages::admin::lora::LabLoraEnabled>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::lora::ListLora>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::lora::SendLora>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::next_prices::SavePriceTemplate>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::next_prices::CapPizzaPrices>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::next_prices::LoadPriceTemplate>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::next_prices::DeletePriceTemplate>();
     leptos::server_fn::axum::register_explicit::<pages::admin::printer_admin::PrintSampleReceipt>();
     leptos::server_fn::axum::register_explicit::<pages::home::HomeDeliveryInfoFn>();
+    leptos::server_fn::axum::register_explicit::<pages::legal::GetLegalInfo>();
+    leptos::server_fn::axum::register_explicit::<pages::home_content::ListOfferItemChoices>();
+    leptos::server_fn::axum::register_explicit::<pages::daily_offer::GetDailyOffer>();
+    leptos::server_fn::axum::register_explicit::<pages::daily_offer::AddDailyOffer>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::daily_offer::GetDailyOfferAdmin>();
+    leptos::server_fn::axum::register_explicit::<pages::admin::daily_offer::SaveDailyOffer>();
     leptos::server_fn::axum::register_explicit::<pages::kitchen::login::KitchenLogin>();
-    leptos::server_fn::axum::register_explicit::<pages::kitchen::board::ListKitchenOrders>();
-    leptos::server_fn::axum::register_explicit::<pages::kitchen::board::KitchenAdvance>();
+    leptos::server_fn::axum::register_explicit::<pages::kitchen::board::LoadKitchenBoard>();
+    leptos::server_fn::axum::register_explicit::<pages::kitchen::board::KitchenMove>();
     leptos::server_fn::axum::register_explicit::<pages::driver::login::DriverLogin>();
     leptos::server_fn::axum::register_explicit::<pages::driver::board::ListDriverOrders>();
     leptos::server_fn::axum::register_explicit::<pages::driver::board::DriverAdvance>();

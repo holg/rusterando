@@ -8,17 +8,17 @@
 //! per-suburb zone routing), OR (B) the resolved lat/lon falls inside
 //! one of the configured `extra_circles`. A 30 km sanity wall in
 //! classify_zone is a separate paranoia guard against Nominatim
-//! mis-resolving to a homonym (e.g. "Lüdinghausen, Sachsen-Anhalt").
+//! mis-resolving to a homonym (e.g. "Musterstadt, Sachsen-Anhalt").
 //!
 //! ## Why this shape
 //!
-//! Geography ignores municipal boundaries. A far-edge Bauerschaft of
-//! Seppenrade may sit at 5 km from the shop while an even farther
-//! Bauerschaft of Nordkirchen sits at 4 km — yet the public promise
-//! "wir liefern in Lüdinghausen" must keep its word for ALL addresses
-//! Nominatim resolves under Lüdinghausen. The name-based layer (A)
+//! Geography ignores municipal boundaries. A far-edge hamlet of
+//! Nebendorf (part of Musterstadt) may sit at 5 km from the shop while a
+//! hamlet of neighbouring Beispieldorf sits at 4 km — yet the public promise
+//! "wir liefern in Musterstadt" must keep its word for ALL addresses
+//! Nominatim resolves under Musterstadt. The name-based layer (A)
 //! delivers that promise. The distance-based layer (B) handles the
-//! outliers David chooses to serve outside the named municipalities,
+//! outliers the admin chooses to serve outside the named municipalities,
 //! one circle at a time.
 //!
 //! ## Why this is a single JSON setting, not tables
@@ -46,10 +46,10 @@ pub fn normalize(s: &str) -> String {
         .replace('ß', "ss");
     let first = folded.split(',').next().unwrap_or("");
     // Drop parenthesised qualifiers: Nominatim labels a town centre as
-    // `city_district = "Lüdinghausen (Stadt)"`, while admins (reasonably)
-    // configure the route as "Lüdinghausen". Without this the centre never
+    // `city_district = "Musterstadt (Stadt)"`, while admins (reasonably)
+    // configure the route as "Musterstadt". Without this the centre never
     // matched and every town address fell through to the "*" wildcard —
-    // on Davids' config that was the Bauerschaften zone with the higher
+    // on an existing single-shop deployment that was the Feldmark zone with the higher
     // fee (81 of 95 cached addresses had landed there).
     let mut out = String::with_capacity(first.len());
     let mut depth = 0usize;
@@ -84,8 +84,8 @@ pub struct SuburbRoute {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServedMunicipality {
     /// Names Nominatim might return for this municipality. Folded for
-    /// matching, so adding "Lüdinghausen" already covers "LÜDINGHAUSEN",
-    /// "luedinghausen", " Lüdinghausen, NRW", etc. Multiple entries
+    /// matching, so adding "Überstadt" already covers "ÜBERSTADT",
+    /// "ueberstadt", " Überstadt, NRW", etc. Multiple entries
     /// only needed when OSM genuinely uses different canonical names
     /// (rare).
     #[serde(default)]
@@ -98,7 +98,7 @@ pub struct ServedMunicipality {
 
 /// One explicit "I serve this spot even though Nominatim doesn't put
 /// it in any of my `served_municipalities`" rule. Useful for selected
-/// Bauerschaften David chooses to extend the offer to.
+/// outlying hamlets the admin chooses to extend the offer to.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExtraCircle {
     /// Admin-facing label. Free-text; not used in matching.
@@ -267,7 +267,7 @@ pub async fn set_delivery_areas(areas: DeliveryAreas) -> Result<(), ServerFnErro
     referenced.dedup();
 
     // Reject if any referenced zone is missing / inactive — protect
-    // David from saving a config that would silently reject customers.
+    // the admin from saving a config that would silently reject customers.
     for zid in &referenced {
         let row: Option<(i64,)> =
             sqlx::query_as("SELECT 1 FROM delivery_zones WHERE id = ?1 AND is_active = 1")
@@ -446,35 +446,35 @@ mod tests {
 
     #[test]
     fn normalize_drops_parenthesised_qualifiers() {
-        assert_eq!(normalize("Lüdinghausen (Stadt)"), "luedinghausen");
-        assert_eq!(normalize("Lüdinghausen"), "luedinghausen");
-        assert_eq!(normalize("Bork (Selm)"), "bork");
+        assert_eq!(normalize("Überstadt (Stadt)"), "ueberstadt");
+        assert_eq!(normalize("Überstadt"), "ueberstadt");
+        assert_eq!(normalize("Nebendorf (Beispieldorf)"), "nebendorf");
         assert_eq!(normalize("Nord (Ost) West"), "nord west");
     }
 
     #[test]
     fn town_centre_routes_to_its_own_zone_not_wildcard() {
         let m = ServedMunicipality {
-            match_names: vec!["Lüdinghausen".into()],
+            match_names: vec!["Musterstadt".into()],
             zone_routing: vec![
                 SuburbRoute {
-                    match_suburb: "Seppenrade".into(),
-                    zone_id: "dz-seppenrade".into(),
+                    match_suburb: "Nebendorf".into(),
+                    zone_id: "dz-nebendorf".into(),
                 },
                 SuburbRoute {
-                    match_suburb: "Lüdinghausen".into(),
-                    zone_id: "dz-luedinghausen".into(),
+                    match_suburb: "Musterstadt".into(),
+                    zone_id: "dz-musterstadt".into(),
                 },
                 SuburbRoute {
                     match_suburb: "*".into(),
-                    zone_id: "dz-bauerschaften".into(),
+                    zone_id: "dz-feldmark".into(),
                 },
             ],
         };
-        let r = route_suburb(&m.zone_routing, "Lüdinghausen (Stadt)").unwrap();
-        assert_eq!(r.zone_id, "dz-luedinghausen");
-        let r = route_suburb(&m.zone_routing, "Berenbrock").unwrap();
-        assert_eq!(r.zone_id, "dz-bauerschaften");
+        let r = route_suburb(&m.zone_routing, "Musterstadt (Stadt)").unwrap();
+        assert_eq!(r.zone_id, "dz-musterstadt");
+        let r = route_suburb(&m.zone_routing, "Kleinhof").unwrap();
+        assert_eq!(r.zone_id, "dz-feldmark");
     }
 
     #[test]

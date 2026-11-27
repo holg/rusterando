@@ -55,6 +55,9 @@ pub enum Event {
     Shop(ShopPanel),
     /// Admin alert: flash now, with this title and text.
     Alert { title: String, text: String },
+    /// No network of our own: the board comes over LoRa from this device
+    /// (kds-tab5 relay.rs); `None` when that stopped.
+    Relay(Option<String>),
 }
 
 /// What [`apply`] asks the host to do beyond re-rendering.
@@ -67,6 +70,12 @@ pub struct Outcome {
 }
 
 impl Core {
+    /// No network of its own, but the board comes over LoRa: connected
+    /// after all (amber), not offline (red).
+    pub fn lora(&self) -> bool {
+        !self.online && self.relay_from.is_some() && self.board.is_some()
+    }
+
     /// Unix seconds now, by the server's clock (ours until the first
     /// snapshot).
     pub fn now(&self) -> i64 {
@@ -86,6 +95,8 @@ pub struct Core {
     /// skew waiting times (that showed "seit 29880964 min" = since 1970).
     pub server_clock: Option<(i64, Instant)>,
     pub online: bool,
+    /// Offline, but the board comes over LoRa from this device.
+    pub relay_from: Option<String>,
     /// Order id of the open detail view.
     pub detail: Option<String>,
     /// Sample data, moves applied locally (no server).
@@ -103,8 +114,12 @@ pub struct Core {
     board_seen: bool,
     /// Shop state for the "Öffnungszeiten" page and the header chip.
     pub shop: Option<ShopPanel>,
-    /// 0 Start · 1 Küche (default) · 2 Öffnungszeiten.
+    /// 0 Start · 1 Küche (default) · 2 Öffnungszeiten · 3 Terminal (only
+    /// with [`Core::terminal`]).
     pub page: i32,
+    /// The host has a terminal page (the Tab5: its keyboard, phone and
+    /// LoRa/LAN modules). Off on the board and in the browser.
+    pub terminal: bool,
     /// Stepper values; `None` = follow today's hours.
     pick_open: Option<String>,
     pick_close: Option<String>,
@@ -117,7 +132,9 @@ pub struct Core {
 }
 
 impl Core {
-    fn touched(&mut self) {
+    /// Someone is using the screen (touch, or the host's keyboard): a new
+    /// order doesn't switch pages under them for a while.
+    pub fn touched(&mut self) {
         self.last_activity = Some(Instant::now());
     }
 
@@ -208,7 +225,7 @@ pub fn wire(w: &KitchenWindow, host: Rc<dyn Host>, send: impl Fn(ClientMessage) 
     w.on_go_page(move |page| {
         let Some(w) = weak.upgrade() else { return };
         with(|c| {
-            c.page = page.clamp(0, 2);
+            c.page = page.clamp(0, if c.terminal { 3 } else { 2 });
             c.detail = None;
             c.touched();
         });
@@ -308,8 +325,9 @@ pub fn apply(w: &KitchenWindow, ev: Event, saver_shown: bool) -> Outcome {
             if up {
                 // A new session: what the last one showed may come from
                 // another server (or a test). Only this server's board
-                // and shop state count from now on.
+                // and shop state count from now on (none relayed over LoRa).
                 c.board = None;
+                c.relay_from = None;
                 c.shop = None;
                 c.detail = None;
                 c.connected_at = Some(Instant::now());
@@ -322,6 +340,9 @@ pub fn apply(w: &KitchenWindow, ev: Event, saver_shown: bool) -> Outcome {
             } else {
                 c.connected_at = None;
             }
+        }
+        Event::Relay(from) => {
+            c.relay_from = from;
         }
         Event::Alert { title, text } => {
             // Admin "Alarm auslösen": out of the screensaver, onto the
@@ -466,17 +487,20 @@ fn render_core(w: &KitchenWindow, c: &Core) {
 
     w.set_clock(Local::now().format("%H:%M").to_string().into());
     w.set_online(c.online);
+    w.set_lora(c.lora());
     w.set_have_board(c.board.is_some());
     let (banner, warn) = if !c.online {
-        if c.board.is_some() {
-            ("Keine Verbindung zum Server, letzter Stand", false)
-        } else {
-            ("Verbinde mit dem Server …", false)
+        match &c.relay_from {
+            Some(from) if c.board.is_some() => {
+                (format!("Über LoRa verbunden – die Bestellungen kommen von {from}"), true)
+            }
+            _ if c.board.is_some() => ("Keine Verbindung zum Server, letzter Stand".into(), false),
+            _ => ("Verbinde mit dem Server …".into(), false),
         }
     } else if c.board.is_none() && c.connected_at.is_some_and(|t| t.elapsed() >= NO_BOARD_AFTER) {
-        ("Verbunden – Server sendet keine Bestellungen (Server-Update nötig)", true)
+        ("Verbunden – Server sendet keine Bestellungen (Server-Update nötig)".into(), true)
     } else {
-        ("", false)
+        (String::new(), false)
     };
     w.set_banner(banner.into());
     w.set_banner_warn(warn);
@@ -645,7 +669,8 @@ fn fill_detail(w: &KitchenWindow, o: &BoardOrder, now: i64, cancel_armed: bool) 
 }
 
 /// A detail-view button: label + target status.
-type Action = Option<(&'static str, BoardStatus)>;
+/// A button: its label and the status it moves to.
+pub type Action = Option<(&'static str, BoardStatus)>;
 
 /// Start page date line ("Dienstag, 6. Oktober").
 fn date_text() -> String {
@@ -669,6 +694,7 @@ fn date_text() -> String {
 /// Header chip + "Öffnungszeiten" page from the last [`ShopPanel`].
 fn fill_shop(w: &KitchenWindow, c: &Core) {
     w.set_page(c.page);
+    w.set_terminal_enabled(c.terminal);
     let (notice, ok) = c
         .notice
         .as_ref()
@@ -683,8 +709,13 @@ fn fill_shop(w: &KitchenWindow, c: &Core) {
     w.set_pick_close(pick_close.into());
     let Some(p) = &c.shop else {
         w.set_shop_light(-1);
-        w.set_shop_short("Shop …".into());
-        w.set_shop_status("Noch kein Stand vom Server".into());
+        if c.lora() {
+            w.set_shop_short("Über LoRa".into());
+            w.set_shop_status("Über LoRa kommen nur die Bestellungen, nicht der Öffnungsstatus".into());
+        } else {
+            w.set_shop_short("Shop …".into());
+            w.set_shop_status("Noch kein Stand vom Server".into());
+        }
         w.set_today_text(SharedString::new());
         return;
     };
@@ -825,7 +856,7 @@ fn min_to_hhmm(total: i64) -> String {
 }
 
 /// (primary, back) button for an order in `status`.
-fn actions(status: BoardStatus, delivery: bool) -> (Action, Action) {
+pub fn actions(status: BoardStatus, delivery: bool) -> (Action, Action) {
     use BoardStatus::*;
     match status {
         Received => (Some(("Starten", Preparing)), None),
@@ -842,14 +873,14 @@ fn actions(status: BoardStatus, delivery: bool) -> (Action, Action) {
     }
 }
 
-struct Timing {
+pub struct Timing {
     /// "19:30" (pre-order) or "sofort".
-    when: String,
+    pub when: String,
     /// Card's right-hand figure: "12 min", "in 25 min", "fällig".
-    age: String,
-    urgency: i32,
-    scheduled: bool,
-    waited_min: i64,
+    pub age: String,
+    pub urgency: i32,
+    pub scheduled: bool,
+    pub waited_min: i64,
 }
 
 /// Waiting time for ASAP orders, time-to-due for pre-orders and delivery
@@ -857,7 +888,7 @@ struct Timing {
 /// "DD.MM. HH:MM" for another; it is resolved against the order's date, so
 /// an order left over from yesterday reads "fällig" with its date, not
 /// "in 23 min". The screen runs in the shop's TZ.
-fn timing(o: &OrderForKitchen, now: i64) -> Timing {
+pub fn timing(o: &OrderForKitchen, now: i64) -> Timing {
     let waited_min = (now - o.created_at_unix).max(0) / 60;
     match o.pickup_time_label.as_deref().filter(|l| !l.is_empty()) {
         Some(label) => {
@@ -924,7 +955,7 @@ fn due_at(label: &str, created_at_unix: i64) -> Option<DateTime<Local>> {
 }
 
 /// The big number on the Bon: the last segment of "DP-1105-0012".
-fn short_number(o: &OrderForKitchen) -> String {
+pub fn short_number(o: &OrderForKitchen) -> String {
     o.display_label
         .rsplit('-')
         .next()
@@ -933,7 +964,7 @@ fn short_number(o: &OrderForKitchen) -> String {
         .unwrap_or_else(|| o.display_number.to_string())
 }
 
-fn is_delivery(o: &OrderForKitchen) -> bool {
+pub fn is_delivery(o: &OrderForKitchen) -> bool {
     matches!(o.channel, OrderChannel::Delivery { .. })
 }
 

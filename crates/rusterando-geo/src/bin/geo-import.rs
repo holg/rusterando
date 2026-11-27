@@ -8,12 +8,12 @@
 //!
 //! # a tenant, from its env file (GEO_* + DATABASE_URL)
 //! geo-import import --env-file .env --download
-//! geo-import import --tenant flizza --source ./data/geo/nrw/05558024.txt
+//! geo-import import --tenant beispiel --source ./data/geo/nrw/05999001.txt
 //!
 //! # any shop, purely from parameters, into any SQLite file
-//! geo-import import --source ./data/geo/nrw/05558024.txt \
-//!     --ags 05558024 --postcode-map 05558024:59348:Lüdinghausen \
-//!     --center 51.7701,7.4419 --radius-m 6000 --db sqlite:./data/newshop.sqlite
+//! geo-import import --source ./data/geo/nrw/05999001.txt \
+//!     --ags 05999001 --postcode-map 05999001:99999:Musterstadt \
+//!     --center 51.7680,7.4336 --radius-m 6000 --db sqlite:./data/newshop.sqlite
 //!
 //! geo-import import --sample                 # built-in fixture, offline
 //! ```
@@ -204,7 +204,7 @@ async fn cmd_import(a: ImportArgs) -> anyhow::Result<()> {
     let cfg = match GeoConfig::from_vars(&vars) {
         Some(c) => c,
         None if a.sample => {
-            println!("no GEO_* config — using the fixture's own (Lüdinghausen)");
+            println!("no GEO_* config — using the fixture's own (Musterstadt)");
             sample::config()
         }
         None => anyhow::bail!(

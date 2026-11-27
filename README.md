@@ -26,8 +26,8 @@ A neighbourhood pizzeria, a takeaway shop, or a small chain that:
 - runs on one box (a €5/month VPS is plenty for hundreds of orders a day),
 - prefers AGPL self-hosting to a SaaS vendor.
 
-Rusterando is the platform Davids Pizzeria has been running on since early 2026.
-The codebase was generalised and re-licenced once it became clear other shops
+Rusterando grew out of one real pizzeria's site (the reference deployment),
+which has been running on it since early 2026. The codebase was generalised and re-licenced once it became clear other shops
 could use the same shape.
 
 ## Highlights
@@ -39,8 +39,8 @@ could use the same shape.
   No Postgres, no Redis, no JS toolchain, no container runtime. ~72 MB
   release binary that boots in milliseconds.
 - **One source tree, many shops.** Each deployment is a single
-  `.env.<profile>` file. `./scripts/deploy_to_server.sh -e davids full`
-  ships Davids Pizzeria; `./scripts/deploy_to_server.sh -e demo full`
+  `.env.<profile>` file. `./scripts/deploy_to_server.sh -e myshop full`
+  ships the reference shop; `./scripts/deploy_to_server.sh -e demo full`
   ships rusterando.de from the *same checkout*, on the *same VPS*,
   to a different port + domain + DB. Add a third shop in five minutes:
   copy `.env.demo.example` → `.env.<shop>`, point an nginx vhost at
@@ -93,7 +93,7 @@ could use the same shape.
 
 ## Screenshots
 
-(*Not yet — the davidspizzeria.de live site is the reference.*)
+(*Not yet — the rusterando.de demo install shows it live.*)
 
 ## Features
 
@@ -286,16 +286,16 @@ no per-shop overlay scripts. The same source tree powers every deployment;
 only `.env` changes.
 
 For multiple shops on one VPS, name the files `.env.<profile>` (e.g.
-`.env.davids`, `.env.demo`) and pass `-e <profile>` to the deploy
+`.env.myshop`, `.env.demo`) and pass `-e <profile>` to the deploy
 script. See [Multi-tenant on one VPS](#multi-tenant-on-one-vps) below.
 
 ### Naming + paths
 
-| Key | Default | Example (Davids) | Meaning |
+| Key | Default | Example (`myshop`) | Meaning |
 |---|---|---|---|
-| `APP_NAME` | `rusterando-server` | `davidspizzeria-server` | Binary filename on disk and systemd unit name. The deploy script renames `target/.../rusterando-server` → `$APP_NAME` during rsync, so the on-server filename stays stable for the life of the deployment. |
-| `BIN_NAME` | (unset) | `davidspizzeria-server` | Optional alias for `APP_NAME`. |
-| `LEPTOS_OUTPUT_NAME` | `rusterando` | `davidspizzeria` | JS/WASM bundle name in `target/site/pkg/<name>.<hash>.js`. Setting this stable across renames means existing browser caches don't miss after a deploy. |
+| `APP_NAME` | `rusterando-server` | `myshop-server` | Binary filename on disk and systemd unit name. The deploy script renames `target/.../rusterando-server` → `$APP_NAME` during rsync, so the on-server filename stays stable for the life of the deployment. |
+| `BIN_NAME` | (unset) | `myshop-server` | Optional alias for `APP_NAME`. |
+| `LEPTOS_OUTPUT_NAME` | `rusterando` | `myshop` | JS/WASM bundle name in `target/site/pkg/<name>.<hash>.js`. Setting this stable across renames means existing browser caches don't miss after a deploy. |
 | `LEPTOS_SITE_ADDR` | `127.0.0.1:3001` | `127.0.0.1:3001` | Localhost bind address. Each deployment on the same VPS picks a different port (3001, 3002, …); nginx vhosts route by hostname to the right one. |
 | `DEPLOY_REMOTE_BASE` | (unset) | `/var/www/example.com` | Server-side install root. Holds the binary, `html/`, `data/`, `backups/`, `.env`. |
 | `SSH_HOST` | (unset) | `myhost.example` | Where `scripts/deploy_to_server.sh` SSHs to. |
@@ -422,7 +422,7 @@ under — so build-time and run-time configuration never drift.
 
 > **Multiple shops on one VPS?** Use `-e <profile>` to load
 > `.env.<profile>` instead of `.env`:
-> `./scripts/deploy_to_server.sh -e davids full`. See the
+> `./scripts/deploy_to_server.sh -e myshop full`. See the
 > [Multi-tenant section](#multi-tenant-on-one-vps).
 
 ## Multi-tenant on one VPS
@@ -434,24 +434,24 @@ Everything per-shop — domain, port, binary name, systemd unit, SQLite
 DB, photo uploads, backups, branding seed SQL — flows from that one
 file.
 
-This is how davidspizzeria.de (real shop) and rusterando.de (public
-demo install) share a single VPS today. Same source tree, same Rust
+This is how the reference deployment (a real shop; `shop.example.com`
+here) and rusterando.de (public demo install) share a single VPS today. Same source tree, same Rust
 binary on disk, two systemd units, two SQLite databases, two nginx
 vhosts.
 
 ### What's per-deployment
 
-| Concern | Davids (`.env.davids`) | Demo (`.env.demo`) |
+| Concern | Reference shop (`.env.myshop`) | Demo (`.env.demo`) |
 |---|---|---|
-| Domain | `davidspizzeria.de` | `rusterando.de` |
+| Domain | `shop.example.com` | `rusterando.de` |
 | Localhost port | `127.0.0.1:3001` | `127.0.0.1:3002` |
-| Binary name on disk | `davidspizzeria-server` | `rusterando-server` |
-| systemd unit | `davidspizzeria-server.service` | `rusterando-server.service` |
-| Install root | `/var/www/davidspizzeria.de/` | `/var/www/rusterando.de/` |
-| SQLite DB | `data/davidspizzeria.db` | `data/rusterando.db` |
+| Binary name on disk | `myshop-server` | `rusterando-server` |
+| systemd unit | `myshop-server.service` | `rusterando-server.service` |
+| Install root | `/var/www/shop.example.com/` | `/var/www/rusterando.de/` |
+| SQLite DB | `data/myshop.db` | `data/rusterando.db` |
 | Photo uploads | `html/img/uploads/` (per-install) | `html/img/uploads/` (per-install) |
-| Branding seed | `data/branding.davids.sql` | `data/branding.demo.sql` |
-| Backups dir | `…/backups/davidspizzeria_*.zip` | `…/backups/rusterando_*.zip` |
+| Branding seed | `data/branding.myshop.sql` | `data/branding.demo.sql` |
+| Backups dir | `…/backups/myshop_*.zip` | `…/backups/rusterando_*.zip` |
 | iOS app | yes (TestFlight, APNs) | no |
 
 ### What's shared
@@ -512,16 +512,16 @@ Subsequent deploys are `./scripts/deploy_to_server.sh -e <shop> full`.
 
 ### nginx vhost shape
 
-Two real vhost files for the davidspizzeria + rusterando setup:
+The two vhost files of the reference setup (shop + rusterando.de):
 
 ```nginx
-# /etc/nginx/sites-available/davidspizzeria.de  (port 3001)
+# /etc/nginx/sites-available/shop.example.com  (port 3001)
 server {
-    server_name davidspizzeria.de www.davidspizzeria.de;
+    server_name shop.example.com www.shop.example.com;
     client_max_body_size 10m;
 
     location /pkg/ {
-        alias /var/www/davidspizzeria.de/html/pkg/;
+        alias /var/www/shop.example.com/html/pkg/;
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
@@ -530,14 +530,14 @@ server {
     # statically, so the data/ dir (DB included) never sits under a web
     # root. The deploy rsync excludes img/uploads/ from --delete so
     # releases don't wipe them.
-    location /img/ { alias /var/www/davidspizzeria.de/html/img/; expires 30d; }
+    location /img/ { alias /var/www/shop.example.com/html/img/; expires 30d; }
     location /.well-known/ {
-        alias /var/www/davidspizzeria.de/html/.well-known/;
+        alias /var/www/shop.example.com/html/.well-known/;
         types { application/json apple-app-site-association; }
         default_type application/json;
     }
     location / {
-        proxy_pass http://127.0.0.1:3001;     # ← Davids' port
+        proxy_pass http://127.0.0.1:3001;     # ← the shop's port
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -555,29 +555,30 @@ server {
 The rusterando.de vhost is identical but with `proxy_pass
 http://127.0.0.1:3002;` and `/var/www/rusterando.de/` paths.
 
-## How Davids Pizzeria runs on Rusterando
+## How the reference deployment runs on Rusterando
 
 This is the worked example — one of the two deployments running off
 the public Rusterando source tree (the other is rusterando.de itself,
-the demo install). All the contact details below are anonymised;
-substitute your own.
+the demo install). Names, domain and contact details below are
+placeholders (shop "Musterpizzeria" in Musterstadt, `shop.example.com`,
+profile `myshop`); substitute your own.
 
-Davids Pizzeria (<https://davidspizzeria.de>) was the codebase's first
-user; the platform was generalised to AGPL once it stopped being
-shop-specific. The deploy lives under the `davids` profile —
-`./scripts/deploy_to_server.sh -e davids full` ships it.
+The reference shop was the codebase's first user; the platform was
+generalised to AGPL once it stopped being shop-specific. The deploy
+lives under its own profile —
+`./scripts/deploy_to_server.sh -e myshop full` ships it.
 
-### What's in `.env.davids` (shape, not values)
+### What's in `.env.myshop` (shape, not values)
 
 ```
-APP_NAME=davidspizzeria-server
-BIN_NAME=davidspizzeria-server
-LEPTOS_OUTPUT_NAME=davidspizzeria
+APP_NAME=myshop-server
+BIN_NAME=myshop-server
+LEPTOS_OUTPUT_NAME=myshop
 LEPTOS_SITE_ADDR=127.0.0.1:3001
-DEPLOY_REMOTE_BASE=/var/www/davidspizzeria.de
+DEPLOY_REMOTE_BASE=/var/www/shop.example.com
 SSH_HOST=<their VPS hostname>
-DATABASE_URL=sqlite:./data/davidspizzeria.db
-PUBLIC_URL=https://davidspizzeria.de
+DATABASE_URL=sqlite:./data/myshop.db
+PUBLIC_URL=https://shop.example.com
 ADMIN_PASSWORD=<long random string>
 KITCHEN_PASSWORD=<long random string>
 DRIVER_PASSWORD=<long random string>
@@ -591,7 +592,7 @@ EMAIL_FROM=<bestellung@…>
 APNS_TEAM_ID=<10-char Apple team id>
 APNS_KEY_ID=<10-char APNs key id>
 APNS_BUNDLE_ID=<reverse-DNS bundle id>
-APNS_KEY_PATH=/var/www/davidspizzeria.de/.hidden/AuthKey_<…>.p8
+APNS_KEY_PATH=/var/www/shop.example.com/.hidden/AuthKey_<…>.p8
 APNS_PRODUCTION=true
 ORS_API_KEY=<…>
 PIZZERIA_LAT=<lat>
@@ -599,12 +600,12 @@ PIZZERIA_LON=<lon>
 ```
 
 The `.env` is owned by `www-data`, mode 600, lives at
-`/var/www/davidspizzeria.de/.env` and is loaded by systemd
+`/var/www/shop.example.com/.env` and is loaded by systemd
 (`EnvironmentFile=-...`) as well as by the deploy script.
 
 ### Branding (data, not code)
 
-After first install, Davids ran through `/admin/settings` and
+After first install, the shop ran through `/admin/settings` and
 `/admin/home` to fill in their specifics: shop name, German-language
 addresses, phone, email, hero photo, two offer cards (Pizzablech + Pizza
 36 cm), three gallery photos (storefront, counter, baking sheet), the
@@ -617,7 +618,7 @@ cached in `BrandingHandle` so SSR doesn't hit SQLite per request.
 
 ### Delivery zones
 
-Lüdinghausen + four neighbouring villages, each with a `min_order_cents`
+Musterstadt + four neighbouring villages, each with a `min_order_cents`
 threshold and a `fee_cents` surcharge. The zones drive the city
 auto-complete in checkout, the route optimisation when grouping orders
 for one driver tour, and the "Wir liefern" section on the home page.
@@ -626,7 +627,7 @@ Free delivery kicks in above `app_settings.free_delivery_threshold_cents`
 
 ### iOS app
 
-A native Swift WebView shell loads `https://davidspizzeria.de` on launch
+A native Swift WebView shell loads `https://shop.example.com` on launch
 and registers an APNs token tied to the staff role currently signed in.
 Three Keychain entries hold the staff passwords; tapping the gear FAB
 opens a native Settings sheet to switch role with one tap. Universal
@@ -635,7 +636,7 @@ into the WebView so a "neue Bestellung" ping opens straight to
 `/admin/orders/<id>`.
 
 The bundle id (`<reverse-DNS>`), team id, and AASA file are tied to
-Davids' Apple Developer account — anyone forking would replace them with
+the publisher's Apple Developer account — anyone forking would replace them with
 their own. The `ios-app/` source is otherwise generic.
 
 ### Push trigger flow
@@ -654,17 +655,17 @@ audience choice persisted in `push_broadcasts` for audit.
 
 ### Backup discipline
 
-`./scripts/deploy_to_server.sh -e davids backup` zips the binary,
+`./scripts/deploy_to_server.sh -e myshop backup` zips the binary,
 html bundle, `.env`, and the SQLite DB into
-`/var/www/davidspizzeria.de/backups/` named
-`davidspizzeria_YYYYMMDD_HHMMSS.zip`. Pre-deploy this happens
+`/var/www/shop.example.com/backups/` named
+`myshop_YYYYMMDD_HHMMSS.zip`. Pre-deploy this happens
 automatically; manual backups are 30 seconds.
 
-`./scripts/deploy_to_server.sh -e davids restore` shows a numbered
+`./scripts/deploy_to_server.sh -e myshop restore` shows a numbered
 list of backups and rolls back interactively — service stop, unzip,
 restore, restart. The pre-restore state is itself backed up first, so
 you can always undo the undo. Each deployment's backups are
-namespaced by `APP_NAME` prefix, so `davids` and `demo` backups
+namespaced by `APP_NAME` prefix, so `myshop` and `demo` backups
 never collide.
 
 ### What we'd do differently

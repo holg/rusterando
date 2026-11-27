@@ -5,7 +5,6 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -39,7 +38,8 @@ serde_json = { workspace = true }
 chrono = { workspace = true, features = ["wasmbind"] }
 http = { workspace = true }
 cfg-if = { workspace = true }
-log = { workspace = true }
+# Server side only (session key handling).
+log = { workspace = true, optional = true }
 urlencoding = "2"
 
 # SSR-only
@@ -49,7 +49,6 @@ tower-cookies = { version = "0.11", optional = true }
 qrcode = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
-chrono-tz = { workspace = true, optional = true }
 lettre = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 async-stripe = { workspace = true, optional = true }
@@ -67,7 +66,6 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 futures = { workspace = true, optional = true }
 js-sys = { version = "0.3", optional = true }
 console_error_panic_hook = { workspace = true, optional = true }
-console_log = { workspace = true, optional = true }
 # Wraps !Send web_sys types so they can cross `on_cleanup`'s
 # Send+Sync bound. WASM is single-threaded, so the wrapper's panic
 # path (used-from-wrong-thread) is unreachable in our build.
@@ -122,11 +120,11 @@ hydrate = [
     "dep:futures",
     "dep:js-sys",
     "dep:console_error_panic_hook",
-    "dep:console_log",
     "dep:web-sys",
     "dep:rusterando-wasm-split",
 ]
 ssr = [
+    "dep:log",
     "leptos/ssr",
     "leptos_meta/ssr",
     "leptos_router/ssr",
@@ -137,7 +135,6 @@ ssr = [
     "dep:qrcode",
     "dep:uuid",
     "dep:anyhow",
-    "dep:chrono-tz",
     "dep:lettre",
     "dep:tokio",
     "dep:async-stripe",

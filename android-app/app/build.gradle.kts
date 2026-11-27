@@ -38,8 +38,11 @@ android {
     defaultConfig {
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        // Raise versionCode on every build that goes onto a device: the update
+        // must install over the old one (`adb install -r`, same release key),
+        // never uninstall + install, or the saved logins are gone.
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     flavorDimensions += "shop"
@@ -143,5 +146,10 @@ dependencies {
     // Kotlin coroutines so RoleSwitcher can do async HTTP without
     // pulling in OkHttp; the platform HttpURLConnection is enough.
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // Built-in receipt printer of the Sunmi handhelds (V2): the official
+    // AIDL client for the system service woyou.aidlservice.jiuiv5. No
+    // permissions, no transitive deps; inert on devices without it.
+    implementation("com.sunmi:printerlibrary:1.0.24")
 }
 

@@ -4,22 +4,22 @@
 # Each deployment has its own .env file at the repo root. By default
 # the script reads `.env`. Pass `-e <name>` to load `.env.<name>`
 # instead — used to run multiple deployments off the same checkout
-# (e.g. davidspizzeria.de + rusterando.de on the same VPS, different
+# (e.g. shop.example.com + rusterando.de on the same VPS, different
 # ports).
 #
 # Required `.env*` keys for a deploy:
 #   APP_NAME             = name of the binary on disk + systemd unit
-#                          (e.g. davidspizzeria-server, default rusterando-server)
+#                          (e.g. myshop-server, default rusterando-server)
 #   BIN_NAME             = same as APP_NAME (kept as alias for build-time use;
 #                          cargo produces target/<profile>/rusterando-server,
 #                          this script renames it to APP_NAME during rsync)
 #   LEPTOS_OUTPUT_NAME   = JS bundle name in /pkg/<name>.<hash>.js
-#                          (e.g. davidspizzeria, default rusterando)
+#                          (e.g. myshop, default rusterando)
 #   LEPTOS_SITE_ADDR     = bind address, e.g. 127.0.0.1:3001 / 127.0.0.1:3002
 #                          (each deployment binds a different localhost port;
 #                          nginx proxy_pass routes its vhost to the right one)
-#   DEPLOY_REMOTE_BASE   = e.g. /var/www/davidspizzeria.de
-#   SSH_HOST             = e.g. iesna.eu
+#   DEPLOY_REMOTE_BASE   = e.g. /var/www/shop.example.com
+#   SSH_HOST             = e.g. vps.example.com
 #
 # Run from your local machine.
 
@@ -28,8 +28,8 @@ set -e
 # =============================================================================
 # Parse `-e <name>` (env profile) before anything else.
 #
-# Single profile  : -e davids        → load .env.davids
-# Multi profile   : -e davids,demo   → build once, deploy to each in order.
+# Single profile  : -e myshop        → load .env.myshop
+# Multi profile   : -e myshop,demo   → build once, deploy to each in order.
 #                   The first profile drives the cargo-leptos build (its
 #                   LEPTOS_OUTPUT_NAME wins, since that bakes into the JS
 #                   loader filenames). Subsequent profiles reuse those
@@ -41,7 +41,7 @@ set -e
 ENV_PROFILES_RAW=""
 if [[ "${1:-}" == "-e" || "${1:-}" == "--env" ]]; then
     if [[ -z "${2:-}" ]]; then
-        echo "✗ -e requires a profile name (e.g. -e davids or -e davids,demo)" >&2
+        echo "✗ -e requires a profile name (e.g. -e myshop or -e myshop,demo)" >&2
         exit 1
     fi
     ENV_PROFILES_RAW="$2"
@@ -148,10 +148,10 @@ Usage: $0 [-e <env-profile>] <command>
 Options:
     -e, --env <name>   Load .env.<name> instead of .env. Used to run
                        multiple deployments from the same checkout
-                       (e.g. -e davids vs -e demo on the same VPS).
+                       (e.g. -e myshop vs -e demo on the same VPS).
 
                        Comma-separated multi-profile (e.g.
-                       -e davids,demo) builds ONCE with the first
+                       -e myshop,demo) builds ONCE with the first
                        profile's LEPTOS_OUTPUT_NAME, then deploys the
                        same artifacts to every listed profile in order.
                        Each profile gets its own .env, DB, port, and
@@ -186,11 +186,11 @@ DEPLOY_REMOTE_BASE, SSH_HOST. See README + .env.example.
 
 Examples:
     $0 full                       # Default deployment (.env)
-    $0 -e davids full             # Davids deployment (.env.davids)
+    $0 -e myshop full             # The myshop deployment (.env.myshop)
     $0 -e demo full               # Demo deployment (.env.demo, port 3002)
-    $0 -e davids,demo full        # Build once, deploy both (shared assets)
-    $0 -e davids backup           # Manual backup of Davids
-    $0 -e davids restore          # Restore a Davids backup
+    $0 -e myshop,demo full        # Build once, deploy both (shared assets)
+    $0 -e myshop backup           # Manual backup of myshop
+    $0 -e myshop restore          # Restore a myshop backup
     $0 restore                   # Restore a previous version
     $0 logs                      # Tail logs
 EOF
@@ -322,23 +322,9 @@ cmd_build() {
     echo "    cargo bin name: $CARGO_BIN_NAME"
     echo "    deployed as:    $APP_NAME"
 
-    # AASA overlay: if a per-shop variant exists (e.g. .davids), copy
-    # it over the placeholder before the build picks it up via
-    # include_bytes! in main.rs. The placeholder file is committed to
-    # git; the overlay is gitignored. After the build we restore the
-    # placeholder so the working tree stays clean.
-    AASA="public/.well-known/apple-app-site-association"
-    AASA_OVERLAY="${AASA_OVERLAY:-${AASA}.davids}"
-    AASA_RESTORED=0
-    if [[ -f "$AASA_OVERLAY" && -f "$AASA" ]]; then
-        cp "$AASA" "${AASA}.placeholder.tmp"
-        cp "$AASA_OVERLAY" "$AASA"
-        AASA_RESTORED=1
-        echo "    AASA overlay applied from $AASA_OVERLAY"
-    fi
-    # Always restore on exit so a failed build doesn't leave the real
-    # values sitting in the public-tracked file.
-    trap 'if [[ "$AASA_RESTORED" == "1" && -f "${AASA}.placeholder.tmp" ]]; then mv "${AASA}.placeholder.tmp" "$AASA"; fi' EXIT
+    # A shop's own AASA manifest is no longer baked in: the server reads
+    # site/<profile>/apple-app-site-association at runtime (SITE_OVERLAY_DIR),
+    # shipped by cmd_upload; the binary only carries the placeholder.
 
     ./scripts/cross_build_on_mac.sh "$TARGET_TRIPLE"
 
@@ -355,8 +341,8 @@ cmd_backup() {
     echo "=== Creating backup on $SSH_HOST ==="
 
     # Backup file prefix is derived from APP_NAME so each deployment's
-    # backups are namespaced (davidspizzeria_*.zip on Davids' server,
-    # rusterando_*.zip elsewhere).
+    # backups are namespaced (myshop_*.zip for APP_NAME=myshop-server,
+    # rusterando_*.zip for the default).
     BACKUP_PREFIX="${APP_NAME%-server}"
 
     # Unquoted heredoc so the four locals expand here; everything that
@@ -386,6 +372,7 @@ cp "\$REMOTE_BASE/\$APP_NAME" "\$STAGING/"
 [ -f "\$REMOTE_BASE/.env" ] && cp "\$REMOTE_BASE/.env" "\$STAGING/"
 [ -d "\$REMOTE_BASE/html" ] && cp -r "\$REMOTE_BASE/html" "\$STAGING/"
 [ -d "\$REMOTE_BASE/data" ] && cp -r "\$REMOTE_BASE/data" "\$STAGING/"
+[ -d "\$REMOTE_BASE/site" ] && cp -r "\$REMOTE_BASE/site" "\$STAGING/"
 echo "Backup created: \$TIMESTAMP" > "\$STAGING/BACKUP_INFO.txt"
 
 cd /tmp
@@ -595,6 +582,13 @@ if [ -d "/tmp/\$BACKUP_NAME/data" ]; then
     echo "  Restored: data/"
 fi
 
+# Restore site/ (the site overlay)
+if [ -d "/tmp/\$BACKUP_NAME/site" ]; then
+    rm -rf "\$REMOTE_BASE/site"
+    cp -r "/tmp/\$BACKUP_NAME/site" "\$REMOTE_BASE/"
+    echo "  Restored: site/"
+fi
+
 # Fix permissions
 chown -R www-data:www-data "\$REMOTE_BASE"
 
@@ -621,8 +615,9 @@ cmd_upload() {
 
     # Upload binary, renaming on the wire from the upstream cargo bin name
     # ($CARGO_BIN_NAME) to whatever this deployment calls it ($APP_NAME).
-    # Davids' .env sets APP_NAME=davidspizzeria-server so the on-server
-    # filename + systemd unit don't change across the rusterando rename.
+    # A deployment that predates the rusterando rename sets its old name
+    # (e.g. APP_NAME=myshop-server) so the on-server filename + systemd
+    # unit don't change.
     echo "Uploading binary as $APP_NAME..."
     rsync -avz -e "ssh ${SSH_OPTS[*]}" --progress "$LOCAL_BUILD_DIR/$CARGO_BIN_NAME" "$SSH_HOST:$REMOTE_BIN_DIR/$APP_NAME"
     if [[ -f "$LOCAL_BUILD_DIR/hash.txt" ]]; then
@@ -666,6 +661,7 @@ cmd_upload() {
     # deploy so there's no fallback gap before the new process reboots it.
     echo "Uploading site assets..."
     rsync -avz -e "ssh ${SSH_OPTS[*]}" --delete \
+        --exclude '.DS_Store' --exclude '*.tmp' \
         --exclude 'img/uploads/' \
         --exclude 'menu.pdf' \
         --exclude 'menu-kompakt.pdf' \
@@ -722,6 +718,29 @@ cmd_upload() {
             else
                 echo "Multi-tenant: no .env.$ENV_PROFILE.* tenant files found locally — parent only."
             fi
+        fi
+    fi
+
+    # Site overlay: what is this shop's own and so not in the public tree
+    # (poster layouts, photos, AASA, tools). site/<profile>/ goes to
+    # $REMOTE_BASE/site/<profile>/, where SITE_OVERLAY_DIR=./site/<profile>
+    # (in .env.<profile>) finds it; its public/ is laid over html/ (same
+    # paths as the placeholders in public/, e.g. img/ladenfront.jpg).
+    if [[ -n "$ENV_PROFILE" && -d "site/$ENV_PROFILE" ]]; then
+        echo "Uploading site overlay site/$ENV_PROFILE/..."
+        ssh_cmd "sudo mkdir -p $REMOTE_BASE/site/$ENV_PROFILE && sudo chown -R \$(whoami) $REMOTE_BASE/site"
+        rsync -az -e "ssh ${SSH_OPTS[*]}" --delete --exclude '.DS_Store' \
+            "site/$ENV_PROFILE/" "$SSH_HOST:$REMOTE_BASE/site/$ENV_PROFILE/"
+        if [[ -d "site/$ENV_PROFILE/public" ]]; then
+            rsync -az -e "ssh ${SSH_OPTS[*]}" --exclude '.DS_Store' \
+                "site/$ENV_PROFILE/public/" "$SSH_HOST:$REMOTE_HTML_DIR/"
+        fi
+        # nginx serves /.well-known/ straight from html/, so the shop's AASA
+        # manifest goes there too (the server route only answers without it).
+        if [[ -f "site/$ENV_PROFILE/apple-app-site-association" ]]; then
+            ssh_cmd "mkdir -p $REMOTE_HTML_DIR/.well-known"
+            rsync -az -e "ssh ${SSH_OPTS[*]}" "site/$ENV_PROFILE/apple-app-site-association" \
+                "$SSH_HOST:$REMOTE_HTML_DIR/.well-known/apple-app-site-association"
         fi
     fi
 
@@ -855,9 +874,10 @@ cmd_deploy() {
     echo "Site: $SITE_URL"
 }
 
-# Apply per-deployment seed SQL files (e.g. branding.davids.sql) against
+# Apply per-deployment seed SQL files (e.g. branding.myshop.sql) against
 # the prod SQLite DB after migrations have run. Each *.sql file under
-# data/ that ends in `.davids.sql` (or generally `.deploy.sql`) is
+# data/ that ends in `.<env-profile>.sql` (e.g. `.myshop.sql`) or
+# `.deploy.sql` is
 # uploaded, executed via sqlite3, then the service is restarted so the
 # in-memory caches (BrandingHandle, ThemeHandle) pick up the new rows.
 #
@@ -868,14 +888,15 @@ cmd_apply_seeds() {
     # Seed files are matched in two ways:
     #   1. `*.deploy.sql`        — applied to every deployment.
     #   2. `*.<env-profile>.sql` — applied only when -e <env-profile> is in
-    #                              effect (e.g. data/branding.davids.sql when
-    #                              run with `-e davids`).
+    #                              effect (e.g. data/branding.myshop.sql when
+    #                              run with `-e myshop`).
+    #   3. site/<env-profile>/seeds/*.sql — the site overlay's own seeds.
     # Falls back to the APP_NAME-derived prefix for back-compat with the
     # pre-`-e` scripts that named seeds after the binary suffix.
     local profile="${ENV_PROFILE:-${APP_NAME%-server}}"
     local seeds=()
     shopt -s nullglob
-    for f in data/*.deploy.sql data/*."${profile}".sql; do
+    for f in data/*.deploy.sql data/*."${profile}".sql site/"${profile}"/seeds/*.sql; do
         [[ -f "$f" ]] && seeds+=("$f")
     done
     shopt -u nullglob
@@ -936,7 +957,7 @@ cmd_full() {
     done
 }
 
-# When the user passes a multi-profile -e (e.g. davids,demo) but a
+# When the user passes a multi-profile -e (e.g. myshop,demo) but a
 # command other than `full`, fan it out across each profile in order.
 # Build is excluded because it has no per-profile semantics.
 run_for_each_profile() {
@@ -955,9 +976,74 @@ run_for_each_profile() {
     done
 }
 
+# The prod SQLite file of the loaded profile (same resolution as the seeds).
+remote_db_path() {
+    local profile="${ENV_PROFILE:-${APP_NAME%-server}}"
+    local db_rel="${DATABASE_URL#sqlite:}"
+    db_rel="${db_rel#./}"
+    db_rel="${db_rel%%\?*}"
+    if [[ -z "$db_rel" || "$db_rel" == "$DATABASE_URL" ]]; then
+        db_rel="data/${profile}.db"
+    fi
+    echo "$REMOTE_BASE/$db_rel"
+}
+
+# Take a copy of the prod DB home on every deploy? PULL_DB=1 always, 0
+# never; by default only a deployment whose .env.<profile> sets
+# DEPLOY_PULL_DB=1.
+want_db_pull() {
+    case "${PULL_DB:-auto}" in
+        1|yes|true) return 0 ;;
+        0|no|false) return 1 ;;
+        # Default per deployment: DEPLOY_PULL_DB=1 in its .env.<profile>.
+        *) [[ "${DEPLOY_PULL_DB:-0}" == "1" ]] ;;
+    esac
+}
+
+# Fetch the snapshot cmd_restart took into data/<name>.db. The previous
+# local copy (and its -wal/-shm, which belong to it and would corrupt the
+# new file) moves to tmp/. Best-effort: a failed download never fails the
+# deploy, the snapshot then stays in the server's /tmp.
+pull_db_snapshot() {
+    local snap="$1" name="$2"
+    local root dst stamp
+    root="$(cd "$(dirname "$0")/.." && pwd)"
+    dst="$root/data/$name"
+    stamp="$(date +%Y%m%d_%H%M%S)"
+    echo "=== Copying $name from $SSH_HOST to data/$name ==="
+    mkdir -p "$root/data" "$root/tmp"
+    if ! scp -q "${SSH_OPTS[@]}" "$SSH_HOST:$snap" "$root/data/.$name.part"; then
+        echo "  ✗ download failed — the copy stays on the server: $snap"
+        return 0
+    fi
+    for f in "$dst" "$dst-wal" "$dst-shm"; do
+        [[ -e "$f" ]] && mv "$f" "$root/tmp/$(basename "$f" | sed "s/\.db/.local-$stamp.db/")"
+    done
+    mv "$root/data/.$name.part" "$dst"
+    ssh_cmd "rm -f '$snap'" || true
+    echo "  → data/$name ($(du -h "$dst" | cut -f1)), the previous local copy is in tmp/"
+}
+
 cmd_restart() {
     echo "=== Restarting $APP_NAME on $SSH_HOST ==="
-    ssh_cmd "sudo systemctl restart $APP_NAME && sleep 1 && sudo systemctl status $APP_NAME --no-pager"
+    local remote_db
+    remote_db="$(remote_db_path)"
+    if ! want_db_pull "$remote_db"; then
+        ssh_cmd "sudo systemctl restart $APP_NAME && sleep 1 && sudo systemctl status $APP_NAME --no-pager"
+        return
+    fi
+    # The shop is offline anyway between stop and start: snapshot the DB
+    # right then (nothing can write half-way), with SQLite's own backup on
+    # the server's disk — a fraction of a second, so the offline window stays
+    # as short as a plain restart. The download happens once it is back up.
+    # `start` runs whatever the snapshot does.
+    local name snap
+    name="$(basename "$remote_db")"
+    snap="/tmp/${name%.db}-deploy-$(date +%Y%m%d_%H%M%S).db"
+    ssh_cmd "sudo systemctl stop $APP_NAME; \
+        sudo sqlite3 '$remote_db' \".backup '$snap'\" && sudo chown \$USER '$snap' && chmod 600 '$snap'; \
+        sudo systemctl start $APP_NAME && sleep 1 && sudo systemctl status $APP_NAME --no-pager"
+    pull_db_snapshot "$snap" "$name"
 }
 
 cmd_logs() {

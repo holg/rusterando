@@ -630,16 +630,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chrono-tz"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
-dependencies = [
- "chrono",
- "phf 0.12.1",
-]
-
-[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -858,16 +848,6 @@ checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
 dependencies = [
  "cfg-if",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "console_log"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be8aed40e4edbf4d3b4431ab260b63fdc40f5780a4766824329ea0f1eefe3c0f"
-dependencies = [
- "log",
- "web-sys",
 ]
 
 [[package]]
@@ -2105,7 +2085,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10e7e97ce840a6a70e7901e240ec65ba61106b66b37a4a1b899a2ce484248463"
 dependencies = [
  "log",
- "phf 0.13.1",
+ "phf",
 ]
 
 [[package]]
@@ -2120,7 +2100,7 @@ dependencies = [
  "kurbo 0.12.0",
  "log",
  "moxcms 0.7.11",
- "phf 0.13.1",
+ "phf",
  "rustc-hash",
  "siphasher",
  "skrifa 0.37.0",
@@ -3002,8 +2982,9 @@ dependencies = [
 
 [[package]]
 name = "kitchen-protocol"
-version = "2.2.0"
+version = "2.4.0"
 dependencies = [
+ "postcard",
  "serde",
  "serde_json",
  "sha2",
@@ -3565,7 +3546,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "dotenvy",
  "rusterando-shared",
  "serde",
  "serde_json",
@@ -3962,21 +3942,12 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "phf"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
-dependencies = [
- "phf_shared 0.12.1",
-]
-
-[[package]]
-name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
 dependencies = [
  "phf_macros",
- "phf_shared 0.13.1",
+ "phf_shared",
  "serde",
 ]
 
@@ -3987,7 +3958,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
 dependencies = [
  "fastrand 2.4.1",
- "phf_shared 0.13.1",
+ "phf_shared",
 ]
 
 [[package]]
@@ -3997,19 +3968,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
 dependencies = [
  "phf_generator",
- "phf_shared 0.13.1",
+ "phf_shared",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
-dependencies = [
- "siphasher",
 ]
 
 [[package]]
@@ -4052,6 +4014,15 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "pixglyph"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47945e80a49d08350e4a007ac4294c6498d23956c18ea5e6ff480dc93d31643c"
+dependencies = [
+ "ttf-parser 0.25.1",
+]
 
 [[package]]
 name = "pkcs1"
@@ -4885,10 +4856,6 @@ dependencies = [
 [[package]]
 name = "rusterando-app"
 version = "0.1.0"
-dependencies = [
- "cfg-if",
- "rusterando-shared",
-]
 
 [[package]]
 name = "rusterando-frontend"
@@ -4900,9 +4867,7 @@ dependencies = [
  "axum",
  "cfg-if",
  "chrono",
- "chrono-tz",
  "console_error_panic_hook",
- "console_log",
  "futures",
  "hmac",
  "http 1.4.2",
@@ -5003,6 +4968,7 @@ dependencies = [
  "comemo",
  "dotenvy",
  "ecow",
+ "flate2",
  "futures",
  "glob",
  "http 1.4.2",
@@ -5015,6 +4981,7 @@ dependencies = [
  "libc",
  "postcard",
  "qrcode",
+ "receipt-escpos",
  "reqwest",
  "rusterando-frontend",
  "rusterando-geo",
@@ -5033,6 +5000,7 @@ dependencies = [
  "tracing-subscriber",
  "typst",
  "typst-pdf",
+ "typst-render",
  "ureq",
  "uuid 1.23.3",
  "zip",
@@ -5042,12 +5010,9 @@ dependencies = [
 name = "rusterando-shared"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "serde",
  "serde_json",
  "sha2",
- "thiserror 2.0.18",
- "uuid 1.23.3",
 ]
 
 [[package]]
@@ -6917,7 +6882,7 @@ dependencies = [
  "lipsum",
  "memchr",
  "palette",
- "phf 0.13.1",
+ "phf",
  "png 0.17.16",
  "qcms",
  "rayon",
@@ -7007,6 +6972,26 @@ dependencies = [
  "typst-syntax",
  "typst-timing",
  "typst-utils",
+]
+
+[[package]]
+name = "typst-render"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1baabef8c01dd7150380592811bf37af9b2498be86043834ddd629d1bcb48ccb"
+dependencies = [
+ "bytemuck",
+ "comemo",
+ "hayro",
+ "image",
+ "pixglyph",
+ "resvg 0.45.1",
+ "tiny-skia",
+ "ttf-parser 0.25.1",
+ "typst-assets",
+ "typst-library",
+ "typst-macros",
+ "typst-timing",
 ]
 
 [[package]]

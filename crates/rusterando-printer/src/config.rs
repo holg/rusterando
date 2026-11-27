@@ -6,7 +6,7 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// TCP target. Always loopback in production — the SSH tunnel terminates
-    /// here, so we're really talking to the davidspizzeria server on the IONOS
+    /// here, so we're really talking to the rusterando server on the hosting
     /// box via the autossh forward.
     #[serde(default = "default_server_addr")]
     pub server_addr: String,

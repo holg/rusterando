@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Trait the server crate implements so the frontend can trigger a
-/// broadcast without importing davidspizzeria-server (which would
+/// broadcast without importing rusterando-server (which would
 /// create a dependency cycle). `ApnsHandle` in the server crate is
 /// the only real implementor.
 /// Who an admin-initiated broadcast goes to. Used by `/admin/broadcast`
@@ -123,6 +123,36 @@ pub trait KitchenSink: Send + Sync {
 #[cfg(feature = "ssr")]
 pub type KitchenSinkHandle = Option<Arc<dyn KitchenSink>>;
 
+/// The kitchen board as the kitchen displays see it, for the /kitchen
+/// page: the same orders, built by the same code (rusterando-server
+/// `kitchen_board`, the Bon's DTO), and the same moves. Unlike
+/// [`KitchenSinkHandle`] it is there on every deploy — the board needs no
+/// printer.
+#[cfg(feature = "ssr")]
+#[async_trait::async_trait]
+pub trait KitchenBoardSource: Send + Sync {
+    /// Every order on the board, oldest first.
+    async fn snapshot(
+        &self,
+        db: &sqlx::SqlitePool,
+    ) -> anyhow::Result<kitchen_protocol::BoardSnapshot>;
+
+    /// Move an order as a display would (forward, back, out of the ready
+    /// column, Storno). `Ok(false)`: it was no longer in `from` — someone
+    /// moved it elsewhere first. `Err`: a move the kitchen may not make.
+    async fn advance(
+        &self,
+        db: &sqlx::SqlitePool,
+        live: Option<&crate::live::LiveHub>,
+        order_id: &str,
+        from: kitchen_protocol::BoardStatus,
+        to: kitchen_protocol::BoardStatus,
+    ) -> anyhow::Result<bool>;
+}
+
+#[cfg(feature = "ssr")]
+pub type KitchenBoardHandle = Arc<dyn KitchenBoardSource>;
+
 /// Trait the server crate implements so the frontend admin server fns can
 /// re-render the static `menu.pdf` (and its kompakt variant) into the nginx
 /// site root after a menu/extras/branding edit — without depending on
@@ -193,7 +223,7 @@ pub async fn register_push_token(
     role: String,
     /// "ios" | "android" — only "ios" today.
     platform: String,
-    /// Free-text device label for admin diagnostics ("Davids iPad",
+    /// Free-text device label for admin diagnostics ("Theken-iPad",
     /// "Kitchen Tablet 1"). Optional.
     label: Option<String>,
 ) -> Result<(), ServerFnError> {

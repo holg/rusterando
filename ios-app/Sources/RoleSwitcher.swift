@@ -1,6 +1,6 @@
 //
 //  RoleSwitcher.swift
-//  Davids Pizzeria / Rusterando
+//  Rusterando
 //
 //  Switches the WebView's active staff role within a given shop, without
 //  making the user retype the password. Multi-shop edition: every call

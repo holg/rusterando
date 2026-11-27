@@ -1,0 +1,9 @@
+# The Cardputer ADV's ESP-IDF components. scripts/build_kds_tab5.sh (with
+# BOARD=cardputer) points ESP_IDF_SYS_EXTRA_COMPONENTS_FILE at a copy, which
+# *replaces* the Tab5's list in Cargo.toml: the S3 has its own Wi-Fi radio
+# (no esp_wifi_remote / esp_hosted) and no board package; display, keyboard
+# and LoRa are driven from Rust (src/cardputer/).
+
+# The live feed (/api/kitchen/ws), as on the Tab5.
+[[extra_components]]
+remote_component = { name = "espressif/esp_websocket_client", version = "==1.6.1" }

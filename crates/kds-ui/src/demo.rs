@@ -131,8 +131,8 @@ fn order(
                 OrderChannel::Delivery {
                     address: DeliveryAddress {
                         street: "Mühlenstraße 12".into(),
-                        postal: "59348".into(),
-                        city: "Lüdinghausen".into(),
+                        postal: "99999".into(),
+                        city: "Musterstadt".into(),
                         bell: Some("Müller".into()),
                     },
                 }
@@ -141,7 +141,7 @@ fn order(
             },
             customer: Customer {
                 name: "Erika Mustermann".into(),
-                phone: Some("02591 12345".into()),
+                phone: Some("01234 567890".into()),
             },
             items: items
                 .iter()

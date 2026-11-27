@@ -61,7 +61,7 @@ if ! lsof -i ":${SITE_PORT}" >/dev/null 2>&1; then
     # CachedHydrationScripts preload emits the same `_bg` name, but
     # cargo-leptos writes the binary as `rusterando.wasm` (no _bg). The
     # leptos output name is `rusterando` (Cargo.toml), NOT the old
-    # `davidspizzeria` — a wrong name 404s the wasm and silently breaks
+    # a deployment's own LEPTOS_OUTPUT_NAME — a wrong name 404s the wasm and silently breaks
     # hydration. Bridge with a relative symlink, leptos-style. (Prod uses
     # hash-files=true, which rewrites the glue URL — no symlink needed.)
     # Poll briefly: the build writes pkg/ before the HTTP listener is up.

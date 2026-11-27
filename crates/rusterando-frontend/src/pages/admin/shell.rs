@@ -9,7 +9,7 @@ use crate::stripe::get_stripe_mode;
 pub fn AdminShell(children: Children) -> impl IntoView {
     // Brand text via Resource (same pattern as stripe chip + theme).
     // Previously this was a `#[cfg(feature = "ssr")]` context read, which
-    // rendered "Davids Pizzeria — Admin" on the server but
+    // rendered "<reference shop> — Admin" on the server but
     // "Mein Restaurant — Admin" on hydrate → tachys hit a DOM
     // mismatch on the very first node of the shell header and
     // aborted the rest of the hydration walk, leaving the top-nav
@@ -28,6 +28,8 @@ pub fn AdminShell(children: Children) -> impl IntoView {
     // as the mode chip); the SSE `/api/live/shop` channel flips it live
     // via a post-hydration Effect (so no reload needed after a toggle).
     let shop_status = OnceResource::new(crate::pages::menu::shop_status());
+    // "LoRa" (Tab5 lab) only where the Tabs report to (LAB_KEY set).
+    let lora = OnceResource::new(crate::pages::admin::lora::lab_lora_enabled());
     let (shop_live, set_shop_live) =
         signal::<Option<(rusterando_shared::models::ShopLevel, String)>>(None);
     crate::utils::subscribe_shop_status(set_shop_live);
@@ -125,10 +127,20 @@ pub fn AdminShell(children: Children) -> impl IntoView {
                     <a href="/admin/pricing">"Preis-Prüfung"</a>
                     <a href="/admin/next-prices">"Neue Preise"</a>
                     <a href="/admin/home">"Startseite"</a>
+                    <a href="/admin/tagesangebot">"Tagesangebot"</a>
                     <a href="/admin/broadcast">"Push"</a>
                     <a href="/admin/settings">"Einstellungen"</a>
                     <a href="/admin/printer">"Bon-Editor"</a>
                     <a href="/admin/drucker">"Drucker (Pi)"</a>
+                    // Same Suspense + resource pattern as the shop chip above.
+                    <Suspense fallback=|| ()>
+                        {move || {
+                            lora.get()
+                                .and_then(|r| r.ok())
+                                .filter(|on| *on)
+                                .map(|_| view! { <a href="/admin/lora">"LoRa"</a> })
+                        }}
+                    </Suspense>
                     <a href="/admin/history">"Buchhaltung"</a>
                     <a href="/admin/customers">"Kunden"</a>
                     <a href="/admin/vouchers">"Gutscheine"</a>

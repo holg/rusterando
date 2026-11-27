@@ -165,6 +165,10 @@ pub struct CartLine {
     /// "free" from a 0 price. Server-enforced at `place_order`.
     #[serde(default)]
     pub is_giveaway: bool,
+    /// `true` for a Tagesangebot line: its price belongs to the offer, so the
+    /// basket doesn't offer to change it like a menu item.
+    #[serde(default)]
+    pub is_offer: bool,
 }
 
 /// One picked extra on a cart/order line. Snapshotted with label + price so
@@ -610,7 +614,7 @@ mod eur_parse_tests {
 
 /// URL slug for SEO pages (category + delivery-area URLs). German-aware:
 /// transliterates umlauts/ß to their ASCII digraphs FIRST (ü→ue, ö→oe,
-/// ä→ae, ß→ss), so "Lüdinghausen" → "luedinghausen" rather than dropping
+/// ä→ae, ß→ss), so "Überstadt" → "ueberstadt" rather than dropping
 /// the umlaut. Then lowercases, keeps ASCII alphanumerics, and collapses
 /// every other run into a single dash (no leading/trailing dash). Empty
 /// input (or all-punctuation) yields "" — callers treat that as "no slug".
@@ -653,7 +657,7 @@ mod tests {
 
     #[test]
     fn slug_transliterates_german() {
-        assert_eq!(seo_slug("Lüdinghausen"), "luedinghausen");
+        assert_eq!(seo_slug("Überstadt"), "ueberstadt");
         assert_eq!(seo_slug("Münster"), "muenster");
         assert_eq!(seo_slug("Straße"), "strasse");
         assert_eq!(seo_slug("Größer"), "groesser");
@@ -663,7 +667,7 @@ mod tests {
     fn slug_basics() {
         assert_eq!(seo_slug("Pizza"), "pizza");
         assert_eq!(seo_slug("Pizza & Pasta"), "pizza-pasta");
-        assert_eq!(seo_slug("  Seppenrade  "), "seppenrade");
+        assert_eq!(seo_slug("  Nebendorf  "), "nebendorf");
         assert_eq!(seo_slug("Antipasti / Salate"), "antipasti-salate");
     }
 

@@ -744,25 +744,25 @@ mod tests {
     #[test]
     fn only_a_signed_role_counts() {
         with_key();
-        let davids = auth("davids", "k1");
-        let sig = session_signature(&davids, Role::Kitchen).unwrap();
+        let shop_a = auth("shop-a", "k1");
+        let sig = session_signature(&shop_a, Role::Kitchen).unwrap();
         assert_eq!(
-            verify_session(Some("kitchen"), Some(&sig), &davids),
+            verify_session(Some("kitchen"), Some(&sig), &shop_a),
             Some(Role::Kitchen)
         );
 
         assert_eq!(
-            verify_session(Some("admin"), None, &davids),
+            verify_session(Some("admin"), None, &shop_a),
             None,
             "bare role cookie"
         );
         assert_eq!(
-            verify_session(Some("admin"), Some(&sig), &davids),
+            verify_session(Some("admin"), Some(&sig), &shop_a),
             None,
             "kitchen signature as admin"
         );
         assert_eq!(
-            verify_session(Some("kitchen"), Some("00"), &davids),
+            verify_session(Some("kitchen"), Some("00"), &shop_a),
             None,
             "garbage signature"
         );
@@ -772,7 +772,7 @@ mod tests {
             "other shop"
         );
         assert_eq!(
-            verify_session(Some("kitchen"), Some(&sig), &auth("davids", "k2")),
+            verify_session(Some("kitchen"), Some(&sig), &auth("shop-a", "k2")),
             None,
             "password changed"
         );
@@ -781,16 +781,16 @@ mod tests {
     #[test]
     fn cookie_header_parsing() {
         with_key();
-        let davids = auth("davids", "k1");
-        let sig = session_signature(&davids, Role::Admin).unwrap();
+        let shop_a = auth("shop-a", "k1");
+        let sig = session_signature(&shop_a, Role::Admin).unwrap();
         let header = format!("cart_id=abc; dp_session=admin; dp_auth={sig}");
-        assert_eq!(role_from_cookie_header(&header, &davids), Some(Role::Admin));
-        assert_eq!(role_from_cookie_header("dp_session=admin", &davids), None);
+        assert_eq!(role_from_cookie_header(&header, &shop_a), Some(Role::Admin));
+        assert_eq!(role_from_cookie_header("dp_session=admin", &shop_a), None);
         assert_eq!(
-            role_from_cookie_header("admin_session=ok", &davids),
+            role_from_cookie_header("admin_session=ok", &shop_a),
             None,
             "legacy cookie no longer counts"
         );
-        assert_eq!(role_from_cookie_header("", &davids), None);
+        assert_eq!(role_from_cookie_header("", &shop_a), None);
     }
 }

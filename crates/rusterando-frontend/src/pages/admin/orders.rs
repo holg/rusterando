@@ -599,16 +599,6 @@ fn OrderCard(
             status: "cancelled".into(),
         });
     };
-    // Reprint has its own ServerAction so its `pending()` doesn't
-    // interfere with status updates' versioning. No need to refetch
-    // the orders list after — the row's data is unchanged.
-    let reprinter = ServerAction::<ReprintOrder>::new();
-    let on_reprint = move |_| {
-        reprinter.dispatch(ReprintOrder {
-            id: id_for_reprint.clone(),
-        });
-    };
-
     let payment_label = crate::pages::order::payment_status_label_de(&r.payment_status);
     let payment_attr = r.payment_status.clone();
     let is_delivery = r.order_type == "delivery";
@@ -653,10 +643,9 @@ fn OrderCard(
             <p class="total">{format_eur(r.total_cents)}</p>
             <div class="row">
                 <button class="btn primary" on:click=on_advance>{next_label}</button>
-                <button class="btn ghost" on:click=on_reprint
-                    disabled=move || reprinter.pending().get()>
-                    "🖨 Erneut drucken"
-                </button>
+                // Own ServerAction inside, so its `pending()` doesn't touch
+                // the status updates' versioning (no refetch needed).
+                <crate::components::device_print::ReprintButtons id=id_for_reprint/>
                 <button class="btn ghost" on:click=on_cancel>"Stornieren"</button>
             </div>
         </li>
@@ -789,13 +778,19 @@ fn DetailCard(
         });
     };
 
+    // On a device with its own printer (the app on a Sunmi): the Bon there;
+    // everywhere else the browser's print of the ticket below.
+    let id_print = id.clone();
     let print = move |_| {
+        let printed_here = crate::components::device_print::print_on_device(&id_print);
         #[cfg(feature = "hydrate")]
-        {
+        if !printed_here {
             if let Some(win) = web_sys::window() {
                 let _ = win.print();
             }
         }
+        #[cfg(not(feature = "hydrate"))]
+        let _ = printed_here;
     };
 
     view! {

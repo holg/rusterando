@@ -780,11 +780,11 @@ mod tests {
         let s = &r.summary;
         assert_eq!(s.encoding, "utf-8");
         assert_eq!(s.rows_scanned, sample::ROWS_TOTAL);
-        assert_eq!(s.rows_kept, sample::ROWS_KEPT_LH);
+        assert_eq!(s.rows_kept, sample::ROWS_KEPT_MAIN);
         assert_eq!(s.skipped, 1, "{:?}", s.skip_reasons);
         assert_eq!(s.skip_reasons.get("unparseable house number"), Some(&1));
-        assert!(r.streets.iter().all(|st| st.ags == "05558024"));
-        assert_eq!(s.streets, sample::STREETS_LH);
+        assert!(r.streets.iter().all(|st| st.ags == "05999001"));
+        assert_eq!(s.streets, sample::STREETS_MAIN);
         // Umlauts survived and are normalised.
         let hl = r
             .streets
@@ -792,8 +792,8 @@ mod tests {
             .find(|st| st.name == "Hermann-Löns-Straße")
             .unwrap();
         assert_eq!(hl.name_norm, "hermann loens str");
-        assert_eq!(hl.postcode, "59348");
-        assert_eq!(hl.city, "Lüdinghausen");
+        assert_eq!(hl.postcode, "99999");
+        assert_eq!(hl.city, "Musterstadt");
         // A suffix row is kept as (number, suffix).
         let bh = r
             .streets
@@ -813,7 +813,7 @@ mod tests {
         assert!(r.streets.iter().any(|st| st.name == "Hermann-Löns-Straße"));
         assert!(r.streets.iter().any(|st| st.name == "Mühlenstraße"));
         assert!(r.streets.iter().all(|st| !st.name.contains('\u{FFFD}')));
-        assert_eq!(r.summary.rows_kept, sample::ROWS_KEPT_LH);
+        assert_eq!(r.summary.rows_kept, sample::ROWS_KEPT_MAIN);
     }
 
     #[test]
@@ -824,7 +824,7 @@ mod tests {
         let path = dir.join("gebref_fixture.zip");
         std::fs::write(&path, sample::sample_zip()).unwrap();
         let r = CadastreNrw.build_index(&cfg, &path).unwrap();
-        assert_eq!(r.summary.rows_kept, sample::ROWS_KEPT_LH);
+        assert_eq!(r.summary.rows_kept, sample::ROWS_KEPT_MAIN);
         let idx = r.into_index();
         assert_eq!(idx.suggest_streets("bahnhof")[0].name, "Bahnhofstraße");
         std::fs::remove_dir_all(&dir).ok();
@@ -839,24 +839,24 @@ mod tests {
         let txt = dir.join("gebref.txt");
         std::fs::write(&txt, sample::SAMPLE_UTF8).unwrap();
         let r = CadastreNrw.build_index(&cfg, &txt).unwrap();
-        assert_eq!(r.summary.rows_kept, sample::ROWS_KEPT_LH);
+        assert_eq!(r.summary.rows_kept, sample::ROWS_KEPT_MAIN);
         // Split into per-municipality files.
         let out = dir.join("ags");
         let s = split_by_ags(&txt, &out).unwrap();
         assert_eq!(s.rows, sample::ROWS_TOTAL);
         assert_eq!(s.municipalities.len(), 2);
-        assert_eq!(s.municipalities["05558024"].name, "Lüdinghausen");
+        assert_eq!(s.municipalities["05999001"].name, "Musterstadt");
         assert_eq!(
-            s.municipalities["05558024"].rows,
-            sample::ROWS_KEPT_LH + 1,
+            s.municipalities["05999001"].rows,
+            sample::ROWS_KEPT_MAIN + 1,
             "incl. the malformed row"
         );
-        assert_eq!(s.municipalities["05558028"].rows, sample::ROWS_KEPT_NK);
+        assert_eq!(s.municipalities["05999002"].rows, sample::ROWS_KEPT_OTHER);
         let idx = read_split_index(&out).unwrap();
         assert_eq!(idx.len(), 2);
         assert!(split_index_current(&out));
         assert!(!split_index_current(&dir.join("nowhere")));
-        let lh = idx.iter().find(|m| m.ags == "05558024").unwrap();
+        let lh = idx.iter().find(|m| m.ags == "05999001").unwrap();
         let (lat_min, lat_max, lon_min, lon_max) = lh.bbox.unwrap();
         assert!(
             lat_min > 51.7 && lat_max < 51.8 && lon_min > 7.3 && lon_max < 7.5,
@@ -867,19 +867,19 @@ mod tests {
         assert!(!lh.may_reach(50.9, 6.9, 5_000.0), "Köln is not within 5 km");
         assert!(idx
             .iter()
-            .find(|m| m.ags == "05558028")
+            .find(|m| m.ags == "05999002")
             .unwrap()
             .centroid
             .is_some());
         // A split file imports on its own and yields the same result.
         let r2 = CadastreNrw
-            .build_index(&cfg, &out.join("05558024.txt"))
+            .build_index(&cfg, &out.join("05999001.txt"))
             .unwrap();
-        assert_eq!(r2.summary.rows_kept, sample::ROWS_KEPT_LH);
-        assert_eq!(r2.summary.streets, sample::STREETS_LH);
+        assert_eq!(r2.summary.rows_kept, sample::ROWS_KEPT_MAIN);
+        assert_eq!(r2.summary.streets, sample::STREETS_MAIN);
         // The other municipality's file contains none of ours.
         let r3 = CadastreNrw
-            .build_index(&cfg, &out.join("05558028.txt"))
+            .build_index(&cfg, &out.join("05999002.txt"))
             .unwrap();
         assert_eq!(r3.summary.rows_kept, 0);
         std::fs::remove_dir_all(&dir).ok();
@@ -888,14 +888,14 @@ mod tests {
     #[test]
     fn both_ags_when_configured() {
         let mut cfg = sample::config();
-        cfg.ags.push("05558028".into());
+        cfg.ags.push("05999002".into());
         let r = CadastreNrw::import_reader(&cfg, sample::SAMPLE_UTF8.as_bytes()).unwrap();
         assert_eq!(
             r.summary.rows_kept,
-            sample::ROWS_KEPT_LH + sample::ROWS_KEPT_NK
+            sample::ROWS_KEPT_MAIN + sample::ROWS_KEPT_OTHER
         );
         assert!(
-            r.summary.unmapped_ags.contains("05558028"),
+            r.summary.unmapped_ags.contains("05999002"),
             "second AGS has no postcode map"
         );
     }
@@ -909,8 +909,8 @@ mod tests {
         // Nothing to filter by → untouched.
         r.retain_in_zones(&[], &[]);
         assert_eq!(r.summary.addresses, before);
-        // A 1.5 km circle around the town centre: Berenbrock (far out) and
-        // Olfener Straße (south-west) fall outside.
+        // A 1.5 km circle around the town centre: Feldmark (far out) and
+        // Lindenstraße (south-west) fall outside.
         let centre = ZoneDef {
             id: "c".into(),
             name: "Centre".into(),
@@ -934,7 +934,7 @@ mod tests {
             before
         );
         assert!(
-            !r.streets.iter().any(|s| s.name == "Berenbrock"),
+            !r.streets.iter().any(|s| s.name == "Feldmark"),
             "far street removed entirely"
         );
         assert!(

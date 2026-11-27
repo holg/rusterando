@@ -1,4 +1,4 @@
-"""Shared fixtures for the davidspizzeria E2E test suite.
+"""Shared fixtures for the rusterando E2E test suite.
 
 Run:
     source ~/Documents/develeop/rust/geodb-rs/crates/geodb-py/.env_py312/bin/activate
@@ -6,13 +6,14 @@ Run:
     cp .env.example .env       # fill in DPE2E_ADMIN_PW
     pytest -v
 
-Tests target a configurable base URL (default davidspizzeria.de) and
+Tests target a configurable base URL (default the local dev server
+http://127.0.0.1:3001; a deployed shop only when BASE_URL names it) and
 hit an already-running server. They never modify production data — every
 created entity uses a unique E2E-prefixed identifier so we can tell test
 data apart by eye and clean it up out-of-band.
 
 Key fixtures:
-  base_url   — the URL under test (env BASE_URL or davidspizzeria.de)
+  base_url   — the URL under test (env BASE_URL, default http://127.0.0.1:3001)
   admin_pw   — admin password (env DPE2E_ADMIN_PW, required)
   e2e_tag    — short timestamp tag for the run, used in voucher codes etc.
   sandbox_only — autouse guard that skips the test if Stripe mode is 'live'
@@ -71,11 +72,12 @@ _load_dotenv()
 def base_url() -> str:
     """Where to send requests. Override with BASE_URL env var.
 
-    Default points at production davidspizzeria.de so first-time
-    contributors don't need a local dev server. Tests stay safe via
-    the sandbox-mode guard below.
+    Default is the local dev server (the same port as
+    tests/e2e/.env.example and scripts/test-*-locally.sh). A deployed
+    shop is only ever tested when BASE_URL names it explicitly; the
+    sandbox-mode guard below still protects it then.
     """
-    url = os.environ.get("BASE_URL", "https://davidspizzeria.de").rstrip("/")
+    url = os.environ.get("BASE_URL", "http://127.0.0.1:3001").rstrip("/")
     return url
 
 

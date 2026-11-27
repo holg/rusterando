@@ -31,7 +31,48 @@ const THEME_VPATH: &str = "/theme.typ";
 /// Geometry layer — the Typst MAIN source. Owns page size + fold layout per
 /// `?format=`, imports the styling theme (`/theme.typ`). Not user-editable.
 const GEOMETRY_SRC: &str = include_str!("../templates/geometry.typ");
+/// Live fields on poster covers (prices, delivery fees drawn from the data
+/// onto artwork that leaves them blank), imported by the geometry layer.
+const COVER_LIVE_SRC: &str = include_str!("../templates/cover_live.typ");
+const COVER_LIVE_VPATH: &str = "/cover_live.typ";
 const GEOMETRY_VPATH: &str = "/geometry.typ";
+/// A shop's own poster layouts, imported by the geometry layer (see
+/// [`site_overlay`]).
+const SITE_POSTERS_VPATH: &str = "/site_posters.typ";
+const NO_POSTERS: &str = "#let posters = (:)\n";
+
+/// What one deployment adds that is that shop's own and so not part of this
+/// tree: its poster layouts (`posters.typ`, see `templates/cover_live.typ`).
+/// From the directory `SITE_OVERLAY_DIR` (the deploy script ships
+/// `site/<profile>/` there), read once; without it, no poster layouts.
+struct SiteOverlay {
+    posters_src: String,
+}
+
+fn site_overlay() -> &'static SiteOverlay {
+    static S: OnceLock<SiteOverlay> = OnceLock::new();
+    S.get_or_init(|| {
+        let dir = std::env::var("SITE_OVERLAY_DIR")
+            .ok()
+            .filter(|d| !d.trim().is_empty());
+        let posters_src = dir
+            .and_then(|d| {
+                let path = std::path::Path::new(&d).join("posters.typ");
+                match std::fs::read_to_string(&path) {
+                    Ok(src) => {
+                        tracing::info!("pdf: poster layouts from {}", path.display());
+                        Some(src)
+                    }
+                    Err(e) => {
+                        tracing::warn!("pdf: no poster layouts at {}: {e}", path.display());
+                        None
+                    }
+                }
+            })
+            .unwrap_or_else(|| NO_POSTERS.to_string());
+        SiteOverlay { posters_src }
+    })
+}
 
 // Image assets the template can `image("/img/...")` for. Bytes are embedded
 // at compile time so the running binary needs no filesystem access.
@@ -42,6 +83,75 @@ const ASSET_LADENFRONT_VPATH: &str = "/img/ladenfront.jpg";
 /// to change it, replace public/img/cover.jpg and rebuild.
 const ASSET_COVER: &[u8] = include_bytes!("../assets/cover.jpg");
 const ASSET_COVER_VPATH: &str = "/img/cover.jpg";
+/// The "Tafel" theme's blackboard (466×232 mm at 200 dpi, generated — no
+/// third-party image; see assets/README.md).
+const ASSET_TAFEL: &[u8] = include_bytes!("../assets/tafel.jpg");
+const ASSET_TAFEL_VPATH: &str = "/img/tafel.jpg";
+/// The built-in "Tafel" theme (blackboard + chalk), chosen in the PDF-Editor
+/// like a saved one: `pdf_theme_active_id` = [`TAFEL_THEME_ID`].
+pub const TAFEL_SRC: &str = include_str!("../templates/tafel.typ");
+pub const TAFEL_THEME_ID: &str = "builtin:tafel";
+/// The built-in "Trattoria" theme: the look of an Italian poster cover (dark
+/// paper, red/green/cream, spaced capitals), pointer [`TRATTORIA_THEME_ID`].
+pub const TRATTORIA_SRC: &str = include_str!("../templates/trattoria.typ");
+pub const TRATTORIA_THEME_ID: &str = "builtin:trattoria";
+/// Its paper (466×232 mm at 170 dpi, generated — scripts/gen_paper.py).
+const ASSET_TRATTORIA: &[u8] = include_bytes!("../assets/trattoria.jpg");
+const ASSET_TRATTORIA_VPATH: &str = "/img/trattoria.jpg";
+
+/// Line drawings a theme can put behind each category card, served as
+/// `/img/motif/<name>.svg` (the "Tafel" theme draws them in faint chalk).
+/// Tabler Icons, MIT — see assets/motifs/LICENSE.
+macro_rules! motifs {
+    ($($name:literal),* $(,)?) => {
+        &[$(($name, include_bytes!(concat!("../assets/motifs/", $name, ".svg")) as &[u8])),*]
+    };
+}
+const MOTIFS: &[(&str, &[u8])] = motifs![
+    "baguette",
+    "beer",
+    "bottle",
+    "bowl",
+    "bowl-chopsticks",
+    "bowl-spoon",
+    "bread",
+    "burger",
+    "cake",
+    "cheese",
+    "chef-hat",
+    "coffee",
+    "egg",
+    "egg-fried",
+    "fish",
+    "flame",
+    "glass-cocktail",
+    "glass-full",
+    "ice-cream-2",
+    "leaf",
+    "meat",
+    "mushroom",
+    "pepper",
+    "pizza",
+    "salad",
+    "sausage",
+    "seedling",
+    "soup",
+    "tools-kitchen-2",
+    "tools-kitchen-3",
+    "tree",
+    "map-pin",
+];
+const MOTIF_VPATH_PREFIX: &str = "/img/motif/";
+
+fn motif_file(path: &str) -> Option<Bytes> {
+    let name = path
+        .strip_prefix(MOTIF_VPATH_PREFIX)?
+        .strip_suffix(".svg")?;
+    MOTIFS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, b)| Bytes::new(*b))
+}
 
 /// Virtual paths the template uses for admin-uploaded ad slots. The
 /// template can reference these unconditionally; we serve a 1×1
@@ -91,6 +201,22 @@ pub struct Branding {
     /// from the `pdf_cover_mode` setting; `"text"` is the default so a fresh
     /// tenant never inherits another shop's baked cover photo.
     pub cover_mode: String,
+    /// The active delivery zones as data, for a theme or cover that lays
+    /// them out itself (`delivery_lines` holds them as finished text).
+    pub delivery_zones: Vec<PdfZone>,
+    /// Free delivery from this order value on, in cents (0 = never).
+    pub free_delivery_cents: i64,
+    /// A poster cover's title lines and slogan (`pdf_cover_title`,
+    /// `pdf_cover_slogan`); empty = the poster's own.
+    pub cover_title: Vec<String>,
+    pub cover_slogan: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PdfZone {
+    pub name: String,
+    pub min_order_cents: i64,
+    pub fee_cents: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +245,17 @@ pub struct PdfItem {
     pub size_small_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_large_label: Option<String>,
+    /// Toppings included in the price (the Pizzablech: 3).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub included_extras_count: i64,
+    /// Flat price per further topping, in cents (Pizzablech 3 €, Pizza
+    /// 36 cm 1 €); `None` = the extras catalogue prices.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flat_extra_price_cents: Option<i64>,
+}
+
+fn is_zero(n: &i64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +278,18 @@ const INTER_ITALIC: &[u8] = include_bytes!(concat!(env!("FONT_CACHE_DIR"), "/Int
 /// (🌶 above all). The full font is 10 MB; the subset is 108 KB. Rebuild
 /// with fonttools' `pyftsubset` — see assets/fonts/README.md.
 const NOTO_EMOJI: &[u8] = include_bytes!("../assets/fonts/NotoColorEmoji-subset.ttf");
+/// The "Tafel" theme's chalk lettering (SIL OFL, google/fonts), subset to
+/// Latin + German punctuation and € with pyftsubset (assets/fonts/README.md).
+const CABIN_SKETCH_REGULAR: &[u8] =
+    include_bytes!("../assets/fonts/CabinSketch-Regular-subset.ttf");
+const CABIN_SKETCH_BOLD: &[u8] = include_bytes!("../assets/fonts/CabinSketch-Bold-subset.ttf");
+const KALAM_REGULAR: &[u8] = include_bytes!("../assets/fonts/Kalam-Regular-subset.ttf");
+const KALAM_BOLD: &[u8] = include_bytes!("../assets/fonts/Kalam-Bold-subset.ttf");
+/// Storefront lettering for poster covers (site poster layouts):
+/// Montserrat ExtraBold (SIL OFL, JulietaUla/Montserrat v7.222), subset as
+/// the chalk fonts.
+const MONTSERRAT_EXTRABOLD: &[u8] =
+    include_bytes!("../assets/fonts/Montserrat-ExtraBold-subset.ttf");
 
 /// One-time initialised resources shared across PDF requests. Searching the
 /// system + embedded fonts on every request would be wasteful.
@@ -149,21 +298,73 @@ struct PdfResources {
     fonts: Vec<Font>,
 }
 
-/// The four bundled fonts, parsed once from the binary's own bytes.
+/// The bundled emoji font's pictures, by code point: its glyphs are PNGs
+/// (CBDT). The menu shows emoji as these images (geometry.typ
+/// `emoji-images`) instead of as font glyphs: a bitmap font can only go into
+/// a PDF as a Type 3 font, which print-shop checks report as not embedded.
+fn emoji_pngs() -> &'static std::collections::BTreeMap<u32, Bytes> {
+    static PNGS: OnceLock<std::collections::BTreeMap<u32, Bytes>> = OnceLock::new();
+    PNGS.get_or_init(|| {
+        let mut out = std::collections::BTreeMap::new();
+        let Some(font) = Font::new(Bytes::new(NOTO_EMOJI), 0) else {
+            return out;
+        };
+        let face = font.ttf();
+        let Some(cmap) = face.tables().cmap else {
+            return out;
+        };
+        for sub in cmap.subtables {
+            if !sub.is_unicode() {
+                continue;
+            }
+            sub.codepoints(|cp| {
+                // Pictographs only: not the joiner / variation selector.
+                if cp < 0x2190 || cp == 0xFE0F || out.contains_key(&cp) {
+                    return;
+                }
+                let png = sub
+                    .glyph_index(cp)
+                    .and_then(|g| face.glyph_raster_image(g, u16::MAX));
+                if let Some(png) = png {
+                    out.insert(cp, Bytes::new(png.data.to_vec()));
+                }
+            });
+        }
+        out
+    })
+}
+
+/// `/emoji/<hex>.png` → that emoji's picture.
+fn emoji_file(path: &str) -> Option<Bytes> {
+    let hex = path
+        .strip_prefix(EMOJI_VPATH_PREFIX)?
+        .strip_suffix(".png")?;
+    let cp = u32::from_str_radix(hex, 16).ok()?;
+    emoji_pngs().get(&cp).cloned()
+}
+
+const EMOJI_VPATH_PREFIX: &str = "/emoji/";
+
+/// The bundled fonts, parsed once from the binary's own bytes.
 ///
 /// No temp-dir copies, no font searcher, no embedded Typst default set: the
-/// templates only ever ask for "Inter" and "Noto Color Emoji", so those are
-/// the whole book. `Bytes::new` on a `&'static [u8]` stores the reference —
-/// the font data is never duplicated onto the heap.
+/// templates only ever ask for these, so they are the whole book. `Bytes::new`
+/// on a `&'static [u8]` stores the reference — the font data is never
+/// duplicated onto the heap.
 fn resources() -> &'static PdfResources {
     static R: OnceLock<PdfResources> = OnceLock::new();
     R.get_or_init(|| {
-        let mut fonts = Vec::with_capacity(4);
+        let mut fonts = Vec::with_capacity(8);
         for (name, bytes) in [
             ("Inter-Regular", INTER_REGULAR),
             ("Inter-Bold", INTER_BOLD),
             ("Inter-Italic", INTER_ITALIC),
             ("NotoColorEmoji-subset", NOTO_EMOJI),
+            ("CabinSketch-Regular", CABIN_SKETCH_REGULAR),
+            ("CabinSketch-Bold", CABIN_SKETCH_BOLD),
+            ("Kalam-Regular", KALAM_REGULAR),
+            ("Kalam-Bold", KALAM_BOLD),
+            ("Montserrat-ExtraBold", MONTSERRAT_EXTRABOLD),
         ] {
             match Font::new(Bytes::new(bytes), 0) {
                 Some(f) => fonts.push(f),
@@ -172,7 +373,7 @@ fn resources() -> &'static PdfResources {
         }
         let book = FontBook::from_fonts(&fonts);
         tracing::info!(
-            "pdf: registered {} bundled fonts (Inter + emoji subset)",
+            "pdf: registered {} bundled fonts (Inter, emoji subset, Tafel chalk, Montserrat)",
             fonts.len()
         );
         PdfResources {
@@ -192,6 +393,12 @@ struct MenuWorld {
     /// `TEMPLATE_SRC`.
     theme_id: FileId,
     theme_source: Source,
+    /// `cover_live.typ` (live fields on poster covers).
+    cover_live_id: FileId,
+    cover_live_source: Source,
+    /// The site's poster layouts (`site_overlay`).
+    site_posters_id: FileId,
+    site_posters_source: Source,
     /// SVG bytes for the QR code that points at `payload.site_url`. Generated
     /// once per request — Typst caches the resulting `Image`.
     qr_svg: Vec<u8>,
@@ -211,13 +418,35 @@ impl MenuWorld {
         format: &str,
         show_ingredients: bool,
     ) -> anyhow::Result<Self> {
+        use typst::foundations::Value;
         let json = serde_json::to_string(payload)?;
         let mut inputs = Dict::new();
-        inputs.insert("data".into(), typst::foundations::Value::Str(json.into()));
+        inputs.insert("data".into(), Value::Str(json.into()));
         // `format` selects the page geometry / fold layout in the template.
+        // "a5-zickzack-marks" is the Zickzack with crop + fold marks: the
+        // theme only ever sees the format itself.
+        let (format, marks) = match format {
+            "a5-zickzack-marks" => ("a5-zickzack", true),
+            f => (f, false),
+        };
+        inputs.insert("format".into(), Value::Str(format.into()));
+        inputs.insert("marks".into(), Value::Bool(marks));
+        // Which cover picture this is: `cover_live.typ` draws live prices
+        // onto the one artwork it knows, found by this hash (the
+        // Cover-Bibliothek names uploads by it too).
         inputs.insert(
-            "format".into(),
-            typst::foundations::Value::Str(format.into()),
+            "cover-sha".into(),
+            Value::Str(sha256_hex(overrides.cover_image.as_deref().unwrap_or(ASSET_COVER)).into()),
+        );
+        // The emoji to show as pictures (`emoji_pngs`).
+        inputs.insert(
+            "emoji".into(),
+            Value::Array(
+                emoji_pngs()
+                    .keys()
+                    .map(|&cp| Value::Int(i64::from(cp)))
+                    .collect(),
+            ),
         );
         // `show-ingredients` toggles the per-item description line. Default
         // (true) is the full hand-out menu; `?condensed=1` flips it off for
@@ -240,6 +469,11 @@ impl MenuWorld {
             .unwrap_or(TEMPLATE_SRC);
         let theme_id = FileId::new(None, VirtualPath::new(THEME_VPATH));
         let theme_source = Source::new(theme_id, theme_str.to_string());
+        let cover_live_id = FileId::new(None, VirtualPath::new(COVER_LIVE_VPATH));
+        let cover_live_source = Source::new(cover_live_id, COVER_LIVE_SRC.to_string());
+        let site_posters_id = FileId::new(None, VirtualPath::new(SITE_POSTERS_VPATH));
+        let site_posters_source =
+            Source::new(site_posters_id, site_overlay().posters_src.clone());
 
         let qr_svg = render_qr_svg(&payload.site_url);
 
@@ -249,8 +483,13 @@ impl MenuWorld {
             main_source,
             theme_id,
             theme_source,
+            cover_live_id,
+            cover_live_source,
+            site_posters_id,
+            site_posters_source,
             qr_svg,
-            cover_override: overrides.cover_image.clone(),
+            cover_override: tafel_cover(theme_str, overrides.cover_image.as_deref())
+                .or_else(|| overrides.cover_image.clone()),
             ad_cover: overrides.ad_cover_image.clone(),
             ad_center: overrides.ad_center_image.clone(),
             ad_back: overrides.ad_back_image.clone(),
@@ -307,6 +546,10 @@ impl World for MenuWorld {
         } else if id == self.theme_id {
             // The geometry layer `#import "/theme.typ"` resolves here.
             Ok(self.theme_source.clone())
+        } else if id == self.cover_live_id {
+            Ok(self.cover_live_source.clone())
+        } else if id == self.site_posters_id {
+            Ok(self.site_posters_source.clone())
         } else {
             Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
         }
@@ -338,6 +581,12 @@ impl World for MenuWorld {
                 self.ad_back.clone().unwrap_or_else(|| BLANK_PNG.to_vec()),
             )),
             Some(p) if p == ASSET_QR_VPATH => Ok(Bytes::new(self.qr_svg.clone())),
+            Some(p) if p == ASSET_TAFEL_VPATH => Ok(Bytes::new(ASSET_TAFEL)),
+            Some(p) if p == ASSET_TRATTORIA_VPATH => Ok(Bytes::new(ASSET_TRATTORIA)),
+            Some(p) if p.starts_with(EMOJI_VPATH_PREFIX) => emoji_file(p)
+                .ok_or_else(|| FileError::NotFound(id.vpath().as_rootless_path().into())),
+            Some(p) if p.starts_with(MOTIF_VPATH_PREFIX) => motif_file(p)
+                .ok_or_else(|| FileError::NotFound(id.vpath().as_rootless_path().into())),
             _ => Err(FileError::NotFound(id.vpath().as_rootless_path().into())),
         }
     }
@@ -364,6 +613,49 @@ pub fn render_menu_pdf(
     format: &str,
     show_ingredients: bool,
 ) -> anyhow::Result<Vec<u8>> {
+    let document = compile_menu(payload, overrides, format, show_ingredients)?;
+    let opts = typst_pdf::PdfOptions::default();
+    let bytes = typst_pdf::pdf(&document, &opts).map_err(|errs| {
+        let msgs: Vec<_> = errs.iter().map(|e| eco_format!("{}", e.message)).collect();
+        anyhow::anyhow!("Typst PDF export failed: {}", msgs.join("; "))
+    })?;
+    Ok(bytes)
+}
+
+/// The front cover alone (format "cover", one A5 page, live prices on a
+/// poster cover) as a JPEG `width_px` wide — the homepage's picture.
+pub fn render_cover_jpeg(
+    payload: &MenuPdfPayload,
+    overrides: &PdfOverrides,
+    width_px: u32,
+) -> anyhow::Result<Vec<u8>> {
+    let document = compile_menu(payload, overrides, "cover", true)?;
+    let page = document
+        .pages
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("cover: no page"))?;
+    let pixel_per_pt = width_px as f32 / page.frame.width().to_pt() as f32;
+    let pixmap = typst_render::render(page, pixel_per_pt);
+    // The cover is opaque, so premultiplied RGBA is plain RGBA: drop alpha.
+    let rgb: Vec<u8> = pixmap
+        .data()
+        .chunks_exact(4)
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect();
+    let img = image::RgbImage::from_raw(pixmap.width(), pixmap.height(), rgb)
+        .ok_or_else(|| anyhow::anyhow!("cover: bad pixmap"))?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85).encode_image(&img)?;
+    Ok(out.into_inner())
+}
+
+/// Compile the menu document (geometry layer + theme) for `format`.
+fn compile_menu(
+    payload: &MenuPdfPayload,
+    overrides: &PdfOverrides,
+    format: &str,
+    show_ingredients: bool,
+) -> anyhow::Result<PagedDocument> {
     let world = MenuWorld::new(payload, overrides, format, show_ingredients)?;
     tracing::debug!(
         "pdf: compiling, fonts={}, categories={}, items={}",
@@ -391,14 +683,7 @@ pub fn render_menu_pdf(
         let msgs: Vec<_> = errs.iter().map(|e| eco_format!("{}", e.message)).collect();
         anyhow::anyhow!("Typst compile failed: {}", msgs.join("; "))
     })?;
-
-    let opts = typst_pdf::PdfOptions::default();
-    let bytes = typst_pdf::pdf(&document, &opts).map_err(|errs| {
-        let msgs: Vec<_> = errs.iter().map(|e| eco_format!("{}", e.message)).collect();
-        anyhow::anyhow!("Typst PDF export failed: {}", msgs.join("; "))
-    })?;
-
-    Ok(bytes)
+    Ok(document)
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +721,8 @@ pub async fn load_menu_payload(
         i64,            // is_spicy
         i64,            // is_available
         i64,            // sort_order
+        i64,            // included_extras_count
+        Option<i64>,    // flat_extra_price_cents
     )> = {
         // Staged prices overlay the live ones per column; an item without a
         // large size stays without one even if a stray next_large is set.
@@ -451,7 +738,8 @@ pub async fn load_menu_payload(
         let sql = format!(
             "SELECT id, category_id, menu_number, name, description,
                     {small_col}, {large_col}, size_small_label, size_large_label,
-                    allergen_codes, additive_codes, is_spicy, is_available, sort_order
+                    allergen_codes, additive_codes, is_spicy, is_available, sort_order,
+                    included_extras_count, flat_extra_price_cents
              FROM menu_items
              WHERE is_listed = 1 AND is_available = 1
              ORDER BY sort_order,
@@ -484,6 +772,8 @@ pub async fn load_menu_payload(
                 allergen_codes: r.9.filter(|s| !s.is_empty()),
                 additive_codes: r.10.filter(|s| !s.is_empty()),
                 is_spicy: r.11 != 0,
+                included_extras_count: r.14,
+                flat_extra_price_cents: r.15,
             });
         }
     }
@@ -528,6 +818,14 @@ pub async fn load_menu_payload(
         format!("{euros},{rest:02} €")
     };
 
+    let delivery_zones: Vec<PdfZone> = zone_rows
+        .iter()
+        .map(|(name, fee, min_order)| PdfZone {
+            name: name.clone().unwrap_or_else(|| "?".into()),
+            min_order_cents: *min_order,
+            fee_cents: *fee,
+        })
+        .collect();
     let mut delivery_lines: Vec<String> = zone_rows
         .into_iter()
         .map(|(name, fee, min_order)| {
@@ -570,7 +868,7 @@ pub async fn load_menu_payload(
         .unwrap_or_else(default_extras_pasta_lines);
 
     // Front-cover mode. Default "text" so a tenant with no cover photo gets a
-    // proper own-branded text cover instead of inheriting the bundled davids
+    // proper own-branded text cover instead of the bundled placeholder
     // photo. Only "image" switches to the photo path.
     let cover_mode = match read_setting(db, "pdf_cover_mode").await.as_deref() {
         Some("image") => "image".to_string(),
@@ -588,6 +886,14 @@ pub async fn load_menu_payload(
             extras_pizza_lines,
             extras_pasta_lines,
             cover_mode,
+            delivery_zones,
+            free_delivery_cents: free_threshold,
+            cover_title: read_setting_lines(db, "pdf_cover_title")
+                .await
+                .unwrap_or_default(),
+            cover_slogan: read_setting(db, "pdf_cover_slogan")
+                .await
+                .unwrap_or_default(),
         },
         categories,
         allergens,
@@ -596,27 +902,16 @@ pub async fn load_menu_payload(
     })
 }
 
+// Until the admin fills them in (PDF-Editor), the PDF shows no opening
+// hours and no extras: a shop's own, never guessed.
 fn default_hours_lines() -> Vec<String> {
-    vec![
-        "Mo, Di, Do, So: 11:30–14:30 · 17:00–22:00".into(),
-        "Fr, Sa: 16:00–22:00".into(),
-        "Mi Ruhetag".into(),
-    ]
+    Vec::new()
 }
 fn default_extras_pizza_lines() -> Vec<String> {
-    vec![
-        "Krabben 1 €".into(),
-        "Lachs 2 €".into(),
-        "Kräuterbutter 0,60 €".into(),
-        "sonstige Extras 0,70 €".into(),
-    ]
+    Vec::new()
 }
 fn default_extras_pasta_lines() -> Vec<String> {
-    vec![
-        "Krabben 1 €".into(),
-        "Lachs 2 €".into(),
-        "sonstige Extras 0,70 €".into(),
-    ]
+    Vec::new()
 }
 
 /// Look up a single app_settings value. Returns `Some` only if the row
@@ -702,11 +997,13 @@ pub async fn load_pdf_overrides(
 /// `None` if no theme is active or the active row was deleted out
 /// from under the pointer.
 async fn read_active_theme_source(db: &SqlitePool) -> Option<String> {
-    let id: i64 = read_setting(db, "pdf_theme_active_id")
-        .await?
-        .trim()
-        .parse()
-        .ok()?;
+    let active = read_setting(db, "pdf_theme_active_id").await?;
+    match active.trim() {
+        TAFEL_THEME_ID => return Some(TAFEL_SRC.to_string()),
+        TRATTORIA_THEME_ID => return Some(TRATTORIA_SRC.to_string()),
+        _ => {}
+    }
+    let id: i64 = active.trim().parse().ok()?;
     sqlx::query_scalar::<_, String>("SELECT source FROM pdf_themes WHERE id = ?1")
         .bind(id)
         .fetch_optional(db)
@@ -750,6 +1047,15 @@ async fn read_active_cover_bytes(db: &SqlitePool, uploads_dir: &str) -> Option<V
         std::fs::read(base.join(&filename)).ok()
     })?;
     Some(normalise_cover_to_jpeg(raw))
+}
+
+/// Lower-case hex SHA-256, the same naming the Cover-Bibliothek upload uses.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The Typst template fetches the cover via `image("/img/cover.jpg")`, so
@@ -804,10 +1110,11 @@ async fn read_image_setting(db: &SqlitePool, key: &str, uploads_dir: &str) -> Op
 /// Convenience: load + render in one go. Compile runs on a blocking pool so
 /// the async runtime stays responsive during the ~hundreds-of-ms render.
 /// `format` selects the page geometry / fold layout the Typst template
-/// renders: `"trifold"` (default — the 443×210 three-panel sheet) or
-/// `"a5-zickzack"` (DIN-A5 portrait, 6-panel accordion, 888×210 with 3 mm
-/// bleed and fold marks for the 4c print job). Unknown values fall back to
-/// trifold in the caller.
+/// renders: `"trifold"` (default — the 443×210 three-panel sheet),
+/// `"a5-zickzack"` (DIN-A5 portrait, 6-panel accordion, 444×210 plus 3 mm
+/// bleed for the 4c print job) or `"a5-zickzack-marks"` (the same with crop
+/// and fold marks outside the bleed). Unknown values fall back to trifold in
+/// the caller.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_menu_pdf(
     db: &SqlitePool,
@@ -881,7 +1188,171 @@ pub async fn write_menu_pdf_cache(
             bytes.len()
         );
     }
+    if let Err(e) = write_home_cover(db, uploads_dir, site_url, shop_branding, shared).await {
+        tracing::warn!("homepage cover not written: {e}");
+    }
     Ok(())
+}
+
+/// `app_settings` key naming the homepage's cover picture (a file in
+/// `<uploads>/covers/`), empty = none. Written here, read by the homepage.
+pub const HOME_COVER_KEY: &str = "home_cover_file";
+
+/// The homepage's cover picture: the PDF's front cover (format "cover") as a
+/// JPEG, made together with the static menu cache — on every save that
+/// changes the menu, never per request. Only for a poster cover with live
+/// prices (`cover_live.typ`); for any other cover the setting is cleared.
+/// The file is named by everything that goes into it, so an unchanged menu
+/// costs nothing and browsers may keep the file for good.
+pub async fn write_home_cover(
+    db: &SqlitePool,
+    uploads_dir: &str,
+    site_url: String,
+    shop_branding: &rusterando_frontend::branding::Branding,
+    shared: Option<&SqlitePool>,
+) -> anyhow::Result<()> {
+    let payload = load_menu_payload(db, site_url, shop_branding, false).await?;
+    let overrides = load_pdf_overrides(db, uploads_dir, shared).await;
+    let cover_sha = sha256_hex(overrides.cover_image.as_deref().unwrap_or(ASSET_COVER));
+    let live = payload.branding.cover_mode == "image"
+        && live_poster_shas().iter().any(|s| *s == cover_sha);
+    let covers = std::path::Path::new(uploads_dir).join("covers");
+    let name = if live {
+        let mut key = serde_json::to_vec(&payload)?;
+        for part in [
+            cover_sha.as_str(),
+            overrides.template_source.as_deref().unwrap_or(""),
+            GEOMETRY_SRC,
+            COVER_LIVE_SRC,
+            site_overlay().posters_src.as_str(),
+            COVER_BOARD_LOOK,
+        ] {
+            key.extend(part.bytes());
+        }
+        let name = format!("home-{}.jpg", &sha256_hex(&key)[..16]);
+        let dst = covers.join(&name);
+        if !dst.exists() {
+            let jpeg = tokio::task::spawn_blocking(move || {
+                render_cover_jpeg(&payload, &overrides, HOME_COVER_WIDTH_PX)
+            })
+            .await??;
+            tokio::fs::create_dir_all(&covers).await?;
+            let tmp = covers.join(format!(".{name}.tmp"));
+            tokio::fs::write(&tmp, &jpeg).await?;
+            tokio::fs::rename(&tmp, &dst).await?;
+            tracing::info!(
+                "wrote homepage cover {} ({} bytes)",
+                dst.display(),
+                jpeg.len()
+            );
+        }
+        name
+    } else {
+        String::new()
+    };
+    let old = read_setting(db, HOME_COVER_KEY).await.unwrap_or_default();
+    if name != old {
+        sqlx::query(
+            "INSERT INTO app_settings (key, value, label_de, hint_de) \
+             VALUES (?1, ?2, 'Startseite: Titelblatt-Bild', 'Wird automatisch geschrieben.') \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+        )
+        .bind(HOME_COVER_KEY)
+        .bind(&name)
+        .execute(db)
+        .await?;
+        // The previous picture is this shop's alone (its name hashes the
+        // shop's own data): gone with the setting.
+        if old.starts_with("home-") && !old.contains(['/', '\\']) {
+            let _ = tokio::fs::remove_file(covers.join(&old)).await;
+        }
+    }
+    Ok(())
+}
+
+/// 1000 px: sharp at the size the homepage shows it, on a phone too.
+const HOME_COVER_WIDTH_PX: u32 = 1000;
+
+/// Part of the homepage picture's name: change it when [`cover_on_board`]
+/// changes, so the picture is made anew.
+const COVER_BOARD_LOOK: &str = "tafel-board-lighten-1";
+
+/// The cover for the "Tafel" theme: a live poster (dark stone ground) gets
+/// the theme's blackboard instead — the front page then matches the board
+/// pages and the website's Tafel look. `None`: another theme, or a cover
+/// that isn't one of the posters (a photo stays as it is).
+fn tafel_cover(theme: &str, cover: Option<&[u8]>) -> Option<Vec<u8>> {
+    if theme != TAFEL_SRC {
+        return None;
+    }
+    let cover = cover.unwrap_or(ASSET_COVER);
+    let sha = sha256_hex(cover);
+    if !live_poster_shas().contains(&sha) {
+        return None;
+    }
+    static MADE: OnceLock<std::sync::Mutex<Option<(String, Vec<u8>)>>> = OnceLock::new();
+    let made = MADE.get_or_init(Default::default);
+    if let Some((k, bytes)) = made.lock().ok().and_then(|m| m.clone()) {
+        if k == sha {
+            return Some(bytes);
+        }
+    }
+    match cover_on_board(cover) {
+        Ok(bytes) => {
+            if let Ok(mut m) = made.lock() {
+                *m = Some((sha, bytes.clone()));
+            }
+            Some(bytes)
+        }
+        Err(e) => {
+            tracing::warn!("Tafel cover: {e:#}");
+            None
+        }
+    }
+}
+
+/// The poster laid on the Tafel board: each pixel keeps the lighter of
+/// poster and board ("lighten"). The near-black stone shows the board;
+/// lettering, prices and the photo keep their colours. The board's middle,
+/// cut to the poster's shape and scaled to it.
+fn cover_on_board(cover: &[u8]) -> anyhow::Result<Vec<u8>> {
+    use image::imageops::{crop_imm, resize, FilterType};
+    let mut poster = image::load_from_memory(cover)?.to_rgb8();
+    let board = image::load_from_memory(ASSET_TAFEL)?.to_rgb8();
+    let (w, h) = poster.dimensions();
+    let (bw, bh) = board.dimensions();
+    let (cw, ch) = if u64::from(bw) * u64::from(h) > u64::from(bh) * u64::from(w) {
+        ((u64::from(bh) * u64::from(w) / u64::from(h)) as u32, bh)
+    } else {
+        (bw, (u64::from(bw) * u64::from(h) / u64::from(w)) as u32)
+    };
+    let cut = crop_imm(&board, (bw - cw) / 2, (bh - ch) / 2, cw, ch).to_image();
+    let ground = resize(&cut, w, h, FilterType::Triangle);
+    for (p, g) in poster.pixels_mut().zip(ground.pixels()) {
+        for c in 0..3 {
+            p.0[c] = p.0[c].max(g.0[c]);
+        }
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 92).encode_image(&poster)?;
+    Ok(out.into_inner())
+}
+
+/// The poster covers the site overlay knows (the keys of its `posters`).
+fn live_poster_shas() -> &'static [String] {
+    static SHAS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    SHAS.get_or_init(|| {
+        let src = site_overlay().posters_src.as_str();
+        let start = src.find("#let posters = (").unwrap_or(0);
+        let block = src[start..].split("\n)").next().unwrap_or("");
+        block
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .filter(|k| k.len() == 64 && k.bytes().all(|b| b.is_ascii_hexdigit()))
+            .map(str::to_string)
+            .collect()
+    })
 }
 
 /// Concrete `MenuPdfCache` so frontend admin server fns can refresh the static
@@ -983,6 +1454,44 @@ pub async fn seed_pdf_library_if_empty(db: &SqlitePool, uploads_dir: &str) -> an
 }
 
 #[cfg(test)]
+mod eink_tests {
+    use super::*;
+
+    fn sample(offer: bool) -> EinkOffer {
+        EinkOffer {
+            offer,
+            name: "Broccoli Roma mit kleinem Salat".into(),
+            detail: "Broccoli Roma · mit kl. Salat".into(),
+            price: "9 €".into(),
+            regular: "14 €".into(),
+            motif: "tree".into(),
+            shop: "Musterpizzeria".into(),
+            url: "musterpizzeria.example".into(),
+            phone: "01234-567890".into(),
+        }
+    }
+
+    #[test]
+    fn offer_renders_in_the_six_panel_colours() {
+        for offer in [true, false] {
+            let (png, eink) = render_eink_offer(&sample(offer)).expect("eink renders");
+            assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));
+            assert_eq!(eink.len(), 192_000);
+            let allowed: Vec<u8> = EINK_PALETTE.iter().map(|(_, c)| *c).collect();
+            assert!(eink
+                .iter()
+                .all(|b| allowed.contains(&(b >> 4)) && allowed.contains(&(b & 0x0f))));
+            // Not an empty board: some white, yellow or red is drawn.
+            assert!(eink.iter().any(|b| b >> 4 != 0 || b & 0x0f != 0));
+            // EINK_PREVIEW=<dir>: the pictures to look at.
+            if let Ok(dir) = std::env::var("EINK_PREVIEW") {
+                std::fs::write(format!("{dir}/eink-{offer}.png"), &png).unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod cover_tests {
     use super::*;
 
@@ -998,6 +1507,14 @@ mod cover_tests {
                 extras_pizza_lines: vec!["Krabben 1 €".into()],
                 extras_pasta_lines: vec!["Krabben 1 €".into()],
                 cover_mode: cover_mode.into(),
+                delivery_zones: vec![PdfZone {
+                    name: "Stadt".into(),
+                    min_order_cents: 1500,
+                    fee_cents: 150,
+                }],
+                free_delivery_cents: 0,
+                cover_title: Vec::new(),
+                cover_slogan: String::new(),
             },
             categories: vec![PdfCategory {
                 id: "c1".into(),
@@ -1013,6 +1530,8 @@ mod cover_tests {
                     price_large_cents: Some(800),
                     size_small_label: Some("22cm".into()),
                     size_large_label: Some("30cm".into()),
+                    included_extras_count: 0,
+                    flat_extra_price_cents: None,
                 }],
             }],
             allergens: vec![],
@@ -1039,6 +1558,246 @@ mod cover_tests {
             "PDF suspiciously small: {}",
             bytes.len()
         );
+    }
+
+    // Emoji come from the bundled font as PNGs, so no Type 3 font goes in.
+    #[test]
+    fn emoji_are_pictures_from_the_bundled_font() {
+        let pngs = emoji_pngs();
+        assert!(pngs.len() > 40, "only {} emoji", pngs.len());
+        let chili = emoji_file("/emoji/1f336.png").expect("🌶");
+        assert_eq!(&chili[..4], b"\x89PNG");
+        assert!(emoji_file("/emoji/fe0f.png").is_none());
+        assert!(emoji_file("/emoji/zz.png").is_none());
+    }
+
+    // The Zickzack, with and without crop + fold marks.
+    #[test]
+    fn zickzack_renders_with_and_without_marks() {
+        let payload = sample_payload("image");
+        let overrides = PdfOverrides {
+            template_source: None,
+            cover_image: None,
+            ad_cover_image: None,
+            ad_center_image: None,
+            ad_back_image: None,
+        };
+        for format in ["a5-zickzack", "a5-zickzack-marks"] {
+            let bytes = render_menu_pdf(&payload, &overrides, format, true).expect(format);
+            assert!(bytes.len() > 1000, "{format}: {} bytes", bytes.len());
+        }
+    }
+
+    // The built-in blackboard theme, in every page format.
+    #[test]
+    fn tafel_theme_renders() {
+        let payload = sample_payload("image");
+        let overrides = PdfOverrides {
+            template_source: Some(TAFEL_SRC.to_string()),
+            cover_image: None,
+            ad_cover_image: None,
+            ad_center_image: None,
+            ad_back_image: None,
+        };
+        for format in ["trifold", "a5-zickzack", "a5-zickzack-marks"] {
+            let bytes = render_menu_pdf(&payload, &overrides, format, true).expect(format);
+            assert!(
+                bytes.len() > 100_000,
+                "{format}: {} bytes (board missing?)",
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn trattoria_theme_renders() {
+        let payload = sample_payload("image");
+        let overrides = PdfOverrides {
+            template_source: Some(TRATTORIA_SRC.to_string()),
+            cover_image: None,
+            ad_cover_image: None,
+            ad_center_image: None,
+            ad_back_image: None,
+        };
+        for format in ["trifold", "a5-zickzack", "a5-zickzack-marks"] {
+            let bytes = render_menu_pdf(&payload, &overrides, format, true).expect(format);
+            assert!(
+                bytes.len() > 100_000,
+                "{format}: {} bytes (paper missing?)",
+                bytes.len()
+            );
+        }
+    }
+
+    /// All text on a laid-out frame, items separated by spaces.
+    fn frame_text(frame: &typst::layout::Frame, out: &mut String) {
+        for (_, item) in frame.items() {
+            match item {
+                typst::layout::FrameItem::Group(g) => frame_text(&g.frame, out),
+                typst::layout::FrameItem::Text(t) => {
+                    out.push_str(t.text.as_str());
+                    out.push(' ');
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The site's poster test picture, `$SITE_OVERLAY_DIR/tests/poster.jpg`
+    /// (one of the overlay's `posters`). Poster layouts are a shop's own, so
+    /// the poster tests run only with an overlay:
+    /// `SITE_OVERLAY_DIR=$PWD/site/<profile> cargo test -p rusterando-server`.
+    fn overlay_poster() -> Option<Vec<u8>> {
+        let dir = std::env::var("SITE_OVERLAY_DIR").ok()?;
+        let poster = std::fs::read(std::path::Path::new(&dir).join("tests/poster.jpg")).ok();
+        if poster.is_none() {
+            eprintln!("poster test skipped: no {dir}/tests/poster.jpg");
+        }
+        poster
+    }
+
+    // The Tafel theme lays its board under the poster: the dark stone gives
+    // way to it (lighter, greener), the photo stays. Other themes and
+    // non-poster covers are left alone. COVER_PREVIEW=<dir> writes the
+    // homepage picture with and without the board.
+    #[test]
+    fn tafel_theme_lays_the_board_under_the_poster() {
+        let Some(poster) = overlay_poster() else { return };
+        assert!(tafel_cover(TRATTORIA_SRC, Some(&poster)).is_none());
+        assert!(tafel_cover(TAFEL_SRC, Some(ASSET_LADENFRONT)).is_none());
+        let on_board = tafel_cover(TAFEL_SRC, Some(&poster)).expect("board cover");
+        let before = image::load_from_memory(&poster).unwrap().to_rgb8();
+        let after = image::load_from_memory(&on_board).unwrap().to_rgb8();
+        assert_eq!(before.dimensions(), after.dimensions());
+        // The stone near the top left corner, inside the poster's frame line.
+        let lum = |img: &image::RgbImage| {
+            let mut sum = 0u64;
+            for y in 30..90 {
+                for x in 30..90 {
+                    let p = img.get_pixel(x, y).0;
+                    sum += u64::from(p[0]) + u64::from(p[1]) + u64::from(p[2]);
+                }
+            }
+            sum / (60 * 60 * 3)
+        };
+        assert!(lum(&after) > lum(&before) + 8, "board: {} vs stone {}", lum(&after), lum(&before));
+        if let Ok(dir) = std::env::var("COVER_PREVIEW") {
+            let payload = sample_payload("image");
+            for (name, theme) in [("cover-tafel.jpg", TAFEL_SRC), ("cover-trattoria.jpg", TRATTORIA_SRC)] {
+                let overrides = PdfOverrides {
+                    template_source: Some(theme.to_string()),
+                    cover_image: Some(poster.clone()),
+                    ad_cover_image: None,
+                    ad_center_image: None,
+                    ad_back_image: None,
+                };
+                let jpeg = render_cover_jpeg(&payload, &overrides, 1000).expect("cover");
+                std::fs::write(std::path::Path::new(&dir).join(name), jpeg).unwrap();
+            }
+        }
+    }
+
+    // The site's poster gets today's prices and zones from the data, found by
+    // the picture's hash; any other cover gets none of it. What it must show
+    // for this payload is the overlay's `tests/poster-expect.txt` (one text
+    // per line). The homepage picture renders from the same page.
+    #[test]
+    fn poster_cover_gets_live_prices() {
+        let Some(poster) = overlay_poster() else { return };
+        let dir = std::env::var("SITE_OVERLAY_DIR").unwrap();
+        let expect = std::fs::read_to_string(std::path::Path::new(&dir).join("tests/poster-expect.txt"))
+            .expect("tests/poster-expect.txt next to the test poster");
+        assert!(live_poster_shas().contains(&sha256_hex(&poster)));
+        let mut payload = sample_payload("image");
+        let item = |name: &str, cents: i64, incl: i64, flat: i64| PdfItem {
+            menu_number: None,
+            name: name.into(),
+            description: None,
+            allergen_codes: None,
+            additive_codes: None,
+            is_spicy: false,
+            price_small_cents: cents,
+            price_large_cents: None,
+            size_small_label: None,
+            size_large_label: None,
+            included_extras_count: incl,
+            flat_extra_price_cents: Some(flat),
+        };
+        payload.categories[0]
+            .items
+            .push(item("Pizzablech 60x40cm", 2940, 3, 300));
+        payload.categories[0]
+            .items
+            .push(item("Pizza 36 cm mit Goudakäse", 1470, 0, 100));
+        payload.branding.delivery_zones.push(PdfZone {
+            name: "Nebendorf".into(),
+            min_order_cents: 3000,
+            fee_cents: 250,
+        });
+        payload.branding.cover_title = vec!["Bella".into(), "Vita".into()];
+        payload.branding.cover_slogan = "Frisch aus dem Ofen".into();
+        payload.branding.hours_lines = vec!["Mo–So 11:30–22:00".into(), "Mi Ruhetag".into()];
+        payload.branding.address = "Hauptstr. 1, 12345 Musterstadt".into();
+        payload.branding.phone = "Tel. 0123-456".into();
+        let overrides = |cover: Option<Vec<u8>>| PdfOverrides {
+            template_source: None,
+            cover_image: cover,
+            ad_cover_image: None,
+            ad_center_image: None,
+            ad_back_image: None,
+        };
+        let text = |cover: Option<Vec<u8>>| {
+            let doc = compile_menu(&payload, &overrides(cover), "cover", true).expect("cover");
+            assert_eq!(doc.pages.len(), 1);
+            let mut s = String::new();
+            frame_text(&doc.pages[0].frame, &mut s);
+            s
+        };
+        let live = text(Some(poster.clone()));
+        for want in expect.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            assert!(
+                live.contains(want),
+                "{want:?} missing from the cover: {live}"
+            );
+        }
+        assert_ne!(live, text(None), "the poster got no live fields");
+        let jpeg = render_cover_jpeg(&payload, &overrides(Some(poster)), 1000).expect("jpeg");
+        assert!(jpeg.starts_with(&[0xFF, 0xD8]) && jpeg.len() > 50_000);
+    }
+
+    // Every drawing the Tafel theme can pick (its `motif-map` and the
+    // fallback) must be bundled: a missing one fails the whole PDF for any
+    // shop with a category that matches it.
+    #[test]
+    fn tafel_motifs_are_bundled() {
+        for src in [TAFEL_SRC, TRATTORIA_SRC] {
+            theme_motifs_are_bundled(src);
+        }
+        assert!(motif_file("/img/motif/../tafel.jpg").is_none());
+    }
+
+    fn theme_motifs_are_bundled(src: &str) {
+        let start = src.find("#let motif-map = (").expect("motif-map");
+        let end = src.find("#let theme-card-motif").expect("theme-card-motif");
+        // `  ("pattern", "name"),` and `#let motif-fallback = "name"`
+        let names: Vec<&str> = src[start..end]
+            .lines()
+            .filter_map(|line| {
+                let parts: Vec<&str> = line.split('"').collect();
+                match parts.len() {
+                    5 => Some(parts[3]),
+                    3 => Some(parts[1]),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert!(names.len() > 20, "parsed only {names:?}");
+        for name in names {
+            assert!(
+                motif_file(&format!("{MOTIF_VPATH_PREFIX}{name}.svg")).is_some(),
+                "a theme uses motif {name:?}, not in MOTIFS"
+            );
+        }
     }
 
     // The image cover must still render (falls back to bundled ASSET_COVER).
@@ -1098,6 +1857,10 @@ pub struct OrderPdfSummary {
     pub total_cents: i64,
     /// How many cancelled orders are in the range (shown for reconciliation).
     pub cancelled_count: i64,
+    /// Non-cancelled orders with a voucher, and the discount they got: what
+    /// the shop gave away (Werbungskosten); each Beleg shows its own line.
+    pub voucher_count: i64,
+    pub voucher_cents: i64,
     pub include_test: bool,
     pub include_cancelled: bool,
     /// Non-empty → a red "large export" note on the cover.
@@ -1211,6 +1974,265 @@ impl World for OrderWorld {
     }
 }
 
+// ---- Tagesangebot for the colour e-ink frame -----------------------------
+
+pub(crate) const EINK_OFFER_SRC: &str = include_str!("../templates/eink_offer.typ");
+/// Bump when `quantize_eink` changes the look (the template counts by
+/// itself): part of the picture's tag (eink.rs), so frames refresh.
+pub(crate) const EINK_QUANTIZER: u32 = 3;
+const EINK_OFFER_VPATH: &str = "/eink_offer.typ";
+/// The frame's panel: Waveshare 7.3" e-Paper (E), 800 × 480.
+pub const EINK_WIDTH: u32 = 800;
+pub const EINK_HEIGHT: u32 = 480;
+
+/// The panel's six colours and their codes in its frame format (protocol
+/// v1 of the frame's firmware: 4 bits a pixel, `4` unused).
+pub const EINK_PALETTE: [([u8; 3], u8); 6] = [
+    ([0, 0, 0], 0),
+    ([255, 255, 255], 1),
+    ([255, 255, 0], 2),
+    ([255, 0, 0], 3),
+    ([0, 0, 255], 5),
+    ([0, 255, 0], 6),
+];
+
+/// What the e-ink Tagesangebot shows (templates/eink_offer.typ).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EinkOffer {
+    /// false: no Tagesangebot today — the shop's card.
+    pub offer: bool,
+    pub name: String,
+    pub detail: String,
+    pub price: String,
+    /// The regular price, struck through ("" = none).
+    pub regular: String,
+    /// The item's drawing (/img/motif/<motif>.svg).
+    pub motif: String,
+    pub shop: String,
+    pub url: String,
+    pub phone: String,
+}
+
+/// The e-ink picture's world: its template, the fonts, the drawings.
+struct EinkWorld {
+    library: LazyHash<Library>,
+    main_id: FileId,
+    main_source: Source,
+}
+
+impl World for EinkWorld {
+    fn library(&self) -> &LazyHash<Library> {
+        &self.library
+    }
+    fn book(&self) -> &LazyHash<FontBook> {
+        &resources().book
+    }
+    fn main(&self) -> FileId {
+        self.main_id
+    }
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        if id == self.main_id {
+            Ok(self.main_source.clone())
+        } else {
+            Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+        }
+    }
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        let path = id.vpath().as_rooted_path().to_string_lossy().to_string();
+        motif_file(&path).ok_or_else(|| FileError::NotFound(id.vpath().as_rootless_path().into()))
+    }
+    fn font(&self, index: usize) -> Option<Font> {
+        resources().fonts.get(index).cloned()
+    }
+    fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
+        None
+    }
+}
+
+/// The Tagesangebot as the frame shows it: a PNG (800 × 480, only the six
+/// panel colours — for a preview, or the frame's iPhone app) and the
+/// frame's own format (192 000 bytes: rows top to bottom, two pixels a
+/// byte, the left one in the high nibble). Every pixel goes to the nearest
+/// panel colour; the template draws in those colours only, so there is
+/// nothing to dither.
+pub fn render_eink_offer(o: &EinkOffer) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+    let mut inputs = Dict::new();
+    inputs.insert(
+        "data".into(),
+        typst::foundations::Value::Str(serde_json::to_string(o)?.into()),
+    );
+    let main_id = FileId::new(None, VirtualPath::new(EINK_OFFER_VPATH));
+    let world = EinkWorld {
+        library: LazyHash::new(Library::builder().with_inputs(inputs).build()),
+        main_id,
+        main_source: Source::new(main_id, EINK_OFFER_SRC.to_string()),
+    };
+    let warned = typst::compile::<PagedDocument>(&world);
+    comemo::evict(4);
+    for w in &warned.warnings {
+        tracing::warn!("typst warn (eink): {}", w.message);
+    }
+    let document = warned.output.map_err(|errs| {
+        anyhow::anyhow!(
+            "eink: {}",
+            errs.iter()
+                .map(|e| e.message.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    let page = document
+        .pages
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("eink: no page"))?;
+    let pixmap = typst_render::render(page, 1.0);
+    anyhow::ensure!(
+        pixmap.width() == EINK_WIDTH && pixmap.height() == EINK_HEIGHT,
+        "eink: {}×{} instead of 800×480",
+        pixmap.width(),
+        pixmap.height()
+    );
+    let (rgb, eink) = quantize_eink(pixmap.data());
+    let img = image::RgbImage::from_raw(EINK_WIDTH, EINK_HEIGHT, rgb)
+        .ok_or_else(|| anyhow::anyhow!("eink: bad pixmap"))?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png, image::ImageFormat::Png)?;
+    Ok((png.into_inner(), eink))
+}
+
+/// The template's marker colours for textures (templates/eink_offer.typ).
+const EINK_BOARD: [u8; 3] = [0, 40, 0];
+const EINK_WOOD: [u8; 3] = [120, 60, 0];
+/// 4×4 ordered dither thresholds (0..16).
+const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// A fixed pseudo-random value 0..1000 per pixel: the same picture every
+/// time, so its ETag only changes with its content.
+fn eink_noise(x: u32, y: u32, salt: u32) -> u32 {
+    let mut h =
+        x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77) ^ salt.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x2C1B_3C6D);
+    h ^= h >> 12;
+    h % 1000
+}
+
+/// A smooth value 0..1 over the picture (value noise, `cell` pixels a
+/// cell): where the board was wiped less, it is a little lighter.
+fn eink_smudge(x: u32, y: u32, cell: u32) -> f32 {
+    let (cx, cy) = (x / cell, y / cell);
+    let (fx, fy) = (
+        (x % cell) as f32 / cell as f32,
+        (y % cell) as f32 / cell as f32,
+    );
+    let v = |i: u32, j: u32| eink_noise(cx + i, cy + j, 21) as f32 / 1000.0;
+    // Smoothstep between the corners, so no seams show.
+    let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+    let top = v(0, 0) + (v(1, 0) - v(0, 0)) * sx;
+    let bottom = v(0, 1) + (v(1, 1) - v(0, 1)) * sx;
+    top + (bottom - top) * sy
+}
+
+/// The slate: black with a fine green pattern — dark green from a step
+/// away — a little more green where it was smeared (soft patches), no
+/// specks.
+fn eink_board(x: u32, y: u32) -> u8 {
+    let smudge = eink_smudge(x, y, 80) * 0.8 + eink_smudge(x, y, 29) * 0.2;
+    // 2..4 green pixels in 16: soft, large patches.
+    let green = 2 + (smudge * smudge * 3.0) as u8;
+    if BAYER4[(y % 4) as usize][(x % 4) as usize] < green {
+        6
+    } else {
+        0
+    }
+}
+
+/// The wooden frame: red, yellow and black in a pattern that reads brown,
+/// with darker grain lines along it.
+fn eink_wood(x: u32, y: u32) -> u8 {
+    let along = if x < 20 || x >= EINK_WIDTH - 20 { x } else { y };
+    let grain = eink_noise(along / 3, 0, 11) < 180;
+    // Brown ≈ a quarter red, a quarter yellow, half black.
+    let t = BAYER4[(y % 4) as usize][(x % 4) as usize];
+    match (grain, t) {
+        (false, 0..=3) => 3,
+        (false, 4..=7) => 2,
+        (true, 0..=2) => 3,
+        (true, 3..=4) => 2,
+        _ => 0,
+    }
+}
+
+/// Opaque RGBA → (the panel colours as RGB, the panel's 4-bit codes).
+///
+/// The template paints the board and the wood in marker colours and writes
+/// in the panel colours, its edges smoothed into in-between shades. A pixel
+/// near a marker becomes that texture. Any other is read as a mix of the
+/// board with one chalk colour — the one it lies closest to the line
+/// towards — and becomes that chalk when it is more than half of it, else
+/// board: letters stay purely white or yellow, no stray colours at their
+/// edges. Some chalk pixels are left out for the grain.
+fn quantize_eink(rgba: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let colour_of = |code: u8| {
+        EINK_PALETTE
+            .iter()
+            .find(|(_, c)| *c == code)
+            .map(|(rgb, _)| *rgb)
+            .unwrap_or([0, 0, 0])
+    };
+    let f = |c: [u8; 3]| [f32::from(c[0]), f32::from(c[1]), f32::from(c[2])];
+    let board = f(EINK_BOARD);
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    let mut codes = Vec::with_capacity(rgba.len() / 4);
+    for (i, p) in rgba.chunks_exact(4).enumerate() {
+        let (x, y) = (i as u32 % EINK_WIDTH, i as u32 / EINK_WIDTH);
+        let px = [f32::from(p[0]), f32::from(p[1]), f32::from(p[2])];
+        let d2 = |c: [f32; 3]| (0..3).map(|k| (px[k] - c[k]).powi(2)).sum::<f32>();
+        let code = if d2(f(EINK_WOOD)) < 900.0 {
+            eink_wood(x, y)
+        } else if d2(board) < 900.0 {
+            eink_board(x, y)
+        } else {
+            // The chalk this pixel is a mix of (with the board), and how much.
+            let (code, amount) = EINK_PALETTE
+                .iter()
+                .filter(|(_, code)| *code != 0)
+                .map(|(c, code)| {
+                    let c = f(*c);
+                    let dir = [c[0] - board[0], c[1] - board[1], c[2] - board[2]];
+                    let len2 = dir.iter().map(|v| v * v).sum::<f32>();
+                    let a = ((0..3).map(|k| (px[k] - board[k]) * dir[k]).sum::<f32>() / len2)
+                        .clamp(0.0, 1.0);
+                    let on = [
+                        board[0] + a * dir[0],
+                        board[1] + a * dir[1],
+                        board[2] + a * dir[2],
+                    ];
+                    (*code, a, d2(on))
+                })
+                .min_by(|a, b| a.2.total_cmp(&b.2))
+                .map(|(code, a, _)| (code, a))
+                .unwrap_or((0, 0.0));
+            if amount < 0.5 {
+                eink_board(x, y)
+            } else if eink_noise(x, y, 3) < 40 {
+                // A light grain: a few pixels of the chalk show the board's
+                // green through, not black holes.
+                6
+            } else {
+                code
+            }
+        };
+        rgb.extend_from_slice(&colour_of(code));
+        codes.push(code);
+    }
+    let eink = codes
+        .chunks_exact(2)
+        .map(|two| (two[0] << 4) | two[1])
+        .collect();
+    (rgb, eink)
+}
+
 /// Render a single-order Beleg to PDF bytes. Human-readable error on failure.
 pub fn render_order_pdf(payload: &OrderPdfPayload) -> anyhow::Result<Vec<u8>> {
     let world = OrderWorld::new(payload)?;
@@ -1256,6 +2278,8 @@ pub struct KurzlistePayload {
     pub shop: OrderPdfShop,
     pub period: KurzlistePeriod,
     pub rows: Vec<KurzlisteRow>,
+    /// The redeemed Gutscheine, oldest first (the Werbungskosten list).
+    pub vouchers: Vec<KurzlisteVoucher>,
 }
 
 /// Summary header figures. Split by how the order was settled:
@@ -1278,12 +2302,33 @@ pub struct KurzlistePeriod {
     /// covered by a Gutschein (total 0 €); no money changed hands.
     pub count_voucher: i64,
     pub sum_voucher_cents: i64,
+    /// Every Gutschein redeemed in the period (orders with a voucher
+    /// discount, fully or partly paid by it): count and discounts — the
+    /// shop's advertising cost (Werbungskosten), listed in `vouchers`.
+    pub count_redeemed: i64,
+    pub sum_redeemed_cents: i64,
+    pub sum_redeemed_items_cents: i64,
+    pub sum_redeemed_delivery_cents: i64,
     /// Storno in the range (shown only when include_cancelled). Never counted.
     pub count_cancelled: i64,
     pub include_test: bool,
     pub include_cancelled: bool,
     /// Non-empty → a red note (e.g. large-export warning).
     pub note: String,
+}
+
+/// One redeemed Gutschein: the order, the code, the discount (on the items,
+/// on the delivery fee, together).
+#[derive(Debug, Serialize)]
+pub struct KurzlisteVoucher {
+    pub date: String,
+    pub number: String,
+    pub code: String,
+    /// The voucher's admin label, empty when none.
+    pub label: String,
+    pub items_cents: i64,
+    pub delivery_cents: i64,
+    pub total_cents: i64,
 }
 
 /// One order row: date/time, the order number, its total, and a marker for how
@@ -1293,6 +2338,8 @@ pub struct KurzlisteRow {
     pub date: String,
     pub number: String,
     pub total_cents: i64,
+    /// Gutschein discount on this order (0 = none); the total is after it.
+    pub voucher_cents: i64,
     /// "" = cash, "*" = online (paid), "†" = Gutschein (voucher_paid).
     pub marker: String,
 }
@@ -1421,10 +2468,13 @@ pub async fn build_kurzliste_pdf(
 
     // Rows — one per completed order, oldest first (like the Lieferando list).
     let row_sql = format!(
-        "SELECT order_number, created_at, total_cents, payment_status
-         FROM orders
-         WHERE created_at BETWEEN ?1 AND ?2{mode_clause}{COMPLETED}
-         ORDER BY created_at ASC",
+        "SELECT o.order_number, o.created_at, o.total_cents, o.payment_status,
+                o.voucher_code, o.voucher_discount_cents,
+                o.voucher_discount_items_cents, o.voucher_discount_delivery_cents,
+                COALESCE(v.label, '') AS voucher_label
+         FROM orders o LEFT JOIN vouchers v ON v.id = o.voucher_id
+         WHERE o.created_at BETWEEN ?1 AND ?2{mode_clause}{COMPLETED}
+         ORDER BY o.created_at ASC",
     );
     let db_rows = sqlx::query(&row_sql)
         .bind(&from_ts)
@@ -1439,6 +2489,7 @@ pub async fn build_kurzliste_pdf(
     let mut sum_online_cents = 0i64;
     let mut count_voucher = 0i64;
     let mut sum_voucher_cents = 0i64;
+    let mut vouchers = Vec::new();
     for r in &db_rows {
         let number: String = r.get("order_number");
         let created_at: String = r.get("created_at");
@@ -1469,10 +2520,27 @@ pub async fn build_kurzliste_pdf(
                 "*"
             }
         };
+        let voucher_cents: i64 = r.try_get("voucher_discount_cents").unwrap_or(0);
+        if voucher_cents > 0 {
+            vouchers.push(KurzlisteVoucher {
+                date: date.clone(),
+                number: number.clone(),
+                code: r
+                    .try_get::<Option<String>, _>("voucher_code")
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default(),
+                label: r.try_get("voucher_label").unwrap_or_default(),
+                items_cents: r.try_get("voucher_discount_items_cents").unwrap_or(0),
+                delivery_cents: r.try_get("voucher_discount_delivery_cents").unwrap_or(0),
+                total_cents: voucher_cents,
+            });
+        }
         rows.push(KurzlisteRow {
             date,
             number,
             total_cents,
+            voucher_cents,
             marker: marker.to_string(),
         });
     }
@@ -1514,12 +2582,17 @@ pub async fn build_kurzliste_pdf(
             sum_online_cents,
             count_voucher,
             sum_voucher_cents,
+            count_redeemed: vouchers.len() as i64,
+            sum_redeemed_cents: vouchers.iter().map(|v| v.total_cents).sum(),
+            sum_redeemed_items_cents: vouchers.iter().map(|v| v.items_cents).sum(),
+            sum_redeemed_delivery_cents: vouchers.iter().map(|v| v.delivery_cents).sum(),
             count_cancelled,
             include_test,
             include_cancelled,
             note,
         },
         rows,
+        vouchers,
     };
     tokio::task::spawn_blocking(move || render_kurzliste_pdf(&payload)).await?
 }
@@ -1853,7 +2926,9 @@ pub async fn build_orders_pdf(
         "SELECT
             COALESCE(SUM(CASE WHEN status != 'cancelled' THEN 1 ELSE 0 END), 0) AS cnt,
             COALESCE(SUM(CASE WHEN status != 'cancelled' THEN total_cents ELSE 0 END), 0) AS rev,
-            COALESCE(SUM(CASE WHEN status  = 'cancelled' THEN 1 ELSE 0 END), 0) AS canc
+            COALESCE(SUM(CASE WHEN status  = 'cancelled' THEN 1 ELSE 0 END), 0) AS canc,
+            COALESCE(SUM(CASE WHEN status != 'cancelled' AND voucher_discount_cents > 0 THEN 1 ELSE 0 END), 0) AS vcnt,
+            COALESCE(SUM(CASE WHEN status != 'cancelled' THEN voucher_discount_cents ELSE 0 END), 0) AS vsum
          FROM orders
          WHERE created_at BETWEEN ?1 AND ?2{mode_clause}",
     );
@@ -1865,6 +2940,8 @@ pub async fn build_orders_pdf(
     let count: i64 = agg.get("cnt");
     let total_cents: i64 = agg.get("rev");
     let cancelled_count: i64 = agg.get("canc");
+    let voucher_count: i64 = agg.get("vcnt");
+    let voucher_cents: i64 = agg.get("vsum");
 
     // Warn (don't drop) above this many — a big export is slow + heavy.
     const LARGE_EXPORT: usize = 500;
@@ -1894,6 +2971,8 @@ pub async fn build_orders_pdf(
             count,
             total_cents,
             cancelled_count,
+            voucher_count,
+            voucher_cents,
             include_test,
             include_cancelled,
             truncated_note,
@@ -1909,7 +2988,7 @@ mod beleg_tests {
 
     fn sample_shop() -> OrderPdfShop {
         OrderPdfShop {
-            name: "Davids Pizzeria".into(),
+            name: "Musterpizzeria".into(),
             address: "Musterstr. 1, 12345 Musterstadt".into(),
             phone: "Tel. 01234-56789".into(),
             email: "hallo@example.com".into(),
@@ -2011,6 +3090,8 @@ mod beleg_tests {
                 count: 2,
                 total_cents: 3700,
                 cancelled_count: 1,
+                voucher_count: 1,
+                voucher_cents: 250,
                 include_test: false,
                 include_cancelled: false,
                 truncated_note: "".into(),
@@ -2029,7 +3110,7 @@ mod kurzliste_tests {
 
     fn shop() -> OrderPdfShop {
         OrderPdfShop {
-            name: "Davids Pizzeria".into(),
+            name: "Musterpizzeria".into(),
             address: "Musterstr. 1, 12345 Musterstadt".into(),
             phone: "".into(),
             email: "".into(),
@@ -2043,6 +3124,7 @@ mod kurzliste_tests {
             date: date.into(),
             number: number.into(),
             total_cents: cents,
+            voucher_cents: 0,
             marker: marker.into(),
         }
     }
@@ -2073,13 +3155,57 @@ mod kurzliste_tests {
                 sum_online_cents: online.1,
                 count_voucher: voucher.0,
                 sum_voucher_cents: voucher.1,
+                count_redeemed: 0,
+                sum_redeemed_cents: 0,
+                sum_redeemed_items_cents: 0,
+                sum_redeemed_delivery_cents: 0,
                 count_cancelled: if include_cancelled { 2 } else { 0 },
                 include_test: false,
                 include_cancelled,
                 note: String::new(),
             },
             rows,
+            vouchers: Vec::new(),
         }
+    }
+
+    // Redeemed Gutscheine: a "G" on their orders, a summary line and the
+    // Werbungskosten list at the end.
+    #[test]
+    fn kurzliste_with_vouchers_renders() {
+        let mut rows = vec![
+            row("02.07.2026 13:54", "DP-0207-0001", 1500, "*"),
+            row("03.07.2026 17:46", "DP-0307-0001", 0, "†"),
+        ];
+        rows[0].voucher_cents = 500;
+        rows[1].voucher_cents = 1890;
+        let mut p = payload(rows, false);
+        p.vouchers = vec![
+            KurzlisteVoucher {
+                date: "02.07.2026 13:54".into(),
+                number: "DP-0207-0001".into(),
+                code: "SOMMER5".into(),
+                label: "Sommer-Aktion".into(),
+                items_cents: 500,
+                delivery_cents: 0,
+                total_cents: 500,
+            },
+            KurzlisteVoucher {
+                date: "03.07.2026 17:46".into(),
+                number: "DP-0307-0001".into(),
+                code: "GRATIS".into(),
+                label: String::new(),
+                items_cents: 1740,
+                delivery_cents: 150,
+                total_cents: 1890,
+            },
+        ];
+        p.period.count_redeemed = 2;
+        p.period.sum_redeemed_cents = 2390;
+        p.period.sum_redeemed_items_cents = 2240;
+        p.period.sum_redeemed_delivery_cents = 150;
+        let bytes = render_kurzliste_pdf(&p).expect("kurzliste with vouchers should render");
+        assert!(bytes.len() > 1000);
     }
 
     #[test]

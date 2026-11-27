@@ -253,8 +253,8 @@ pub(crate) mod fixtures {
             id,
             name: name.to_string(),
             name_norm: normalize_street(name),
-            postcode: "59348".into(),
-            city: "Lüdinghausen".into(),
+            postcode: "99999".into(),
+            city: "Musterstadt".into(),
         }
     }
 
@@ -267,19 +267,19 @@ pub(crate) mod fixtures {
             "Hermann-Löns-Straße",
             "Mühlenstraße",
             "Münsterstraße",
-            "Olfener Straße",
-            "Seppenrader Straße",
-            "Wolfsberger Straße",
-            "Tüllinghofer Straße",
+            "Lindenstraße",
+            "Schulstraße",
+            "Gartenstraße",
+            "Ringstraße",
             "Klosterstraße",
             "Marktstraße",
             "Kirchplatz",
-            "Borgmühle",
-            "Berenbrock",
-            "Ondrup",
-            "Westrup",
-            "Elvert",
-            "Bechtrup",
+            "Wiesengrund",
+            "Feldmark",
+            "Heide",
+            "Bruch",
+            "Esch",
+            "Brink",
             "Am Hagen",
         ];
         let streets: Vec<Street> = names
@@ -410,7 +410,7 @@ mod tests {
         let r = idx.resolve(1, "12 a").unwrap();
         assert_eq!(r.house_number, "12a");
         assert_eq!(r.street, "Hauptstraße");
-        assert_eq!(r.postcode, "59348");
+        assert_eq!(r.postcode, "99999");
         assert!(idx.resolve(1, "13").is_none());
         assert!(idx.resolve(1, "12b").is_none());
         assert!(idx.resolve(1, "abc").is_none());
@@ -444,18 +444,18 @@ mod tests {
             super::fixtures::street(1, "Bahnhofstr."),
             super::fixtures::street(2, "Bahnhofstr."),
         ];
-        streets[1].postcode = "59394".into();
-        streets[1].city = "Nordkirchen".into();
+        streets[1].postcode = "99998".into();
+        streets[1].city = "Beispieldorf".into();
         let idx = GeoIndex::new(streets, std::collections::HashMap::new());
         assert!(idx.find_street_by_text("Bahnhofstraße", None).is_none());
         assert_eq!(
-            idx.find_street_by_text("Bahnhofstraße", Some("59394"))
+            idx.find_street_by_text("Bahnhofstraße", Some("99998"))
                 .unwrap()
                 .id,
             2
         );
         assert_eq!(
-            idx.find_street_by_text("Bahnhofstraße", Some("59348"))
+            idx.find_street_by_text("Bahnhofstraße", Some("99999"))
                 .unwrap()
                 .id,
             1

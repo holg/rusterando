@@ -25,6 +25,13 @@
 //! computed by the same `admin::hours::ssr` code as the web page), resent
 //! when it changes — LiveHub `ShopStatus` events, the tick for schedule
 //! edges — and after every [`shop_action`] with its result.
+//!
+//! A display that can drive the shop's e-ink frame asks for the picture
+//! (`/api/kds/feed?picture=1&device=<name>`): it gets the picture's tag
+//! (`KitchenEvent::Picture`, eink.rs) when the feed opens and after every
+//! change — at once when the Tagesangebot is saved or the device is switched
+//! on /admin/drucker, otherwise (prices, shop data) with the next trigger
+//! or tick. A device not switched on gets an empty tag.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -72,9 +79,13 @@ pub(crate) async fn run_feed(
     mut alert_rx: broadcast::Receiver<(String, String)>,
     poke: Arc<Notify>,
     notice: ShopNotice,
+    picture: Option<crate::eink::PictureSource>,
     out: mpsc::Sender<ServerMessage>,
 ) {
     let mut last_panel: Option<ShopPanel> = None;
+    let mut last_picture: Option<String> = None;
+    let mut offer_saved = rusterando_frontend::pages::daily_offer::ssr::changes();
+    let mut watch_offer = picture.is_some();
     let mut live_rx = live.as_ref().map(LiveHub::subscribe);
     let mut cache: HashMap<String, (String, i64, BoardOrder)> = HashMap::new();
     let mut last: Option<Signature> = None;
@@ -118,12 +129,40 @@ pub(crate) async fn run_feed(
             debug!("shop panel sent");
         }
 
+        // The e-ink picture's tag, for a display that drives the frame —
+        // switched per device on /admin/drucker; any other gets an empty
+        // tag and leaves the frame alone.
+        if let Some(src) = &picture {
+            let tag = if crate::eink::drives_frame(&db, src.device.as_deref()).await {
+                let offer = crate::eink::offer(&db, &src.branding.get(), &src.site).await;
+                crate::eink::tag(&offer)
+            } else {
+                String::new()
+            };
+            if last_picture.as_deref() != Some(tag.as_str()) {
+                let msg = ServerMessage {
+                    seq_id: BOARD_SEQ,
+                    event: KitchenEvent::Picture { tag: tag.clone() },
+                };
+                if out.send(msg).await.is_err() {
+                    return;
+                }
+                debug!(%tag, "picture tag sent");
+                last_picture = Some(tag);
+            }
+        }
+
         // Wait for the next trigger that can change the board.
         loop {
             tokio::select! {
                 _ = out.closed() => return,
                 _ = tick.tick() => break,
                 _ = poke.notified() => break,
+                // The Tagesangebot saved: a new picture.
+                r = offer_saved.changed(), if watch_offer => match r {
+                    Ok(()) => break,
+                    Err(_) => watch_offer = false,
+                },
                 r = kitchen_rx.recv() => match r {
                     Err(broadcast::error::RecvError::Closed) => return,
                     _ => break,
@@ -221,6 +260,32 @@ async fn build_snapshot(
         },
         complete,
     )
+}
+
+/// The /kitchen page's board (rusterando-frontend `KitchenBoardSource`):
+/// the displays' snapshot and moves, so the web list shows and does what a
+/// display does.
+pub struct WebBoard;
+
+#[async_trait::async_trait]
+impl rusterando_frontend::pages::push::KitchenBoardSource for WebBoard {
+    async fn snapshot(&self, db: &SqlitePool) -> anyhow::Result<BoardSnapshot> {
+        let sig = signature(db).await?;
+        // Built fresh: a page load, not a feed that keeps DTOs between sends.
+        let (snapshot, _complete) = build_snapshot(db, &sig, &mut HashMap::new()).await;
+        Ok(snapshot)
+    }
+
+    async fn advance(
+        &self,
+        db: &SqlitePool,
+        live: Option<&LiveHub>,
+        order_id: &str,
+        from: BoardStatus,
+        to: BoardStatus,
+    ) -> anyhow::Result<bool> {
+        advance(db, live, order_id, from, to).await
+    }
 }
 
 /// Apply a terminal's `BoardAdvance`. `Ok(false)` = nothing to do: the order

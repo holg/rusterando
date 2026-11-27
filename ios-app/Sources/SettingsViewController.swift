@@ -1,6 +1,6 @@
 //
 //  SettingsViewController.swift
-//  Davids Pizzeria / Rusterando
+//  Rusterando
 //
 //  Two view controllers covering the multi-shop settings UI:
 //

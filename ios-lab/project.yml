@@ -1,0 +1,74 @@
+name: Tab5Terminal
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+# PUBLIC project file: placeholder bundle id, no Apple Team ID, so anyone
+# can clone and build it for the simulator.
+#
+# To run it on your iPhone under your own Apple Developer account:
+#
+#   1. cp project.local.example.yml project.local.yml
+#   2. Fill in your DEVELOPMENT_TEAM and bundle id.
+#   3. USE_LOCAL=true xcodegen
+#
+# project.local.yml is gitignored. Without USE_LOCAL=true the include
+# below is disabled and the placeholder settings apply.
+include:
+  - path: project.local.yml
+    relativePaths: true
+    enable: ${USE_LOCAL}
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: 1
+    # DEVELOPMENT_TEAM intentionally absent: provide it via project.local.yml.
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1,2"
+    # Project level on purpose: xcodegen lets this file win over its
+    # includes, so the overlay sets the real id one level down, on the
+    # target, where Xcode prefers it.
+    PRODUCT_BUNDLE_IDENTIFIER: com.example.tab5terminal
+
+targets:
+  Tab5Terminal:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+    settings:
+      base:
+        PRODUCT_NAME: Tab5Terminal
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # Info.plist generated from these keys — no plist file to keep.
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Tab5 Terminal
+        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: Connects to your Tab5 over Bluetooth to use it as its keyboard and screen.
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        # A terminal: dark, also on the launch screen.
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+    scheme:
+      testTargets:
+        - Tab5TerminalTests
+
+  Tab5TerminalTests:
+    type: bundle.unit-test
+    platform: iOS
+    # Xcode's XCTest is built for iOS 17: below that the linker warns.
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests
+    dependencies:
+      - target: Tab5Terminal
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.tab5terminal.tests
+        GENERATE_INFOPLIST_FILE: YES

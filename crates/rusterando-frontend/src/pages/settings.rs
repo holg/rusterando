@@ -18,12 +18,28 @@ use std::sync::{Arc, RwLock};
 /// pick up changes without a DB round-trip.
 #[cfg(feature = "ssr")]
 #[derive(Clone, Default)]
-pub struct ThemeHandle(pub Arc<RwLock<String>>);
+pub struct ThemeHandle(pub Arc<RwLock<String>>, pub Arc<RwLock<String>>);
 
 #[cfg(feature = "ssr")]
 impl ThemeHandle {
     pub fn new(initial: String) -> Self {
-        Self(Arc::new(RwLock::new(initial)))
+        Self(
+            Arc::new(RwLock::new(initial)),
+            Arc::new(RwLock::new(String::new())),
+        )
+    }
+    /// With the theme visitors can switch to (`theme_alt`, "" = none).
+    pub fn with_alt(self, alt: String) -> Self {
+        self.set_alt(alt);
+        self
+    }
+    pub fn get_alt(&self) -> String {
+        self.1.read().map(|g| g.clone()).unwrap_or_default()
+    }
+    pub fn set_alt(&self, v: String) {
+        if let Ok(mut g) = self.1.write() {
+            *g = v;
+        }
     }
     pub fn get(&self) -> String {
         self.0
@@ -40,7 +56,9 @@ impl ThemeHandle {
 
 /// Allowed theme values. Kept as an associated const so the validator
 /// and the admin <select> stay in sync.
-pub const ALLOWED_THEMES: &[&str] = &["warm", "dark"];
+/// The site themes: `warm`, `dark`, and the PDF menu's looks `tafel` (the
+/// chalkboard) and `trattoria` (dark, tricolour).
+pub const ALLOWED_THEMES: &[&str] = &["warm", "dark", "tafel", "trattoria"];
 
 /// Runtime toggle for the multilingual UI. `'1'` = show the locale
 /// switcher in the header AND serve `/<lang>/...` prefixed routes;
@@ -120,13 +138,13 @@ impl UploadsDir {
 pub struct DeploymentInfo {
     /// `true` when the binary booted in in-process multi-tenant mode
     /// (≥2 `.env*`, distinct DBs). `false` = single-tenant (the real-shop
-    /// default — davidspizzeria.de).
+    /// default — e.g. musterpizzeria.example).
     pub multi_tenant: bool,
     /// Which `.env*` file(s) this process loaded. Single-tenant: one entry
     /// (or the `ENV_FILE=`/`<default .env>`); multi-tenant: every loaded slug.
     pub env_files: Vec<String>,
     /// The active tenant slug — DB filename stem in single-tenant
-    /// ("davidspizzeria"), or the registry's tenant list in multi-tenant.
+    /// ("musterpizzeria"), or the registry's tenant list in multi-tenant.
     pub tenant_slug: String,
     /// systemd/binary service identity (LEPTOS_OUTPUT_NAME, falls back to the
     /// DB stem) so the admin can tell which unit they're looking at.
@@ -135,7 +153,7 @@ pub struct DeploymentInfo {
     pub database_url: String,
     /// Bind address the process listens on (LEPTOS_SITE_ADDR).
     pub site_addr: String,
-    /// The `Host` header of THIS request (e.g. "davidspizzeria.de").
+    /// The `Host` header of THIS request (e.g. "musterpizzeria.example").
     pub host: String,
     /// The nginx-supplied `X-Tenant` subdomain label for THIS request, if
     /// present (multi-tenant routing). Empty in single-tenant deploys.
@@ -224,6 +242,7 @@ pub async fn list_settings() -> Result<Vec<SettingRow>, ServerFnError> {
     let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
         "SELECT key, value, label_de, hint_de FROM app_settings
          WHERE key NOT LIKE 'receipt_%' AND key <> 'printer_theme'
+           AND key <> 'home_cover_file' AND key <> 'daily_offer'
          ORDER BY key",
     )
     .fetch_all(&db)
@@ -298,8 +317,8 @@ pub async fn deployment_info() -> Result<DeploymentInfo, ServerFnError> {
     }
 
     // The tenant THIS request resolved to (its real env file + DB), provided by
-    // the tenant router. This is what makes the panel show flizza's details on
-    // flizza's admin, not the boot/global snapshot.
+    // the tenant router. This is what makes the panel show beispiel's details on
+    // beispiel's admin, not the boot/global snapshot.
     if let Some(rt) = use_context::<ResolvedTenant>() {
         info.resolved_slug = rt.slug;
         info.resolved_env_file = rt.env_file;
@@ -352,8 +371,15 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
             "pdf_cover_mode muss 'text' oder 'image' sein.",
         ));
     }
+    if key == "theme_alt" && !value.trim().is_empty() && !ALLOWED_THEMES.contains(&value.trim()) {
+        return Err(ServerFnError::new(
+            "Umschalt-Theme: leer oder 'warm', 'dark', 'tafel', 'trattoria'.",
+        ));
+    }
     if key == "theme" && !ALLOWED_THEMES.contains(&value.trim()) {
-        return Err(ServerFnError::new("Thema muss 'warm' oder 'dark' sein."));
+        return Err(ServerFnError::new(
+            "Thema muss 'warm', 'dark', 'tafel' oder 'trattoria' sein.",
+        ));
     }
     if key == "i18n_enabled" && !matches!(value.trim(), "0" | "1" | "true" | "false") {
         return Err(ServerFnError::new(
@@ -364,6 +390,9 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
         return Err(ServerFnError::new(
             "menu_category_overlay muss '0' / '1' (oder 'true' / 'false') sein.",
         ));
+    }
+    if key == "home_show_cover" && !matches!(value.trim(), "0" | "1") {
+        return Err(ServerFnError::new("home_show_cover muss 0 oder 1 sein."));
     }
     if key == "printer_theme" && !matches!(value.trim(), "rusterando-default" | "rusterando-rando")
     {
@@ -477,7 +506,7 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     // line JOINs to nothing and silently vanishes from the cart. The admin
     // knows the *menu number* (e.g. 99), not the internal id (e.g.
     // `mc-004-i009`) — and on a reseeded/imported menu the two don't line up
-    // (Davids' `mi-400` ≈ number 400 is a coincidence; flizza's are unrelated).
+    // (one seed's `mi-400` ≈ number 400 is a coincidence; beispiel's are unrelated).
     // So accept EITHER: an exact `id`, or a `menu_number`, and store the
     // resolved canonical id. Verified here (needs the pool) so the admin gets a
     // clear error instead of a promo that does nothing.
@@ -546,6 +575,11 @@ pub async fn update_setting(key: String, value: String) -> Result<(), ServerFnEr
     if key == "theme" {
         if let Some(h) = use_context::<ThemeHandle>() {
             h.set(value.trim().to_string());
+        }
+    }
+    if key == "theme_alt" {
+        if let Some(h) = use_context::<ThemeHandle>() {
+            h.set_alt(value.trim().to_string());
         }
     }
     // Same for branding fields — every shop_* key updates the cached
@@ -724,6 +758,19 @@ pub mod ssr {
     /// Boot-time theme read. Defaults to `"warm"` when the row is missing
     /// (fresh DBs without the theme migration applied) or when the value
     /// is anything other than the two allowed names.
+    /// The theme visitors can switch to; "" when unset or not a theme.
+    pub async fn theme_alt(db: &SqlitePool) -> String {
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM app_settings WHERE key = 'theme_alt'")
+                .fetch_optional(db)
+                .await
+                .ok()
+                .flatten();
+        row.map(|(v,)| v.trim().to_string())
+            .filter(|v| super::ALLOWED_THEMES.contains(&v.as_str()))
+            .unwrap_or_default()
+    }
+
     pub async fn theme(db: &SqlitePool) -> String {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT value FROM app_settings WHERE key = 'theme'")
@@ -739,7 +786,7 @@ pub mod ssr {
 
     /// Boot-time read of the i18n toggle. Defaults to `false` (single-
     /// locale shop) on missing rows or invalid values — matches the
-    /// migration default and keeps Davids' deployment behaviour
+    /// migration default and keeps an existing single-shop deployment's behaviour
     /// unchanged after upgrading.
     pub async fn i18n_enabled(db: &SqlitePool) -> bool {
         let row: Option<(String,)> =

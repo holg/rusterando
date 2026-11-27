@@ -17,7 +17,7 @@ package-lock.json
 *.p8
 AuthKey_*.p8
 
-# iOS app: the brand-neutral Rusterando target is tracked. Davids-
+# iOS app: the brand-neutral Rusterando target is tracked. Shop-
 # specific bits (Team ID, applinks, seed plist) are gitignored via
 # ios-app/.gitignore — see ios-app/project.yml + project.local.yml.
 
@@ -30,20 +30,26 @@ src-tauri/
 
 # Local plans + private notes — all docs/ stays out of the public repo.
 # README.md (top-level) is the canonical public documentation; the
-# docs/ tree holds Davids-specific deployment + design notes that
-# would mostly need scrubbing for OSS use.
+# docs/ tree holds deployment-specific notes.
 docs/
 .claude/
 
 # .env.example with real secrets — replaced for the public repo by
 # the placeholder version. Real one stays out.
 .env.production
-# Per-deployment overlays (.env.<profile>) hold real Stripe / SMTP /
-# APNs creds + shop URLs. Each operator keeps their own; never commit.
-# Covers .env.davids, .env.rusterando, and per-tenant .env.rusterando.<shop>.
-.env.davids
-.env.rusterando*
-.env.*.local
+# Per-deployment env files (.env.<profile>, per-tenant .env.<profile>.<shop>)
+# hold real Stripe / SMTP / APNs creds + shop URLs. Each operator keeps
+# their own; never commit. Only the *.example files are tracked.
+.env.*
+!.env.example
+!.env.*.example
+
+# Per-deployment site overlays: a shop's own poster layouts, photos, AASA,
+# seeds and tools live in site/<profile>/ and never go into the public
+# repo. See site/README.md; scripts/deploy_to_server.sh ships them.
+/site/*
+!/site/README.md
+!/site/example/
 
 # rustc internal-compiler-error dumps (transient, machine-local).
 rustc-ice-*.txt
@@ -58,10 +64,9 @@ public/img/rustlogos.png
 # from CI and the committed workspace).
 rusterando-scrape/
 
-# Local AASA overrides (per-shop real Apple TEAM_ID + bundle id).
-# Davids' deploy step copies the .davids variant over the placeholder
-# before `cargo leptos build`. The placeholder version of the real
-# path is committed; per-shop overrides are not.
+# Old place of per-shop AASA files (real Apple TEAM_ID + bundle id); they
+# now live in site/<profile>/apple-app-site-association. The placeholder
+# at the real path is committed; per-shop variants never are.
 public/.well-known/apple-app-site-association.*
 
 

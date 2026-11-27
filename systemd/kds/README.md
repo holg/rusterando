@@ -113,7 +113,7 @@ Two ways to give the board an identity the server accepts:
    `permitlisten` port (the Pi holds 2222):
 
    ```
-   restrict,port-forwarding,permitopen="127.0.0.1:9001",permitlisten="127.0.0.1:2223" ssh-ed25519 AAAA… kds@davidspizzeria
+   restrict,port-forwarding,permitopen="127.0.0.1:9001",permitlisten="127.0.0.1:2223" ssh-ed25519 AAAA… kds@musterpizzeria
    ```
 
    Give the tunnel user `ClientAliveInterval 15` / `ClientAliveCountMax 3`
@@ -123,18 +123,18 @@ Two ways to give the board an identity the server accepts:
 
 3. Pin the server host key once, interactively (writes
    `/home/root/.ssh/known_hosts`; answer `y` only if the fingerprint is
-   `SHA256:2X/DScc0YOooEVVZfEEI/9GTHxyzBLAHCyrPi/RFWIM` — the one the Pi
-   has pinned for `[davidspizzeria.de]:2200`):
+   the server's SSH host key on port 2200 — the one the Pi has pinned for
+   `[shop.example.com]:2200`):
 
    ```sh
-   dbclient -p 2200 -i /etc/rusterando-printer/tunnel_key tunnel-davidspizzeria@davidspizzeria.de
+   dbclient -p 2200 -i /etc/rusterando-printer/tunnel_key tunnel-musterpizzeria@shop.example.com
    ```
 
 4. `systemctl enable --now rusterando-tunnel`
 
 Admin SSH into the board then goes through the server (once
 `TUNNEL_ADMIN_PORT` is set): `ssh -p <port> root@127.0.0.1` on the server,
-or from a laptop `ssh davidspizzeria-kds` (ProxyJump via the server to
+or from a laptop `ssh myshop-kds` (an ssh alias: ProxyJump via the server to
 `localhost:2222`, user root).
 
 ### OpenSSH instead of Dropbear
@@ -156,7 +156,7 @@ systemctl restart rusterando-tunnel
 
 autossh adds nothing here: systemd `Restart=` plus the 15 s keepalive
 already reconnect. The board's SSH server is then OpenSSH too, with new host
-keys; refresh the laptop's `known_hosts` entry for `davidspizzeria-kds`.
+keys; refresh the laptop's `known_hosts` entry for `myshop-kds`.
 
 ## Rollout next to the Pi: display only
 
@@ -166,7 +166,7 @@ Until the printer moves, run the board as a pure display:
 
 ```dotenv
 PRINTER_PATH=none                       # never prints, never acks
-PRINTER_SHOP_SLUG=davidspizzeria-kds    # own row in the admin Pi panel
+PRINTER_SHOP_SLUG=musterpizzeria-kds    # own row in the admin Pi panel
 ```
 
 The header then reads "Nur Anzeige"; the Pi keeps printing as before.
@@ -178,7 +178,7 @@ mode — they're the same status changes as the web kitchen board.
 1. Pi: `sudo systemctl disable --now rusterando-printer rusterando-tunnel`
 2. Move the Epson's USB cable to the board.
 3. Board `printer.env`: `PRINTER_PATH=usb`,
-   `PRINTER_SHOP_SLUG=davidspizzeria`; `tunnel.env`:
+   `PRINTER_SHOP_SLUG=musterpizzeria`; `tunnel.env`:
    `TUNNEL_ADMIN_PORT=2222` (and adjust `permitlisten` on the server).
 4. `systemctl restart rusterando-tunnel rusterando-kds`
 

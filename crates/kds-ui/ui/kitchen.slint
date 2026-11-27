@@ -10,6 +10,9 @@
 
 import "../assets/fonts/Poppins-Medium.ttf";
 import "../assets/fonts/Poppins-Bold.ttf";
+// The Terminal page (Tab5 only): JetBrains Mono, cut down to Latin-1 and
+// the few symbols the terminal prints (assets/fonts/JetBrainsMono-OFL.txt).
+import "../assets/fonts/JetBrainsMono-Regular-subset.ttf";
 
 export struct Card {
     id: string,
@@ -36,6 +39,13 @@ export struct Line {
     sub: string,
 }
 
+// One terminal line (Tab5 Terminal page). Tone: 0 normal, 1 dim, 2 typed
+// command, 3 ok, 4 received, 5 sent, 6 warning, 7 error.
+export struct TermLine {
+    text: string,
+    tone: int,
+}
+
 global Theme {
     out property <color> bg: #0e1014;
     out property <color> panel: #161920;
@@ -48,6 +58,13 @@ global Theme {
     out property <color> ready: #2fc76b;
     out property <color> late: #ef4b4b;
     out property <color> button: #2c323d;
+
+    // Terminal line colours by tone (see TermLine), as on the lab screen.
+    public pure function term-color(tone: int) -> color {
+        return tone == 1 ? #808890 : tone == 2 ? #ffffff : tone == 3 ? #6fdc6f
+            : tone == 4 ? #5fd7ff : tone == 5 ? #ffd75f : tone == 6 ? #ffa040
+            : tone == 7 ? #ff6060 : #d0d0d0;
+    }
 
     // Shop traffic light: 0 open (green) · 1 opens later / paused (amber) ·
     // 2 closed (red) · anything else unknown.
@@ -357,17 +374,29 @@ export component KitchenWindow inherits Window {
         visible: false;
         text: "äöüÄÖÜß€·×–—„“”‚‘’…→←↑↓✓✗½¼¾°ÉÈÊéèêëáàâíìîïóòôúùûñçÇ";
     }
+    // The same for the terminal's font (what its subset holds).
+    Text {
+        visible: false;
+        font-family: "JetBrains Mono";
+        text: "äöüÄÖÜß€·×–—„“”‚‘’…→←↑↓✓✗½¼¾°ÉÈÊéèêëáàâíìîïóòôúùûñçÇ§±µ¶«»¿¡•‰─│▲▼";
+    }
 
     // ----- header -----
     in property <string> clock;
     in property <bool> online;
+    // No network of its own, but the board comes over LoRa from another
+    // device: amber, not red — orders arrive and taps go back that way.
+    in property <bool> lora;
     // Connection banner under the header; empty = none. Amber when online
-    // but the server sends no board, red when offline.
+    // but the server sends no board, or over LoRa; red when offline.
     in property <string> banner;
     in property <bool> banner-warn;
     in property <bool> have-board;
     in property <bool> printer-ok;
     in property <string> printer-text;
+    // "Akku 72 %" in the header; empty = no battery (the 7" board, the web).
+    in property <string> battery-text;
+    in property <bool> battery-low;
 
     // ----- columns -----
     in property <[Card]> col-new;
@@ -412,6 +441,23 @@ export component KitchenWindow inherits Window {
     // Height of the header row with the tabs. 20px suits the 4.3" board; the
     // Tab5 raises it, since a fingertip lands about 3 mm below where it aims.
     in property <length> header-height: 20px;
+
+    // ----- "Terminal" page (Tab5 only; kds-tab5 src/terminal.rs) -----
+    // The host's terminal: what the lab firmware shows full-screen, here as
+    // a fourth page. Keys come from the Tab5 Keyboard or the phone (both
+    // handled in Rust); this page shows the result and offers a few
+    // commands for the finger.
+    in property <bool> terminal-enabled: false;
+    // Status line: LAN, LoRa, Bluetooth, keyboard.
+    in property <string> term-status;
+    // The newest lines that fit, oldest first.
+    in property <[TermLine]> term-lines;
+    in property <string> term-prompt;
+    // The input line, split at the cursor.
+    in property <string> term-before;
+    in property <string> term-after;
+    // A touch button: run this command line.
+    callback term-command(string);
 
     // ----- Start page -----
     in property <string> date-text;
@@ -522,7 +568,7 @@ export component KitchenWindow inherits Window {
             padding-left: 4px;
             padding-right: 4px;
             spacing: 6px;
-            for tab[i] in ["Start", "Küche", "Zeiten"]: Rectangle {
+            for tab[i] in (root.terminal-enabled ? ["Start", "Küche", "Zeiten", "Terminal"] : ["Start", "Küche", "Zeiten"]): Rectangle {
                 horizontal-stretch: 0;
                 width: tab-label.preferred-width + 12px;
                 border-radius: 4px;
@@ -573,6 +619,14 @@ export component KitchenWindow inherits Window {
                 }
             }
             Spacer { }
+            if root.battery-text != "": Text {
+                text: root.battery-text;
+                color: root.battery-low ? Theme.late : Theme.muted;
+                font-size: 11px;
+                font-weight: root.battery-low ? 700 : 400;
+                vertical-alignment: center;
+                horizontal-stretch: 0;
+            }
             Dot {
                 tint: root.printer-ok ? Theme.ready : Theme.late;
             }
@@ -584,11 +638,11 @@ export component KitchenWindow inherits Window {
                 horizontal-stretch: 0;
             }
             Dot {
-                tint: root.online ? Theme.ready : Theme.late;
+                tint: root.online ? Theme.ready : root.lora ? Theme.work : Theme.late;
             }
             Text {
-                text: root.online ? "Online" : "Offline";
-                color: root.online ? Theme.muted : Theme.late;
+                text: root.online ? "Online" : root.lora ? "LoRa" : "Offline";
+                color: root.online ? Theme.muted : root.lora ? Theme.work : Theme.late;
                 font-size: 11px;
                 vertical-alignment: center;
                 horizontal-stretch: 0;
@@ -604,6 +658,101 @@ export component KitchenWindow inherits Window {
                 color: root.banner-warn ? #0b0d10 : #ffffff;
                 font-size: 11px;
                 font-weight: 700;
+            }
+        }
+
+        // ----- Terminal (Tab5) -----
+        if root.page == 3 && root.terminal-enabled: VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 3px;
+            Text {
+                text: root.term-status;
+                color: Theme.muted;
+                font-family: "JetBrains Mono";
+                font-size: 8px;
+                overflow: elide;
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                border-radius: 4px;
+                background: #0b0d10;
+                // Newest at the bottom; what doesn't fit leaves at the top.
+                // The lines are placed by hand (y set): a layout that fills
+                // the box would make the box as tall as all lines and push
+                // the newest ones, the input and the buttons off the screen.
+                VerticalLayout {
+                    width: parent.width;
+                    height: self.preferred-height;
+                    y: parent.height - self.height;
+                    padding: 4px;
+                    for line in root.term-lines: Text {
+                        text: line.text;
+                        color: Theme.term-color(line.tone);
+                        font-family: "JetBrains Mono";
+                        font-size: 8px;
+                        wrap: char-wrap;
+                    }
+                }
+            }
+            HorizontalLayout {
+                padding-left: 4px;
+                Text {
+                    text: root.term-prompt;
+                    color: Theme.term-color(3);
+                    font-family: "JetBrains Mono";
+                    font-size: 9px;
+                    horizontal-stretch: 0;
+                }
+                // The prompt's trailing space (a Text's width leaves it out).
+                Rectangle {
+                    width: root.term-prompt == "" ? 0px : 5px;
+                    horizontal-stretch: 0;
+                }
+                Text {
+                    text: root.term-before;
+                    color: #ffffff;
+                    font-family: "JetBrains Mono";
+                    font-size: 9px;
+                    horizontal-stretch: 0;
+                }
+                // The cursor.
+                Rectangle {
+                    width: 5px;
+                    background: #ffffff;
+                    horizontal-stretch: 0;
+                }
+                // Takes the rest of the row, so prompt, text and cursor stay
+                // together on the left.
+                Text {
+                    text: root.term-after;
+                    color: #ffffff;
+                    font-family: "JetBrains Mono";
+                    font-size: 9px;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+            }
+            HorizontalLayout {
+                height: root.header-height;
+                spacing: 4px;
+                for cmd in ["help", "info", "lan", "rak", "rak ping", "clear"]: Rectangle {
+                    border-radius: 4px;
+                    background: Theme.button;
+                    Text {
+                        text: cmd;
+                        color: Theme.text;
+                        font-size: 10px;
+                        font-weight: 700;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        clicked => {
+                            root.term-command(cmd);
+                        }
+                    }
+                }
             }
         }
 

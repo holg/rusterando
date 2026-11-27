@@ -1,7 +1,8 @@
-# davidspizzeria E2E tests
+# rusterando E2E tests
 
-Playwright + pytest. Tests run against an already-deployed instance
-(default `davidspizzeria.de`).
+Playwright + pytest. Tests run against an already-running instance
+(default the local dev server `http://127.0.0.1:3001`). A deployed shop
+is only tested when you set `BASE_URL` to it explicitly.
 
 ## Setup
 
@@ -23,8 +24,8 @@ cp tests/e2e/.env.example tests/e2e/.env
 
 ```bash
 cd tests/e2e
-pytest                  # against davidspizzeria.de (default)
-BASE_URL=http://127.0.0.1:3001 pytest   # against local dev server
+pytest                  # against the local dev server :3001 (default)
+BASE_URL=https://shop.example.com pytest   # against a deployed shop
 pytest test_hydration.py::test_admin_top_nav_clickable_on_cold_load  # one test
 pytest --headed --slowmo 300            # watch it run
 ```
@@ -46,7 +47,7 @@ local shop in **Stripe sandbox** mode (the auth tests carry
 `no_sandbox_guard` and run regardless). Flip a live local DB once with:
 
 ```bash
-sqlite3 data/davidspizzeria.db \
+sqlite3 data/rusterando.db \
   "UPDATE app_settings SET value='sandbox' WHERE key='stripe_mode';"
 ```
 
@@ -63,7 +64,7 @@ every shop we deploy:
 
 ```bash
 BASE_URL=https://rusterando.de         pytest   # apex
-BASE_URL=https://flizza.rusterando.de  pytest   # a *.rusterando.de tenant
+BASE_URL=https://beispiel.rusterando.de  pytest   # a *.rusterando.de tenant
 ```
 
 `test_order_admin_message.py` is the headline live round-trip: customer

@@ -73,9 +73,26 @@ impl BatteryStatus {
         self.milliamps > IDLE_MA
     }
 
+    /// Under 20 % and not charging: the header shows it in red.
+    pub fn low(&self) -> bool {
+        self.millivolts >= PLAUSIBLE_MV && self.percent < 20 && !self.charging()
+    }
+
     /// Running on the battery (no or too little external power).
     fn draining(&self) -> bool {
         self.milliamps < -IDLE_MA && self.millivolts >= PLAUSIBLE_MV
+    }
+
+    /// For the header: "Akku 72 %", "Akku 72 % lädt"; `None` without a pack.
+    pub fn short(&self) -> Option<String> {
+        if self.millivolts < PLAUSIBLE_MV {
+            return None;
+        }
+        Some(if self.charging() {
+            format!("Akku {} % lädt", self.percent)
+        } else {
+            format!("Akku {} %", self.percent)
+        })
     }
 
     /// For the Start page: "Akku 72 % · 7.83 V · lädt (+740 mA)"; `None`

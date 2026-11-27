@@ -339,7 +339,7 @@ fn in_bbox(b: (f64, f64, f64, f64), lat: f64, lon: f64) -> bool {
 mod tests {
     use super::*;
 
-    // Lüdinghausen-ish square around the town centre.
+    // Square around the sample fixture's town centre.
     const CENTRE_POLY: &str = r#"{"type":"Polygon","coordinates":[[[7.42,51.76],[7.46,51.76],[7.46,51.78],[7.42,51.78],[7.42,51.76]]]}"#;
     const BBOX: (f64, f64, f64, f64) = (51.68, 51.86, 7.30, 7.58);
 

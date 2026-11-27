@@ -19,8 +19,9 @@ keystore/
 app/flavors.local.json
 
 # Tenant-specific flavor source dirs. The public repo ships the
-# "example" flavor; everything else is per-publisher and gitignored.
-# Add a `!app/src/<flavor>/` line below for any flavor that should
-# stay public.
-app/src/davids/
-app/src/rusterando/
+# "example" flavor (plus the shared main/); everything else is
+# per-publisher and gitignored. Add a `!app/src/<flavor>/` line below
+# for any flavor that should stay public.
+app/src/*/
+!app/src/main/
+!app/src/example/

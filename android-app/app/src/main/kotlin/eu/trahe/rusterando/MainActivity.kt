@@ -28,6 +28,10 @@ import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.lifecycleScope
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import kotlinx.coroutines.launch
 
 /**
  * Single-Activity WebView shell pointed at the configured shop
@@ -99,6 +103,9 @@ class MainActivity : AppCompatActivity() {
             addView(reloadButton)
         }
         setContentView(container)
+
+        // Before the first page load: the bridge object is injected per load.
+        setUpReceiptPrinter()
 
         // First-launch URL: pick the active role's home_path if one is
         // signed in, else the public site root. Warm starts restore
@@ -242,7 +249,64 @@ class MainActivity : AppCompatActivity() {
         // the contract is the same: RESULT_OK + EXTRA_SHOP_ID means the
         // active shop changed (or its role did).
         result.data?.getStringExtra(ShopsActivity.EXTRA_SHOP_ID)
+        // A new shop may have a new origin for the printer bridge.
+        setUpReceiptPrinter()
         loadInitialUrl()
+    }
+
+    /**
+     * On a handheld with a built-in receipt printer (Sunmi V2) the page gets
+     * `window.RusterandoPrinter`: it posts an order id ("Hier drucken" on the
+     * order boards), and the app fetches that order's 58-mm Bon with its
+     * session and prints it. androidx.webkit origin rules offer the object
+     * to the shops' own origins only, and only the main frame may use it —
+     * no embedded third-party frame (Stripe, …) can print.
+     */
+    private fun setUpReceiptPrinter() {
+        if (!ReceiptPrinter.isPresent(this) ||
+            !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+        ) {
+            return
+        }
+        ReceiptPrinter.bind(this)
+        WebViewCompat.removeWebMessageListener(webView, PRINTER_BRIDGE)
+        val origins = printerOrigins()
+        if (origins.isEmpty()) return
+        try {
+            WebViewCompat.addWebMessageListener(webView, PRINTER_BRIDGE, origins) {
+                    _, message, sourceOrigin, isMainFrame, _ ->
+                val orderId = message.data
+                if (isMainFrame && orderId != null && ORDER_ID.matches(orderId)) {
+                    printOrder(sourceOrigin.toString().trimEnd('/'), orderId)
+                }
+            }
+        } catch (e: IllegalArgumentException) {
+            Log.w("MainActivity", "printer bridge not offered: $origins", e)
+        }
+    }
+
+    /** The https origins of the saved shops, plus this build's own domain. */
+    private fun printerOrigins(): Set<String> = buildSet {
+        if (BuildConfig.ASSOCIATED_DOMAIN.isNotBlank()) {
+            add("https://${BuildConfig.ASSOCIATED_DOMAIN}")
+        }
+        for (shop in ShopStore.all(this@MainActivity)) {
+            val uri = Uri.parse(shop.baseUrl)
+            val host = uri.host ?: continue
+            if (uri.scheme != "https") continue
+            add(if (uri.port == -1) "https://$host" else "https://$host:${uri.port}")
+        }
+    }
+
+    /** UI thread (the message listener's): read the session, print off it. */
+    private fun printOrder(origin: String, orderId: String) {
+        Toast.makeText(this, "Bon wird gedruckt …", Toast.LENGTH_SHORT).show()
+        val cookie = CookieManager.getInstance().getCookie(origin)
+        val userAgent = webView.settings.userAgentString
+        lifecycleScope.launch {
+            val message = ReceiptPrinter.printOrder(origin, orderId, cookie, userAgent)
+            Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun statusBarHeight(): Int {
@@ -354,6 +418,12 @@ class MainActivity : AppCompatActivity() {
     private companion object {
         /** Away longer than this, a live board reloads on return. */
         const val RESUME_RELOAD_AFTER_MS = 120_000L
+
+        /** `window.RusterandoPrinter`, see [setUpReceiptPrinter]. */
+        const val PRINTER_BRIDGE = "RusterandoPrinter"
+
+        /** Order ids are UUIDs; anything else is not ours to print. */
+        val ORDER_ID = Regex("^[0-9A-Za-z-]{1,64}$")
 
         fun pageModeFor(url: String?): PageMode {
             val uri = url?.let(Uri::parse) ?: return PageMode()

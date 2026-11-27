@@ -2,7 +2,8 @@
   "applinks": {
     "details": [
       {
-        "appIDs": ["U4GT5CZ7J7.eu.trahe.davidspizzeria"],
+        "appIDs": ["TEAMID0001.com.example.shop"],
+        "comment": "Placeholder. A shop's real manifest (10-char Apple team id + its iOS app's bundle id) goes into its site overlay as site/<profile>/apple-app-site-association; the server serves that one at runtime (SITE_OVERLAY_DIR) and falls back to this file, which is baked into the binary.",
         "components": [
           { "/": "/orders/*",  "comment": "deep-link to a specific order confirmation" },
           { "/": "/admin/*",   "comment": "admin pages open in-app for staff" },
@@ -13,6 +14,6 @@
     ]
   },
   "webcredentials": {
-    "apps": ["U4GT5CZ7J7.eu.trahe.davidspizzeria"]
+    "apps": ["TEAMID0001.com.example.shop"]
   }
 }

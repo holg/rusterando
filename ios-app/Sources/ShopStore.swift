@@ -1,6 +1,6 @@
 //
 //  ShopStore.swift
-//  Davids Pizzeria / Rusterando
+//  Rusterando
 //
 //  Persisted shop list + per-shop credentials. Two stores:
 //
@@ -10,8 +10,8 @@
 //    holding the password. Service name "rusterando.shop-passwords";
 //    account "<shopId>:<role>".
 //
-//  On first launch the list is seeded with one entry — the historical
-//  Davids shop — so existing installs upgrade cleanly. After that
+//  On first launch the list is seeded from the Info.plist seed keys (one
+//  entry, or none for the brand-neutral build). After that
 //  every mutation goes through this class so the in-memory cache
 //  and persistent stores stay in sync.
 //
@@ -30,8 +30,8 @@ enum ShopStore {
     /// Seed strategy on first launch. Reads two optional Info.plist
     /// keys so the same source tree can ship either:
     ///
-    ///  - The Davids build — Info.plist sets `SeedShopName` +
-    ///    `SeedShopURL` so the app boots ready-to-use with Davids
+    ///  - A shop's own build — Info.plist sets `SeedShopName` +
+    ///    `SeedShopURL` so the app boots ready-to-use with that shop
     ///    pre-configured (single-shop customer never opens Settings).
     ///
     ///  - The brand-neutral Rusterando build — Info.plist omits
@@ -39,9 +39,8 @@ enum ShopStore {
     ///    UI nudges the user toward "+ Shop hinzufügen". Intended for
     ///    multi-shop drivers / multi-shop clients.
     ///
-    /// When both Info.plist keys are missing AND no shop list is
-    /// stored yet, we fall back to the historical Davids seed so the
-    /// existing TestFlight install upgrades without becoming empty.
+    /// When both Info.plist keys are missing, the list starts empty
+    /// (see the end of the function).
     private static func bootstrappedShops() -> [Shop] {
         let info = Bundle.main.infoDictionary
         let name = info?["SeedShopName"] as? String
@@ -64,7 +63,7 @@ enum ShopStore {
         }
         // No Info.plist seed configured — brand-neutral build. Boots
         // with an empty list; the Shops screen invites the user to
-        // "+ Shop hinzufügen". A Davids-flavored target sets the
+        // "+ Shop hinzufügen". A shop-branded target sets the
         // Info.plist seed keys to pre-configure one shop on first
         // launch.
         return []

@@ -3,7 +3,7 @@
 //! Every time `validate_address` returns `ok=false` (no Nominatim hit, HTTP
 //! error, out-of-radius, wrong-city, no-zone), a row lands in the
 //! `address_attempts` table. This page is the read-only window into that
-//! table — what David opens after a customer complains "ich konnte nicht
+//! table — what the admin opens after a customer complains "ich konnte nicht
 //! bestellen". It shows the customer's typed inputs, what Nominatim said,
 //! and the precise reason the classifier rejected.
 //!

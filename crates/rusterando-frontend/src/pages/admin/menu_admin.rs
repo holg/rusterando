@@ -480,6 +480,10 @@ pub fn AdminMenuPage() -> impl IntoView {
             <section class="admin-menu">
                 <div class="page-bar">
                     <h1>"Speisekarte verwalten"</h1>
+                    <a class="btn ghost" href="/admin/speisekarte.csv" download rel="external"
+                       title="Alle Artikel, Extras und Optionen mit Preisen (und Neue Preise), eine Zeile pro Preis — für die Kasse oder Excel">
+                        "⬇ CSV für die Kasse"
+                    </a>
                     <a href="/menu" class="link">"→ öffentliche Ansicht"</a>
                 </div>
 

@@ -22,6 +22,8 @@ const CHUNK: usize = 4096;
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(15);
 /// Epson's USB vendor id, for a readable name.
 const VID_EPSON: u16 = 0x04b8;
+/// No device this long after the start: switch the port off and on once.
+const RETRY_AFTER: Duration = Duration::from_secs(6);
 
 /// Device events from the library's callback, handled on the USB thread.
 enum UsbEvent {
@@ -107,12 +109,18 @@ fn run(
     log::info!("usb printer: host up, waiting for a printer");
 
     let mut printer: Option<Printer> = None;
+    let started = Instant::now();
+    let mut seen_device = false;
+    let mut retried = false;
     loop {
         // SAFETY: live client handle; callbacks run in here.
         unsafe { bsp::usb_host_client_handle_events(client, ticks(Duration::from_millis(50))) };
 
         let events = std::mem::take(&mut *EVENTS.lock().unwrap());
         for event in events {
+            if matches!(event, UsbEvent::New(_)) {
+                seen_device = true;
+            }
             match event {
                 UsbEvent::New(address) if printer.is_none() => match open_printer(client, address) {
                     Ok(p) => {
@@ -133,6 +141,22 @@ fn run(
                         on_change(None);
                     }
                 }
+            }
+        }
+
+        // A printer plugged in before the start can fail its very first
+        // descriptor read (Epson TM-T20II: "ENUM: CHECK_SHORT_DEV_DESC
+        // FAILED") and the library never tries again — unplugging it helps,
+        // and so does the port off and on: once, a little after the start,
+        // when nothing came up. With nothing plugged in it changes nothing.
+        if !retried && !seen_device && started.elapsed() > RETRY_AFTER {
+            retried = true;
+            log::info!("usb printer: no device yet — port off and on once (a printer plugged in at start may have failed)");
+            // SAFETY: plain library calls; the library task picks up the change.
+            unsafe {
+                let _ = bsp::usb_host_lib_set_root_port_power(false);
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = bsp::usb_host_lib_set_root_port_power(true);
             }
         }
 

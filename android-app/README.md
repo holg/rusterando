@@ -1,9 +1,12 @@
-# Android shell — Rusterando / Davids Pizzeria
+# Android shell — Rusterando
 
 Thin WebView app pointed at the live shop. Counterpart to `ios-app/`.
 
-One Gradle project, two product flavors (`rusterando`, `davids`)
-share the same Kotlin source tree. Each flavor sets its own
+One Gradle project; every product flavor shares the same Kotlin source
+tree. The public repo ships one `example` flavor (placeholder bundle id,
+empty start URL); the flavors you actually ship (e.g. `myshop`) come from
+`app/flavors.local.json` (gitignored; template:
+`app/flavors.local.example.json`). Each flavor sets its own
 `applicationId`, `app_name`, `BuildConfig.START_URL`, and the
 associated-domain string used by the deep-link intent filter and
 (later) App Links verification.
@@ -22,9 +25,9 @@ That writes `gradle/wrapper/gradle-wrapper.jar` plus the `gradlew`
 and `gradlew.bat` scripts. From there:
 
 ```bash
-./gradlew :app:assembleRusterandoDebug   # build the brand-neutral demo APK
-./gradlew :app:assembleDavidsDebug       # build Davids' branded APK
-./gradlew :app:installRusterandoDebug    # install + launch on a connected device
+./gradlew :app:assembleExampleDebug      # build the brand-neutral example APK
+./gradlew :app:assembleMyshopDebug       # a flavor from flavors.local.json (here `myshop`)
+./gradlew :app:installMyshopDebug        # install + launch on a connected device
 ```
 
 Open in Android Studio for ergonomic editing. Configure the SDK path
@@ -43,15 +46,15 @@ android-app/
 ├── gradle.properties           AndroidX, JVM heap
 ├── gradle/wrapper/             wrapper props (JAR generated locally)
 └── app/
-    ├── build.gradle.kts        productFlavors: rusterando, davids
+    ├── build.gradle.kts        productFlavors: example (+ flavors.local.json)
     ├── proguard-rules.pro      minimal — nothing to keep yet
     └── src/
         ├── main/
         │   ├── AndroidManifest.xml
         │   ├── kotlin/eu/trahe/rusterando/MainActivity.kt
         │   └── res/            shared theme, launcher icon, base strings
-        ├── davids/res/         davidspizzeria.de associated domain
-        └── rusterando/res/     rusterando.de associated domain
+        ├── example/res/        placeholder strings for the example flavor
+        └── <flavor>/res/       per-tenant resources (gitignored, e.g. myshop/)
 ```
 
 ## What's in this slice (#134)
@@ -86,11 +89,11 @@ android-app/
 ## App Links
 
 For the deep-link intent filter to verify automatically (so a
-davidspizzeria.de URL opens the app instead of the browser), the
+shop.example.com URL opens the app instead of the browser), the
 shop has to serve a Digital Asset Links file:
 
 ```
-https://davidspizzeria.de/.well-known/assetlinks.json
+https://shop.example.com/.well-known/assetlinks.json
 ```
 
 Format and signing-cert fingerprint generation are out of scope for

@@ -51,13 +51,13 @@ pub struct ItemStat {
 
 /// "Was hätte Lieferando für genau diese Bestellungen kassiert — und was
 /// kostet uns derselbe Umsatz über die eigene Seite?" Die Lieferando-Seite
-/// ist die exakte Gebührenformel von Davids echter Wochenrechnung (14,00%
+/// ist die exakte Gebührenformel einer echten Lieferando-Wochenrechnung (2026; 14,00%
 /// Provision auf JEDE Bestellung + 0,64 € Verwaltungsgebühr je
 /// online/kartenbezahlter Bestellung). Die eigene Seite: Stripe-Satz nur auf
 /// Kartenzahlungen, Bar/Abholung kostet 0 €.
 ///
 /// Alle Beträge **netto** (ohne MwSt.): die 19% auf die Lieferando-Gebühr
-/// sind für David Vorsteuer und damit voll abziehbar — sie sind kein echter
+/// sind für den Shop Vorsteuer und damit voll abziehbar — sie sind kein echter
 /// Kostenfaktor und würden den Vergleich verfälschen.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SavingsSimulation {
@@ -91,7 +91,7 @@ pub struct SavingsSimulation {
     /// Eigene-Seite-Kosten gesamt (cents).
     pub own_total_cents: i64,
 
-    /// Ersparnis = Lieferando − eigene Seite (cents). DIE Zahl, die David
+    /// Ersparnis = Lieferando − eigene Seite (cents). DIE Zahl, die der Shop
     /// eines Tages als reale Einsparung geltend machen kann.
     pub savings_cents: i64,
 
@@ -102,7 +102,7 @@ pub struct SavingsSimulation {
     pub stripe_fixed_cents: i64,
 }
 
-/// Lieferando-Provisionssatz aus Davids echter Rechnung: 14,00%.
+/// Lieferando-Provisionssatz aus einer echten Lieferando-Wochenrechnung (2026): 14,00%.
 /// In Basispunkten, damit die Ganzzahl-Arithmetik exakt bleibt.
 #[cfg(feature = "ssr")]
 const LIEFERANDO_COMMISSION_BPS: i64 = 1400;
@@ -466,7 +466,7 @@ pub async fn list_admin_history(
 
     // All-time cumulative savings ("seit Start") — same fee formula over
     // EVERY live, non-cancelled order, ignoring the date picker. This is the
-    // running total David can point at one day as real, accrued savings.
+    // running total the shop can point at one day as real, accrued savings.
     // Aggregated in one query so it's cheap regardless of order count.
     let lifetime = {
         let sql = "SELECT
@@ -877,7 +877,7 @@ fn Report(r: HistoryReport) -> impl IntoView {
 /// Spar-Simulation: stellt die echte Lieferando-Gebührenformel den
 /// Stripe-Kosten der eigenen Seite gegenüber — für genau die Bestellungen
 /// im gewählten Zeitraum. Die `savings_cents`-Zahl ist die reale Einsparung,
-/// die David eines Tages geltend machen kann.
+/// die der Shop eines Tages geltend machen kann.
 #[component]
 fn SavingsPanel(s: SavingsSimulation, lifetime: SavingsSimulation) -> impl IntoView {
     // Ersparnis als % vom Umsatz — fürs Bauchgefühl ("X% mehr behalten").
@@ -895,7 +895,7 @@ fn SavingsPanel(s: SavingsSimulation, lifetime: SavingsSimulation) -> impl IntoV
     view! {
         <h2>"Ersparnis-Simulation: Lieferando vs. eigene Seite"</h2>
         <p class="hint muted">
-            "Was hätte Lieferando für genau diese Bestellungen kassiert — und was kostet uns derselbe Umsatz über die eigene Seite? Alle Beträge netto (die MwSt. auf Lieferando-Gebühren ist für David abziehbare Vorsteuer)."
+            "Was hätte Lieferando für genau diese Bestellungen kassiert — und was kostet uns derselbe Umsatz über die eigene Seite? Alle Beträge netto (die MwSt. auf Lieferando-Gebühren ist für den Shop abziehbare Vorsteuer)."
         </p>
 
         // Kumulierte Gesamtersparnis seit Start — die "echte" Zahl, prominent.

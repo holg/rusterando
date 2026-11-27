@@ -18,9 +18,12 @@ CONFIG_SPIRAM_MEMTEST=n
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 
-# The UI loop runs on the main task, and Slint's software renderer goes deep
-# on busy pages (the "Zeiten" page crashed the device with 16 KB).
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=65536
+# The UI loop runs in its own thread with a 64 KB stack (main.rs: Slint's
+# software renderer goes deep on busy pages; the "Zeiten" page crashed the
+# device with 16 KB). Not on the main task any more: its stack is taken
+# while the C6 link (esp_hosted) sets up its buffers, and with Bluetooth on
+# no 64 KB block was left at that moment (boot assert in app_startup.c).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 CONFIG_FREERTOS_HZ=1000
 
 # esp-idf-hal links ESP-IDF's legacy I2C driver; the board code (and later
@@ -62,3 +65,43 @@ CONFIG_BSP_ERROR_CHECK=n
 # confirms itself (print channel connected); a reset before that boots the
 # previous image again.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# The Terminal page (Tab5; lab.rs). The JC1060P470 turns both off again in
+# boards/jc1060p470/sdkconfig.defaults.
+# Module13.2 LAN: W5500 on the M5-Bus SPI (ESP-IDF's own driver).
+CONFIG_ETH_USE_SPI_ETHERNET=y
+CONFIG_ETH_SPI_ETHERNET_W5500=y
+# Bluetooth LE for the phone: NimBLE host here, the C6's controller over
+# esp_hosted (VHCI), as in tab5-lab (works with the C6's factory firmware).
+CONFIG_BT_ENABLED=y
+CONFIG_BT_CONTROLLER_DISABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_TRANSPORT_UART=n
+CONFIG_ESP_HOSTED_ENABLE_BT_NIMBLE=y
+CONFIG_ESP_HOSTED_NIMBLE_HCI_VHCI=y
+# Central too: the Tab5 on the LAN cable sends the Tagesangebot to the
+# colour e-ink frame (eink.rs), beside the phone's connection.
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_GATT_CLIENT=y
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=2
+# The host task runs the GATT client's callbacks for the frame too: 8 KB
+# instead of the default 4 KB (an overflow there restarts the device without
+# a word on the USB console).
+CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=8192
+# Internal RAM is what TLS (esp-sha/esp-aes DMA buffers) and the drivers
+# need; with Bluetooth and the Terminal page's threads it ran out (TLS
+# handshakes failed: "esp-sha: Failed to allocate buf memory"). The big,
+# plain buffers go to PSRAM instead: mbedTLS's session buffers (~20 KB per
+# connection) and NimBLE's pools.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# USB host (the receipt printer on USB-A): more time to settle than ESP-IDF's
+# defaults (250 / 30 / 30 / 10 ms). The Epson TM-T20II failed its first
+# descriptor read at boot with them ("ENUM: CHECK_SHORT_DEV_DESC FAILED").
+CONFIG_USB_HOST_DEBOUNCE_DELAY_MS=500
+CONFIG_USB_HOST_RESET_HOLD_MS=50
+CONFIG_USB_HOST_RESET_RECOVERY_MS=100
+CONFIG_USB_HOST_SET_ADDR_RECOVERY_MS=50

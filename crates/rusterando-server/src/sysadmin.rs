@@ -1093,8 +1093,8 @@ mod tests {
     #[test]
     fn slugify_matches_importer() {
         assert_eq!(
-            slugify("Pizzeria Rimini Lüdinghausen"),
-            "pizzeria-rimini-l-dinghausen"
+            slugify("Pizzeria Beispiel Musterhöfe"),
+            "pizzeria-beispiel-musterh-fe"
         );
         assert_eq!(slugify("--a--b--"), "a-b");
     }

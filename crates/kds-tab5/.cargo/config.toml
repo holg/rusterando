@@ -6,6 +6,12 @@ linker = "ldproxy"
 # ESP-IDF 5.x has a 64-bit time_t.
 rustflags = ["--cfg", "espidf_time64"]
 
+# The Cardputer ADV (ESP32-S3, BOARD=cardputer in scripts/build_kds_tab5.sh,
+# with the esp toolchain).
+[target.xtensa-esp32s3-espidf]
+linker = "ldproxy"
+rustflags = ["--cfg", "espidf_time64"]
+
 [unstable]
 build-std = ["std", "panic_abort"]
 

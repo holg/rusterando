@@ -1,12 +1,14 @@
 pub mod address_attempts;
 pub mod broadcast;
 pub mod customers;
+pub mod daily_offer;
 pub mod extras_admin;
 pub mod history;
 pub mod home;
 pub mod home_admin;
 pub mod hours;
 pub mod login;
+pub mod lora;
 pub mod menu_admin;
 pub mod next_prices;
 pub mod options_admin;

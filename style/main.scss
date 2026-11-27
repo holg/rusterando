@@ -1,4 +1,4 @@
-// Davids Pizzeria — base styles. Plain CSS via SCSS so we don't depend on
+// Rusterando — base styles. Plain CSS via SCSS so we don't depend on
 // Tailwind utility-class scanning of Rust source for non-trivial structure.
 
 // Theme variables. `:root` holds shared tokens; `.theme-warm` /
@@ -62,6 +62,146 @@
   --shadow-hero: 0 18px 50px rgba(0, 0, 0, 0.55);
 }
 
+// The PDF looks on the homepage, as on the menu: the board (or the dark
+// trattoria wall) behind the hero instead of the hero's own colour, a
+// lighter vignette, and the offer cards framed like the menu's cards.
+.theme-tafel, .theme-trattoria {
+  .hero-cinematic {
+    background: transparent;
+    .hero-bg { background: transparent !important; }
+    .hero-vignette {
+      background: radial-gradient(ellipse at 50% 50%, transparent 40%, rgba(0, 0, 0, 0.28) 100%);
+    }
+  }
+  .offers .offer {
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    color: var(--text);
+    box-shadow: none;
+    .price { color: var(--accent); }
+  }
+}
+
+// The item's chalk drawing and the tricolour on the Tagesangebot and offer
+// cards: only the chalkboard theme draws them.
+.chalk-motif, .chalk-flag { display: none; }
+
+// Header: sun/moon switch between the shop's theme and `theme_alt`. The
+// icon follows the class on <html>: a moon on the light theme, a sun on
+// the dark ones.
+.theme-toggle {
+  width: 2.2rem;
+  height: 2.2rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  .to-light { display: none; }
+}
+.theme-dark, .theme-tafel, .theme-trattoria {
+  .theme-toggle .to-dark { display: none; }
+  .theme-toggle .to-light { display: inline; }
+}
+
+// The PDF menu's looks for the website (setting `theme`): "tafel" — the
+// chalkboard, pink and yellow chalk, Cabin Sketch / Kalam — and
+// "trattoria" — dark, cream, red and green. Both are dark, so they share
+// the dark theme's surface overrides further down.
+@font-face {
+  font-family: "Cabin Sketch";
+  src: url("/fonts/cabin-sketch-bold.woff") format("woff");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Kalam";
+  src: url("/fonts/kalam-regular.woff") format("woff");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Kalam";
+  src: url("/fonts/kalam-bold.woff") format("woff");
+  font-weight: 700;
+  font-display: swap;
+}
+
+.theme-tafel {
+  // Pink chalk for lettering on the board; a deeper chalk red where it
+  // fills a button or tag under white text (--primary-fill, used by every
+  // `background: var(--primary)` — other themes don't set it).
+  --primary: #f2a5ac;
+  --primary-dark: #d98891;
+  --primary-fill: #c4505e;
+  --primary-fill-dark: #a5414d;
+  --secondary: #a9d39a;
+  --accent: #f8e491;
+  --bg: #24322d;
+  --bg-elev: rgba(20, 30, 27, 0.72);
+  --text: #f4f2e8;
+  --muted: #ced3ca;
+  --border: rgba(206, 211, 202, 0.38);
+  --hero-bg: transparent;
+  --hero-text: #f4f2e8;
+  --header-bg: rgba(30, 42, 38, 0.86);
+  --header-border: rgba(244, 242, 232, 0.12);
+  --shadow-card: none;
+  --shadow-hero: 0 18px 50px rgba(0, 0, 0, 0.45);
+  body {
+    background: #24322d url("/img/theme/tafel.jpg") center / cover fixed;
+    font-family: "Kalam", system-ui, sans-serif;
+  }
+  // Chalk lettering for the headings; the storefront wordmark keeps its
+  // own font, the admin keeps the plain one.
+  h1:not(.logo), h2, h3, .site-header .brand-name {
+    font-family: "Cabin Sketch", "Kalam", system-ui, sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  .admin-shell, .admin-shell h1, .admin-shell h2, .admin-shell h3 {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+}
+
+.theme-trattoria {
+  --primary: #c8483a;
+  --primary-dark: #9e3529;
+  --secondary: #7e9658;
+  --accent: #e6c37a;
+  --bg: #191715;
+  --bg-elev: rgba(35, 32, 29, 0.86);
+  --text: #f1e9dc;
+  --muted: #b7ab9a;
+  --border: #3a332d;
+  --hero-bg: transparent;
+  --hero-text: #fff;
+  --header-bg: rgba(25, 23, 21, 0.86);
+  --header-border: rgba(255, 255, 255, 0.08);
+  --shadow-card: 0 6px 18px rgba(0, 0, 0, 0.45);
+  --shadow-hero: 0 18px 50px rgba(0, 0, 0, 0.55);
+  body {
+    background: #191715 url("/img/theme/trattoria.jpg") center / cover fixed;
+  }
+  // Capitals and a tricolour rule under the section headings, as in the
+  // PDF.
+  h2 {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .menu .category h2 {
+    border-bottom: 0;
+    padding-bottom: 0.45rem;
+    background: linear-gradient(90deg, #008c45 0 33%, #f4f5f0 33% 66%, #cd212a 66%) left bottom / 4.5rem 3px no-repeat;
+  }
+  .admin-shell h2 {
+    text-transform: none;
+    letter-spacing: 0;
+  }
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -75,7 +215,7 @@ a { color: var(--primary); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 button {
-  background: var(--primary);
+  background: var(--primary-fill, var(--primary));
   color: white;
   border: 0;
   padding: 0.5rem 0.9rem;
@@ -84,7 +224,7 @@ button {
   font-weight: 600;
 }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
-button:hover:not(:disabled) { background: var(--primary-dark); }
+button:hover:not(:disabled) { background: var(--primary-fill-dark, var(--primary-dark)); }
 
 input[type="number"], input[type="password"], input[type="text"] {
   border: 1px solid var(--border);
@@ -131,27 +271,27 @@ body:has(.test-mode-banner) {
     text-decoration: none;
   }
 
-  // Italian-flag gradient wordmark. The middle white stripe of the
-  // gradient sits over the page background, so letters that land in
-  // that band (e.g. "PI" of "PIZZERIA") need a stroke around them or
-  // they vanish on cream/warm themes. paint-order: stroke fill puts
-  // the dark stroke BEHIND the gradient fill so the letter shapes
-  // stay crisp without muddying the colours.
+  // The shop name as on the storefront banner (flag_letters.rs): whole
+  // letters green / white / red. The white ones sit on the page
+  // background, so every letter gets a thin dark stroke or they vanish on
+  // cream/warm themes. paint-order: stroke fill puts the stroke BEHIND
+  // the fill so the shapes stay crisp without muddying the colours.
   .brand-wordmark {
+    font-family: "Montserrat", system-ui, sans-serif;
     font-size: clamp(1.05rem, 2.4vw, 1.4rem);
-    font-weight: 900;
-    letter-spacing: 2px;
+    font-weight: 800;
+    letter-spacing: 1px;
     text-transform: uppercase;
-    background: linear-gradient(to right, #008c45, #ffffff, #cd212a);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: transparent;
     -webkit-text-stroke: 0.6px rgba(0, 0, 0, 0.65);
     paint-order: stroke fill;
     text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
     transition: transform 0.15s ease;
     &:hover { transform: translateY(-1px); }
+    // The white letters need a firmer outline on the light header.
+    .flag-word .fw {
+      -webkit-text-stroke: 1.1px rgba(0, 0, 0, 0.8);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    }
   }
 
   .site-nav {
@@ -160,7 +300,7 @@ body:has(.test-mode-banner) {
     gap: 0.4rem 0.6rem;
   }
 
-  // Gradient pill nav buttons (David's mockup). Active in both themes;
+  // Gradient pill nav buttons (the original design mockup). Active in both themes;
   // we let the gradient supply contrast against either bg.
   a.pill {
     display: inline-block;
@@ -221,6 +361,23 @@ body:has(.test-mode-banner) {
   }
 }
 
+// The storefront banner's lettering (components/flag_letters.rs).
+// Montserrat ExtraBold, SIL OFL (public/fonts/Montserrat-OFL.txt), served
+// from the site itself: no request to Google.
+@font-face {
+  font-family: "Montserrat";
+  src: url("/fonts/montserrat-extrabold.woff") format("woff");
+  font-weight: 800;
+  font-style: normal;
+  font-display: swap;
+}
+.flag-word {
+  white-space: nowrap;
+  .fg { color: #008c45; }
+  .fw { color: #f4f5f0; }
+  .fr { color: #cd212a; }
+}
+
 // ----- Cinematic hero -----
 .hero-cinematic {
   position: relative;
@@ -272,6 +429,71 @@ body:has(.test-mode-banner) {
     max-width: 38rem;
     color: #fff;
     text-shadow: 0 2px 18px rgba(0, 0, 0, 0.45);
+    // The Tagesangebot, at the very top (pages/daily_offer.rs).
+    .daily-offer {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.25rem;
+      margin: 0 auto 1.4rem;
+      padding: 0.9rem 1.2rem 1rem;
+      max-width: 30rem;
+      border-radius: 14px;
+      background: rgba(12, 10, 9, 0.62);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      backdrop-filter: blur(6px);
+      text-shadow: none;
+    }
+    .daily-offer-tag {
+      font-size: 0.75rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #fff;
+      background: var(--primary-fill, var(--primary));
+      border-radius: 999px;
+      padding: 0.15rem 0.7rem;
+    }
+    .daily-offer-name {
+      font-size: clamp(1.25rem, 3vw, 1.6rem);
+      line-height: 1.15;
+    }
+    .daily-offer-detail {
+      font-size: 0.9rem;
+      opacity: 0.85;
+    }
+    .daily-offer-price {
+      font-size: 1.5rem;
+      font-weight: 800;
+      color: var(--accent);
+      s {
+        margin-left: 0.5rem;
+        font-size: 1rem;
+        font-weight: 400;
+        color: rgba(255, 255, 255, 0.6);
+      }
+    }
+    .daily-offer-add {
+      margin-top: 0.35rem;
+    }
+    .daily-offer-extras {
+      width: 100%;
+      font-size: 0.9rem;
+      summary { cursor: pointer; opacity: 0.9; }
+      .daily-offer-extras-list {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(9.5rem, 1fr));
+        gap: 0.2rem 0.8rem;
+        margin-top: 0.4rem;
+        text-align: left;
+        label { display: flex; gap: 0.35rem; align-items: center; }
+      }
+    }
+    .daily-offer-error {
+      margin: 0.2rem 0 0;
+      font-size: 0.85rem;
+      color: #ffb4b4;
+    }
     h1 {
       font-size: clamp(2.4rem, 6vw, 4rem);
       margin: 0 0 0.6rem;
@@ -300,6 +522,39 @@ body:has(.test-mode-banner) {
         box-shadow: 0 8px 24px rgba(200, 16, 46, 0.35);
       }
     }
+  }
+
+  // The printed menu's front cover beside the title (written with the PDF
+  // cache, today's prices on it). Phone: the cover first, then title and
+  // button; wide screens: title left, cover right.
+  &.hero-with-cover {
+    grid-template-columns: 1fr;
+    row-gap: 1.8rem;
+    padding-top: 1.8rem;
+    .hero-cover { order: -1; }
+    // Wide: title and cover side by side, centred as one group.
+    @media (min-width: 56rem) {
+      grid-template-columns: minmax(0, 36rem) auto;
+      justify-content: center;
+      column-gap: clamp(2rem, 5vw, 4.5rem);
+      padding-inline: clamp(1.5rem, 6vw, 5rem);
+      .hero-cover { order: 0; }
+      .hero-content { justify-self: center; }
+    }
+  }
+  .hero-cover {
+    position: relative;
+    z-index: 2;
+    display: block;
+    width: min(26rem, 86vw);
+    line-height: 0;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+    transition: transform 0.25s ease;
+    img { display: block; width: 100%; height: auto; }
+    &:hover { transform: translateY(-3px) rotate(-0.4deg); }
+    @media (min-width: 56rem) { width: clamp(20rem, 30vw, 27rem); }
   }
 
   .hero-scroll-cue {
@@ -334,7 +589,7 @@ body:has(.test-mode-banner) {
 
 .btn {
   display: inline-block;
-  background: var(--primary);
+  background: var(--primary-fill, var(--primary));
   color: white;
   padding: 0.65rem 1.1rem;
   border-radius: 0.45rem;
@@ -342,14 +597,14 @@ body:has(.test-mode-banner) {
   text-decoration: none;
   border: 1px solid var(--primary);
 }
-.btn:hover { background: var(--primary-dark); border-color: var(--primary-dark); text-decoration: none; }
+.btn:hover { background: var(--primary-fill-dark, var(--primary-dark)); border-color: var(--primary-dark); text-decoration: none; }
 .btn.ghost {
   background: transparent;
   color: var(--primary);
 }
-.btn.ghost:hover { background: var(--primary); color: white; }
+.btn.ghost:hover { background: var(--primary-fill, var(--primary)); color: white; }
 
-// Gradient pill — the David's-mockup CTA style. Used for the hero's
+// Gradient pill — the design-mockup CTA style. Used for the hero's
 // primary call-to-action and (paired with .big) for the giant
 // "Jetzt bestellen" button in the hero.
 .btn.pill {
@@ -373,18 +628,17 @@ body:has(.test-mode-banner) {
   letter-spacing: 0.02em;
 }
 
-// Italian-flag wordmark — the hero h1. Big, dramatic, with a soft
-// glow shadow that works on both warm and dark themes.
+// The shop name as on the storefront banner — the hero h1. Big, with a
+// soft glow shadow that works on both warm and dark themes; one word per
+// line, as on the sign and the cover.
 .logo {
+  .flag-word { display: block; }
+  font-family: "Montserrat", system-ui, sans-serif;
   font-size: clamp(2.4rem, 7vw, 4.5rem);
-  font-weight: 900;
-  letter-spacing: 4px;
+  font-weight: 800;
+  letter-spacing: 2px;
   text-transform: uppercase;
-  background: linear-gradient(to right, #008c45, #ffffff, #cd212a);
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
+  color: #fff;
   text-shadow:
     0 0 18px rgba(0, 0, 0, 0.45),
     0 0 40px rgba(255, 255, 255, 0.15);
@@ -434,7 +688,7 @@ body:has(.test-mode-banner) {
 }
 
 // Photo-card variant: hero image as background, text overlaid with a
-// dark gradient. Used when David attaches an image to an offer in
+// dark gradient. Used when the admin attaches an image to an offer in
 // /admin/home; falls back to the warm-yellow text-only card when null.
 .offer.offer-photo {
   min-height: 13rem;
@@ -849,7 +1103,7 @@ main { display: block; width: 100%; }
     // visually stands out as the "open full category list"
     // action vs. the lighter arrow scrollers.
     .cat-list-btn {
-      background: var(--primary);
+      background: var(--primary-fill, var(--primary));
       color: white;
       border-color: var(--primary);
       // SVG must not intercept the tap — let the click bubble to the
@@ -900,7 +1154,7 @@ main { display: block; width: 100%; }
       // the user scrolls through the page — the customer always
       // knows where they are AND which pill matches their section.
       a.active {
-        background: var(--primary);
+        background: var(--primary-fill, var(--primary));
         border-color: var(--primary);
         color: white;
         font-weight: 700;
@@ -933,6 +1187,35 @@ main { display: block; width: 100%; }
       // .category-tabs (~2rem) so anchor jumps land just below
       // the tabs, not behind them.
       scroll-margin-top: 5rem;
+    }
+  }
+
+  // The category's drawing (menu.rs `category_motif`): big and faint
+  // behind its items, sticking in view while they scroll by, clipped at
+  // the section's end — so you see where you are, as on the PDF's cards.
+  .category {
+    position: relative;
+    isolation: isolate;
+    overflow: clip;
+  }
+  .cat-motif {
+    position: sticky;
+    top: 7rem;
+    height: 0;
+    z-index: -1;
+    pointer-events: none;
+    &::before {
+      content: "";
+      position: absolute;
+      right: 2%;
+      top: 0;
+      width: min(46vw, 24rem);
+      aspect-ratio: 1;
+      background: currentColor;
+      -webkit-mask: var(--motif) center / contain no-repeat;
+      mask: var(--motif) center / contain no-repeat;
+      opacity: 0.07;
+      transform: rotate(var(--tilt, -6deg));
     }
   }
 
@@ -988,13 +1271,13 @@ main { display: block; width: 100%; }
       padding: 0.45rem 0.5rem;
       border-radius: 0.4rem;
       border: 1px solid var(--primary);
-      background: var(--primary);
+      background: var(--primary-fill, var(--primary));
       color: white;
       font-family: inherit;
       cursor: pointer;
       transition: background 100ms;
 
-      &:hover:not(:disabled) { background: var(--primary-dark); }
+      &:hover:not(:disabled) { background: var(--primary-fill-dark, var(--primary-dark)); }
       &:disabled { opacity: 0.4; cursor: not-allowed; }
       &.wide { flex: 1; }
 
@@ -1058,7 +1341,7 @@ main { display: block; width: 100%; }
   gap: 0.6rem;
   padding: 0.7rem 1.1rem;
   border-radius: 999px;
-  background: var(--primary);
+  background: var(--primary-fill, var(--primary));
   color: white;
   border: none;
   box-shadow: 0 12px 28px rgba(0,0,0,0.18);
@@ -1067,7 +1350,7 @@ main { display: block; width: 100%; }
   cursor: pointer;
   transition: transform 120ms, background 120ms;
 
-  &:hover { background: var(--primary-dark); transform: translateY(-2px); }
+  &:hover { background: var(--primary-fill-dark, var(--primary-dark)); transform: translateY(-2px); }
   .icon { font-size: 1.2rem; line-height: 1; }
   .count {
     background: var(--accent);
@@ -1116,7 +1399,7 @@ main { display: block; width: 100%; }
     border-bottom: 1px solid var(--border);
     h2 { margin: 0; flex: 1; color: var(--primary); font-size: 1.15rem; }
     .close {
-      background: var(--primary);
+      background: var(--primary-fill, var(--primary));
       color: white;
       font-size: 1.5rem;
       width: 2.75rem;
@@ -1129,7 +1412,7 @@ main { display: block; width: 100%; }
       line-height: 1;
       cursor: pointer;
       box-shadow: 0 2px 6px rgba(0,0,0,0.18);
-      &:hover, &:active { background: var(--primary-dark); transform: scale(1.05); }
+      &:hover, &:active { background: var(--primary-fill-dark, var(--primary-dark)); transform: scale(1.05); }
     }
   }
   .sheet-list {
@@ -1209,7 +1492,7 @@ main { display: block; width: 100%; }
       // contrast circle so the customer can find the exit on a busy
       // phone screen. The drawer auto-opens after Add-to-cart, so
       // missing this button means feeling trapped.
-      background: var(--primary);
+      background: var(--primary-fill, var(--primary));
       color: white;
       font-size: 1.5rem;
       width: 2.75rem;
@@ -1226,7 +1509,7 @@ main { display: block; width: 100%; }
       transition: background 120ms, transform 120ms;
     }
     .close:hover, .close:active {
-      background: var(--primary-dark);
+      background: var(--primary-fill-dark, var(--primary-dark));
       transform: scale(1.05);
     }
   }
@@ -1295,10 +1578,10 @@ main { display: block; width: 100%; }
       font-weight: 700;
       cursor: pointer;
       border: 1px solid var(--primary);
-      &.primary { background: var(--primary); color: white; text-decoration: none; }
-      &.primary:hover { background: var(--primary-dark); }
+      &.primary { background: var(--primary-fill, var(--primary)); color: white; text-decoration: none; }
+      &.primary:hover { background: var(--primary-fill-dark, var(--primary-dark)); }
       &.ghost { background: transparent; color: var(--primary); }
-      &.ghost:hover:not(:disabled) { background: var(--primary); color: white; }
+      &.ghost:hover:not(:disabled) { background: var(--primary-fill, var(--primary)); color: white; }
       &.disabled, &:disabled { opacity: 0.5; pointer-events: none; }
     }
   }
@@ -1437,12 +1720,12 @@ main { display: block; width: 100%; }
       padding: 0.8rem;
       font-size: 1rem;
       border: none;
-      background: var(--primary);
+      background: var(--primary-fill, var(--primary));
       color: white;
       border-radius: 0.4rem;
       cursor: pointer;
       &:disabled { opacity: 0.5; cursor: not-allowed; }
-      &:hover:not(:disabled) { background: var(--primary-dark); }
+      &:hover:not(:disabled) { background: var(--primary-fill-dark, var(--primary-dark)); }
     }
     .error { color: var(--error); margin: 0; }
   }
@@ -1534,7 +1817,7 @@ main { display: block; width: 100%; }
   &[data-payment="failed"]          { background: #f5d4d4; color: #8b2222; }
   &[data-payment="refunded"]        { background: #d6eef9; color: #1d5c87; }
 
-  &[data-order-type="delivery"]     { background: var(--primary); color: white; }
+  &[data-order-type="delivery"]     { background: var(--primary-fill, var(--primary)); color: white; }
   &[data-order-type="pickup"]       { background: #ddd; color: #555; }
 }
 
@@ -1560,7 +1843,7 @@ main { display: block; width: 100%; }
     border-radius: 0.3rem;
     cursor: pointer;
   }
-  .btn.ghost:hover { background: var(--primary); border-color: var(--primary); }
+  .btn.ghost:hover { background: var(--primary-fill, var(--primary)); border-color: var(--primary); }
   .logout {
     background: transparent;
     color: white;
@@ -1582,7 +1865,7 @@ main { display: block; width: 100%; }
   letter-spacing: 0.04em;
   margin-top: 0.6rem;
 
-  &[data-order-type="delivery"] { background: var(--primary); color: white; }
+  &[data-order-type="delivery"] { background: var(--primary-fill, var(--primary)); color: white; }
   &[data-order-type="pickup"]   { background: #eee; color: var(--text); }
 }
 
@@ -1817,10 +2100,78 @@ main { display: block; width: 100%; }
     font-size: 0.85rem;
     cursor: pointer;
     border: 1px solid var(--primary);
-    &.primary { background: var(--primary); color: white; }
+    &.primary { background: var(--primary-fill, var(--primary)); color: white; }
     &.ghost { background: transparent; color: var(--primary); }
-    &:hover.primary { background: var(--primary-dark); }
-    &:hover.ghost { background: var(--primary); color: white; }
+    &:hover.primary { background: var(--primary-fill-dark, var(--primary-dark)); }
+    &:hover.ghost { background: var(--primary-fill, var(--primary)); color: white; }
+  }
+}
+
+// /kitchen cards: what the kitchen display's order detail shows
+// (pages/kitchen/board.rs) — items one per line, note, cash, waiting time.
+.kitchen-card {
+  &.fresh { border-color: #4d8ff7; box-shadow: 0 0 0 2px rgba(77, 143, 247, 0.25); }
+  // Number · badges (wrap among themselves) · waiting time, on one row.
+  .order-head { display: grid; grid-template-columns: auto 1fr auto; }
+  .pills { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+  .order-num { font-size: 1.6rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .status-pill { margin-right: 0; }
+  .age {
+    font-size: 1.15rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    &[data-urgency="1"] { color: #b7791f; }
+    &[data-urgency="2"] { color: var(--error); }
+  }
+  .when { margin: 0.1rem 0; font-size: 0.85rem; color: var(--muted); }
+  .contact a { color: inherit; font-weight: 600; }
+  .lines {
+    list-style: none;
+    margin: 0.5rem 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    li { display: flex; flex-direction: column; }
+    .line { font-weight: 700; }
+    .mods { font-size: 0.85rem; color: var(--muted); padding-left: 1.5rem; }
+  }
+  .note {
+    margin: 0.4rem 0;
+    padding: 0.4rem 0.6rem;
+    background: #fff7e0;
+    border-left: 3px solid #f5a524;
+    border-radius: 0.3rem;
+    font-weight: 600;
+  }
+  .pay {
+    margin: 0.3rem 0 0.6rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    &:not([data-paid]) { color: #8a4d1c; }
+  }
+  .row + .row { margin-top: 0.4rem; }
+  .btn.storno.armed { background: var(--error); border-color: var(--error); color: white; }
+}
+// Phones and handhelds (the Sunmi V2 is 360 px wide): every row of chrome
+// costs an order. The kitchen needs no public site header, the role pill
+// already says "Küche", and the board refreshes itself (live + 30 s), so
+// "Aktualisieren" shrinks to ↻.
+@media (max-width: 36rem) {
+  body:has(.kitchen-shell) .site-header { display: none; }
+  .kitchen-shell .orders-page { padding: 0.5rem 0.4rem; }
+  .kitchen-board .orders-column { padding: 0.5rem; }
+  .kitchen-board .order-card { padding: 0.7rem 0.75rem; }
+  .kitchen-card .status-pill { font-size: 0.72rem; padding: 0.15rem 0.5rem; }
+  .kitchen-bar {
+    gap: 0.4rem;
+    padding: 0.5rem 0.6rem;
+    .brand { display: none; }
+    .role-switcher { margin-right: auto; }
+    .btn.ghost, .logout { padding: 0.35rem 0.6rem; font-size: 0.85rem; }
+    .btn.refresh { font-size: 0; }
+    .btn.refresh::before { content: "↻"; font-size: 1.1rem; }
   }
 }
 
@@ -1880,7 +2231,7 @@ main { display: block; width: 100%; }
       font-family: inherit;
     }
     a:hover, button:hover {
-      background: var(--primary);
+      background: var(--primary-fill, var(--primary));
       border-color: var(--primary);
     }
     .logout {
@@ -1913,7 +2264,7 @@ main { display: block; width: 100%; }
     color: var(--primary);
     cursor: pointer;
     font-family: inherit;
-    &:hover { background: var(--primary); color: white; }
+    &:hover { background: var(--primary-fill, var(--primary)); color: white; }
   }
 }
 
@@ -2057,7 +2408,7 @@ main { display: block; width: 100%; }
       border-radius: 0.3rem;
       text-decoration: none;
       font-size: 0.85rem;
-      &:hover { background: var(--primary); color: white; text-decoration: none; }
+      &:hover { background: var(--primary-fill, var(--primary)); color: white; text-decoration: none; }
     }
   }
 
@@ -2160,8 +2511,8 @@ main { display: block; width: 100%; }
       font-weight: 700;
       cursor: pointer;
       border: 1px solid var(--primary);
-      &.primary { background: var(--primary); color: white; }
-      &.primary:hover { background: var(--primary-dark); }
+      &.primary { background: var(--primary-fill, var(--primary)); color: white; }
+      &.primary:hover { background: var(--primary-fill-dark, var(--primary-dark)); }
     }
   }
 
@@ -2176,10 +2527,10 @@ main { display: block; width: 100%; }
       cursor: pointer;
       font-weight: 700;
       border: 1px solid var(--primary);
-      &.primary { background: var(--primary); color: white; }
-      &.primary:hover { background: var(--primary-dark); }
+      &.primary { background: var(--primary-fill, var(--primary)); color: white; }
+      &.primary:hover { background: var(--primary-fill-dark, var(--primary-dark)); }
       &.ghost { background: transparent; color: var(--primary); }
-      &.ghost:hover { background: var(--primary); color: white; }
+      &.ghost:hover { background: var(--primary-fill, var(--primary)); color: white; }
       &.ghost.danger { color: var(--error); border-color: var(--error); }
       &.ghost.danger:hover { background: var(--error); color: white; }
     }
@@ -2346,7 +2697,7 @@ main { display: block; width: 100%; }
           text-decoration: none;
         }
         &.active {
-          background: var(--primary);
+          background: var(--primary-fill, var(--primary));
           border-color: var(--primary);
           color: white;
           font-weight: 700;
@@ -2538,10 +2889,10 @@ main { display: block; width: 100%; }
       font-family: inherit;
       font-size: 0.85rem;
       border: 1px solid var(--primary);
-      &.primary { background: var(--primary); color: white; margin-left: auto; }
-      &.primary:hover { background: var(--primary-dark); }
+      &.primary { background: var(--primary-fill, var(--primary)); color: white; margin-left: auto; }
+      &.primary:hover { background: var(--primary-fill-dark, var(--primary-dark)); }
       &.ghost { background: transparent; color: var(--primary); }
-      &.ghost:hover { background: var(--primary); color: white; }
+      &.ghost:hover { background: var(--primary-fill, var(--primary)); color: white; }
       &.ghost.danger { color: var(--error); border-color: var(--error); }
       &.ghost.danger:hover { background: var(--error); color: white; }
     }
@@ -2566,7 +2917,7 @@ button.add-item {
   color: var(--primary);
   border: 1px dashed var(--primary);
   cursor: pointer;
-  &:hover { background: var(--primary); color: white; }
+  &:hover { background: var(--primary-fill, var(--primary)); color: white; }
 }
 
 // ----- Admin login -----
@@ -2742,7 +3093,7 @@ button.add-item {
   }
 
   .seq {
-    background: var(--primary);
+    background: var(--primary-fill, var(--primary));
     color: white;
     border-radius: 999px;
     width: 1.6rem;
@@ -3038,6 +3389,29 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
     .confirm { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
   }
   h2 { margin: 1.4rem 0 0.4rem; font-size: 1.05rem; }
+  // Saved templates ("Vorlagen").
+  .templates {
+    padding: 0.9rem;
+    margin: 1rem 0;
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    h3 { margin: 0 0 0.3rem; font-size: 1rem; }
+    .hint { margin: 0 0 0.6rem; font-size: 0.85rem; }
+    .save { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .save input { flex: 1 1 16rem; padding: 0.35rem; }
+    .template-list { list-style: none; margin: 0.7rem 0 0; padding: 0; }
+    .template-list li {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 0.8rem;
+      align-items: center;
+      padding: 0.4rem 0;
+      border-top: 1px solid var(--border);
+    }
+    .template-list .name { font-weight: 600; }
+    .template-list .meta { color: var(--muted); font-size: 0.85rem; }
+    .confirm { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; margin-left: auto; }
+  }
   .next-prices-table {
     width: 100%;
     border-collapse: collapse;
@@ -3054,6 +3428,11 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
     .diff.down { color: #1d7a3a; }
     .row-status { font-size: 0.75rem; color: var(--muted); }
     .row-status.error { color: var(--danger, #b00020); }
+    .ingredients { font-size: 0.78rem; color: var(--muted); margin-top: 0.1rem; }
+    .build { font-size: 0.78rem; color: var(--muted); margin-top: 0.1rem; }
+    .build.over { color: var(--danger, #b00020); font-weight: 600; }
+    .build.note { font-style: italic; }
+    .build .btn { padding: 0.1rem 0.4rem; font-size: 0.75rem; }
   }
   .error { color: var(--danger, #b00020); }
   .ok { color: var(--success); }
@@ -3331,7 +3710,7 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
         background: var(--bg);
         cursor: pointer;
         font-size: 0.85rem;
-        &.active { background: var(--primary); color: white; border-color: var(--primary); }
+        &.active { background: var(--primary-fill, var(--primary)); color: white; border-color: var(--primary); }
       }
     }
 
@@ -3506,7 +3885,7 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
     &:hover { background: rgba(255,255,255,0.18); }
 
     &.active {
-      background: var(--primary);
+      background: var(--primary-fill, var(--primary));
       color: white;
       border-color: var(--primary);
       font-weight: 700;
@@ -3520,7 +3899,7 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
 .admin-shell-bar .role-switcher .role-pill {
   background: #f0e8df;
   &:hover { background: #e5d8c8; }
-  &.active { background: var(--primary); color: white; }
+  &.active { background: var(--primary-fill, var(--primary)); color: white; }
 }
 
 // =====================================================================
@@ -3530,7 +3909,9 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
 // dark class is on <html>. Anything still hard-coded should bubble
 // up here as visual bugs surface.
 // =====================================================================
-.theme-dark {
+.theme-dark,
+.theme-tafel,
+.theme-trattoria {
   // Card-ish surfaces that previously hard-coded `background: white`
   // get the elevated background instead. Targeted by the same selectors
   // already in this file so we don't have to know each one's purpose.
@@ -3553,7 +3934,9 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   .driver-card,
   .kitchen-card,
   .broadcast-admin .broadcast-history li,
-  .legal-page article,
+  // The page itself is <article class="legal-page">: `.legal-page article`
+  // never matched, so Impressum/Datenschutz stayed dark-on-dark.
+  .legal-page,
   .form-card,
   table,
   thead,
@@ -3594,6 +3977,78 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   // Gallery captions sit over photos — keep light text.
   .gallery figcaption { background: rgba(0, 0, 0, 0.6); color: #fff; }
 
+  // The menu as it is now: item cards, category tabs and arrows, the
+  // allergen/additive codes (hard-coded white in the light theme). The
+  // offers' dialog on the homepage uses the same card.
+  .menu .card,
+  .menu .category-tabs a,
+  .menu .cat-arrow,
+  .menu .cat-list-btn,
+  .category-sheet {
+    background: var(--bg-elev);
+    color: var(--text);
+    border-color: var(--border);
+  }
+  .menu .codes a.code {
+    background: rgba(255, 255, 255, 0.12);
+    color: var(--text);
+  }
+  // On the dark boards the drawing may show more.
+  .menu .cat-motif::before { opacity: 0.12; }
+  // Further public surfaces the light theme paints light (legend, PDF
+  // link, mandatory choices, basket, checkout): the dark surface here.
+  .site-header .locale-switcher,
+  .notify-optin,
+  .delivery li,
+  .qr-card .qr-tile,
+  .menu .menu-header .pdf-link,
+  .legend,
+  .option-group,
+  .cart-drawer .drawer-foot,
+  .cart-line .qty button,
+  .checkout .checkout-form,
+  .checkout .summary-side,
+  .confirm-card,
+  .order-card .address,
+  .welcome-back,
+  .addr-suggest,
+  .orders-column {
+    background: var(--bg-elev);
+    color: var(--text);
+    border-color: var(--border);
+  }
+  .menu .category-tabs a:hover,
+  .menu .category-tabs a:focus-visible,
+  .addr-suggest li.active,
+  .addr-suggest li:hover,
+  .saved-addresses .chip {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text);
+  }
+  .checkout-form input,
+  .checkout-form select,
+  .checkout-form textarea {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text);
+    border-color: var(--border);
+  }
+  // Stripe draws its own light fields: keep that pane light, dark text.
+  .stripe-pane { color: #1d211e; }
+  .legend .legend-row:target { color: #1d211e; }
+
+  .free-delivery-banner {
+    background: rgba(169, 211, 154, 0.12);
+    border-left-color: var(--secondary);
+    color: var(--secondary);
+  }
+
+  // Light chalk/gold fills (the number badge, a hovered code) take dark
+  // lettering: the theme's text colour is light here.
+  .menu .card .num,
+  .menu .codes a.code:hover {
+    color: #1d211e;
+  }
+
   // Sticky header is themed via --header-bg already; nothing extra
   // needed here.
 }
@@ -3603,14 +4058,18 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   margin: 2rem auto;
   padding: 1.5rem 1.25rem 3rem;
   line-height: 1.55;
-  color: #2b2b2b;
+  // Theme colours, never fixed greys: the dark themes (dark, tafel,
+  // trattoria) made the old #2b2b2b text unreadable. There the dark-surface
+  // block above also gives the page a --bg-elev card to sit on.
+  color: var(--text);
+  border-radius: 12px;
 
   header h1 { margin: 0 0 .25rem; }
-  .hint { color: #666; margin-top: 0; }
+  .hint { color: var(--muted); margin-top: 0; }
 
   h2 {
     margin-top: 2rem;
-    border-bottom: 1px solid #ece4d6;
+    border-bottom: 1px solid var(--border);
     padding-bottom: .25rem;
   }
   h3 { margin-top: 1.25rem; }
@@ -3618,12 +4077,12 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
   ul, ol { padding-left: 1.25rem; }
   li { margin: .25rem 0; }
 
-  .muted { color: #888; font-size: .9em; }
+  .muted { color: var(--muted); font-size: .9em; }
   .legal-footer {
     margin-top: 2.5rem;
     padding-top: 1rem;
-    border-top: 1px solid #ece4d6;
-    color: #888;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
     font-size: .9em;
   }
 }
@@ -3631,7 +4090,7 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
 .site-footer {
   text-align: center;
   padding: 2rem 1rem 3rem;
-  color: #888;
+  color: var(--muted);
   font-size: .9rem;
 
   a { color: inherit; text-decoration: underline; }
@@ -4734,6 +5193,8 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
     &.online  { background: #e6f6ea; color: #1c7a3c; }
     &.stale   { background: #fdf2dc; color: #8a5a00; }
     &.offline { background: #fbe5e5; color: #a32020; }
+    // Not on TCP/IP, but the LoRa relay still hears it.
+    &.lora    { background: #fdebd8; color: #b45309; }
   }
   .pi-meta {
     display: grid;
@@ -4745,6 +5206,7 @@ ul.extras.removals li { color: var(--muted, #888); font-style: italic; }
     dd.muted { color: var(--muted, #888); }
     dd.ok { color: #1c7a3c; }
     dd.error { color: #a32020; }
+    dd.lora { color: #b45309; }
     // Version line: red when running != target.
     .pi-ver.mismatch { color: #a32020; font-weight: 700; }
     .pi-ver.ok { color: #1c7a3c; }
@@ -4980,4 +5442,293 @@ img,video{max-width:100%;height:auto}
   padding: .35rem .6rem;
   border-radius: 6px;
   strong { color: #2a1a0f; }
+}
+
+// ===========================================================================
+// Admin LoRa lab — /admin/lora. The tab5-lab Tabs' LoRa traffic as a chat
+// (newest on top) and a box to send through one of them.
+// ===========================================================================
+.lora-lab {
+  max-width: 80rem;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+
+  .admin-bar {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 0.8rem;
+    h1 { color: var(--primary); margin: 0; flex: 1; }
+  }
+  .hint { color: var(--muted); font-size: 0.88rem; margin: 0 0 0.8rem; }
+  .lora-devices {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.6rem 0;
+    padding: 0;
+    li {
+      border: 1px solid var(--border, #e7e1d5);
+      border-radius: 999px;
+      padding: 0.2rem 0.7rem;
+      font-size: 0.82rem;
+      color: #777;
+      background: var(--card, #fff);
+      &.chip-info { background: #e6f6ea; color: #1c7a3c; border-color: #bfe5c9; }
+    }
+  }
+  .lora-queue {
+    list-style: none;
+    margin: 0 0 0.5rem;
+    padding: 0;
+    .lora-waiting { color: #8a5a00; font-size: 0.88rem; }
+  }
+  .lora-send {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin: 0.8rem 0 1rem;
+    padding: 0.7rem;
+    border: 1px solid var(--border, #e7e1d5);
+    border-radius: 0.6rem;
+    background: var(--card, #fff);
+    position: sticky;
+    bottom: 0;
+    input[type="text"] {
+      flex: 1 1 16rem;
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--border, #d6cfc4);
+      border-radius: 6px;
+      font: inherit;
+    }
+    select { padding: 0.4rem; border-radius: 6px; font: inherit; }
+  }
+  .lora-chat {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    li {
+      padding: 0.45rem 0.6rem;
+      border-bottom: 1px solid var(--border, #eee8dc);
+      font-size: 0.92rem;
+      line-height: 1.35;
+    }
+    .ts {
+      color: #8a7300;
+      font-variant-numeric: tabular-nums;
+      font-size: 0.8rem;
+      margin-right: 0.5rem;
+    }
+    .what { font-weight: 600; }
+    .chip {
+      margin-left: 0.4rem;
+      font-size: 0.75rem;
+      padding: 0.05rem 0.5rem;
+      border-radius: 999px;
+      background: #e8f0fb;
+      color: #1f4e86;
+    }
+    .detail { color: #555; font-size: 0.84rem; margin-top: 0.15rem; }
+    .lora-answer { color: #1b7a3a; }
+    .lora-lost { color: #a32020; }
+    .lora-ping .what, .lora-ping .detail { color: #888; font-weight: 400; }
+    .lora-raw .what { color: #8a5a00; font-weight: 400; }
+  }
+}
+
+// Home offer cards: "In den Warenkorb" opens the menu's item card in a
+// dialog (size, toppings), styled as on the menu (.menu .card).
+.offers .offer .offer-add {
+  display: inline-block;
+  margin-top: 0.6rem;
+}
+.offer-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.55);
+  .offer-dialog-box {
+    position: relative;
+    width: min(26rem, 100%);
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
+    margin: 0;
+    padding: 0;
+    .card { margin: 0; }
+  }
+  .offer-dialog-close {
+    position: absolute;
+    top: 0.3rem;
+    right: 0.5rem;
+    z-index: 1;
+    border: 0;
+    background: transparent;
+    font-size: 1.6rem;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--text, #222);
+  }
+}
+
+// /admin/tagesangebot
+.admin-daily-offer .daily-offer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  max-width: 40rem;
+  label { display: flex; flex-direction: column; gap: 0.25rem; }
+  label.switch-row, label.extra-check { flex-direction: row; align-items: center; gap: 0.5rem; }
+  .daily-offer-extras {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+    gap: 0.3rem 1rem;
+    border: 1px solid var(--border, #ddd);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+  }
+  .ok { color: #1a7f37; }
+}
+
+// Placed last: it overrides the hero and offer rules above for Tafel.
+// Tafel: the Tagesangebot and the offer cards drawn in chalk on the board,
+// like the PDF's cards — no box, a hand-drawn white frame, Cabin Sketch,
+// the price in yellow chalk, the item's drawing. The same six colours the
+// e-ink frame shows (black board, white, yellow, red, green, blue chalk).
+.theme-tafel {
+  .hero-content .daily-offer,
+  .offers .offer {
+    position: relative;
+    overflow: hidden;
+    background: transparent;
+    backdrop-filter: none;
+    border: 2px solid rgba(244, 242, 232, 0.6);
+    border-radius: 14px 6px 12px 8px / 8px 12px 6px 14px;
+    box-shadow:
+      inset 0 0 0 1px rgba(244, 242, 232, 0.12),
+      0 0 0 1px rgba(244, 242, 232, 0.08);
+    color: var(--text);
+  }
+  .hero-content .daily-offer { transform: rotate(-0.6deg); }
+  .offers .offer { transform: rotate(0.4deg); }
+  .offers .offer:nth-child(2n) { transform: rotate(-0.5deg); }
+  // No sparkle emoji in the corner here: the drawing takes its place.
+  .offers .offer::before { display: none; }
+
+  .hero-content .daily-offer-tag {
+    background: none;
+    color: var(--primary);
+    border-radius: 0;
+    border-bottom: 2px solid var(--primary);
+    padding: 0 0.15rem 0.05rem;
+    font-family: "Cabin Sketch", "Kalam", sans-serif;
+    font-size: 0.95rem;
+    letter-spacing: 0.12em;
+  }
+  .hero-content .daily-offer-name,
+  .offers .offer h3 {
+    font-family: "Cabin Sketch", "Kalam", sans-serif;
+    font-weight: 700;
+    color: var(--text);
+  }
+  .hero-content .daily-offer-name { font-size: clamp(1.4rem, 3.2vw, 1.9rem); }
+  .hero-content .daily-offer-price,
+  .offers .offer .price {
+    font-family: "Cabin Sketch", "Kalam", sans-serif;
+    color: var(--accent);
+    font-size: 2rem;
+    s { color: rgba(244, 242, 232, 0.6); font-size: 1.1rem; }
+  }
+  .chalk-flag {
+    display: block;
+    width: 4.5rem;
+    height: 3px;
+    margin: 0.15rem auto 0.25rem;
+    background: linear-gradient(90deg, #4caf6e 0 33%, #f4f2e8 33% 66%, #e5484d 66%);
+    border-radius: 2px;
+    opacity: 0.9;
+  }
+  .chalk-motif {
+    display: block;
+    position: absolute;
+    right: -0.6rem;
+    bottom: -0.8rem;
+    width: 7.5rem;
+    aspect-ratio: 1;
+    background: var(--text);
+    -webkit-mask: var(--motif) center / contain no-repeat;
+    mask: var(--motif) center / contain no-repeat;
+    opacity: 0.22;
+    transform: rotate(-9deg);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .hero-content .daily-offer .chalk-motif { left: -0.8rem; right: auto; bottom: -1rem; width: 6.5rem; transform: rotate(8deg); }
+  .hero-content .daily-offer > :not(.chalk-motif),
+  .offers .offer > :not(.chalk-motif) { position: relative; z-index: 1; }
+
+  // The printed cover beside the title: with the PDF's Tafel theme the
+  // picture itself carries the board (pdf.rs `tafel_cover`) — drawn on the
+  // board, so no shadow and no lifting off it.
+  .hero .hero-cover {
+    box-shadow: none;
+    &:hover { transform: none; }
+  }
+}
+
+
+// The basket's "change" dialog (cart_drawer.rs CartEditDialog): the
+// offer dialog's look, above the open basket.
+.offer-dialog.cart-edit { z-index: 80; }
+.cart-edit-hint {
+  margin: 0 2.4rem 0.8rem 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+// The basket over the menu: a solid panel. The dark looks' surface colour
+// is see-through, and the menu cards showed through the basket's text.
+// The ✎ / 🗑 buttons as light as the text, the page behind darker.
+.theme-tafel .cart-drawer {
+  background:
+    linear-gradient(rgba(22, 32, 28, 0.95), rgba(22, 32, 28, 0.95)),
+    #16201c url("/img/theme/tafel.jpg") center / cover;
+}
+.theme-trattoria .cart-drawer { background: #1c1916; }
+.theme-dark .cart-drawer { background: var(--bg); }
+.theme-dark,
+.theme-tafel,
+.theme-trattoria {
+  .cart-overlay.open { background: rgba(0, 0, 0, 0.6); }
+  .cart-line .line-buttons .edit,
+  .cart-line .line-buttons .remove {
+    color: var(--text);
+    filter: grayscale(1) brightness(1.9);
+  }
+}
+// The basket's notes in the board's colours: chalk yellow on a darker band
+// for the nudges, chalk green for "reached" and the giveaway card.
+.theme-tafel .cart-drawer {
+  .free-delivery.hint,
+  .giveaway-hint {
+    background: rgba(0, 0, 0, 0.28);
+    color: #ffe27a;
+    border-left-color: #ffe27a;
+  }
+  .free-delivery.ok {
+    background: rgba(0, 0, 0, 0.28);
+    color: #a8e6a3;
+    border-left-color: #a8e6a3;
+  }
+  .giveaway-offer {
+    background: rgba(0, 0, 0, 0.28);
+    border-color: rgba(168, 230, 163, 0.55);
+    .giveaway-headline { color: #a8e6a3; }
+    .giveaway-sauce-label { color: var(--muted); }
+  }
 }

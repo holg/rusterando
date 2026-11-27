@@ -71,6 +71,111 @@ fn i18n_enabled_sync() -> bool {
     }
 }
 
+/// The site theme and the one visitors may switch to ("" = no switcher),
+/// from the SSR-baked bootstrap: the same on the server and in the browser.
+fn themes_sync() -> (String, String) {
+    #[cfg(feature = "ssr")]
+    {
+        use_context::<crate::pages::settings::ThemeHandle>()
+            .map(|h| (h.get(), h.get_alt()))
+            .unwrap_or_else(|| ("warm".to_string(), String::new()))
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        use leptos::wasm_bindgen::JsValue;
+        use leptos::web_sys::{self, js_sys};
+        let Some(window) = web_sys::window() else {
+            return ("warm".to_string(), String::new());
+        };
+        let bootstrap = js_sys::Reflect::get(&window, &JsValue::from_str("__appBootstrap"))
+            .unwrap_or(JsValue::UNDEFINED);
+        let read = |k: &str| {
+            js_sys::Reflect::get(&bootstrap, &JsValue::from_str(k))
+                .ok()
+                .and_then(|v| v.as_string())
+                .unwrap_or_default()
+        };
+        (read("theme"), read("theme_alt"))
+    }
+}
+
+/// Sun/moon button: switches between the shop's theme and its
+/// `theme_alt`, remembered in the browser (`dp_theme`; app.rs applies it
+/// before paint). Which icon shows is CSS, by the class on <html> — the
+/// markup is the same everywhere.
+#[component]
+fn ThemeToggle() -> impl IntoView {
+    let (theme, alt) = themes_sync();
+    if alt.is_empty() || alt == theme {
+        return ().into_any();
+    }
+    let toggle = move |_| {
+        #[cfg(feature = "hydrate")]
+        {
+            use leptos::web_sys;
+            let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+                return;
+            };
+            let Some(html) = doc.document_element() else {
+                return;
+            };
+            let now = html.class_name();
+            let next = if now == format!("theme-{alt}") {
+                theme.clone()
+            } else {
+                alt.clone()
+            };
+            html.set_class_name(&format!("theme-{next}"));
+            if let Some(store) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+                let _ = store.set_item("dp_theme", &next);
+            }
+        }
+    };
+    // Not on admin pages: they are always light.
+    let location = leptos_router::hooks::use_location();
+    view! {
+        <Show when=move || !crate::app::is_admin_path(&location.pathname.get())>
+            <button class="theme-toggle" type="button" title="Hell / Dunkel" aria-label="Hell oder dunkel"
+                on:click=toggle.clone()>
+                <span class="to-dark" aria-hidden="true">"☾"</span>
+                <span class="to-light" aria-hidden="true">"☀"</span>
+            </button>
+        </Show>
+    }
+    .into_any()
+}
+
+/// In the browser, on every page change: the admin light, the shop pages in
+/// the visitor's choice again (what the <head> script does on a full load).
+#[cfg(feature = "hydrate")]
+fn follow_page_theme() {
+    use leptos::web_sys;
+    let location = leptos_router::hooks::use_location();
+    let (theme, alt) = themes_sync();
+    Effect::new(move |_| {
+        let path = location.pathname.get();
+        let Some(html) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.document_element())
+        else {
+            return;
+        };
+        let stored = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item("dp_theme").ok().flatten())
+            .filter(|t| !alt.is_empty() && (*t == theme || *t == alt));
+        let want = if crate::app::is_admin_path(&path) {
+            "warm".to_string()
+        } else {
+            stored.unwrap_or_else(|| theme.clone())
+        };
+        let class = format!("theme-{want}");
+        if html.class_name() != class {
+            html.set_class_name(&class);
+        }
+    });
+}
+
 #[component]
 pub fn SiteHeader() -> impl IntoView {
     let name_upper = shop_name_sync().to_uppercase();
@@ -91,14 +196,18 @@ pub fn SiteHeader() -> impl IntoView {
         Effect::new(move |_| {
             last_order.set(crate::order_cache::latest());
         });
+        follow_page_theme();
     }
 
     view! {
         <header class="site-header">
             <a class="brand" href="/">
-                <span class="brand-wordmark">{name_upper}</span>
+                <span class="brand-wordmark">{crate::components::flag_letters::flag_letters(&name_upper)}</span>
             </a>
             <nav class="site-nav">
+                // First, not last: at the right edge the admin's settings
+                // button covers it.
+                <ThemeToggle/>
                 {move || last_order.get().map(|o| {
                     let href = format!("/orders/{}", o.id);
                     let label = crate::t!("header.last_order")

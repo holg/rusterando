@@ -102,6 +102,8 @@ pub async fn activate_pdf_cover(id: i64) -> Result<(), ServerFnError> {
         .execute(&db)
         .await
         .map_err(|e| ServerFnError::new(format!("activate cover: {e}")))?;
+    // The offline menu copy and the homepage's cover picture follow.
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(())
 }
 
@@ -182,6 +184,18 @@ pub struct ThemeRow {
     pub is_active: bool,
 }
 
+/// The built-in themes, listed (and activated) like saved ones: negative
+/// ids. "Standard" = no theme active; "Tafel" and "Trattoria" = the pointer
+/// values the server's pdf.rs knows (`TAFEL_THEME_ID`, `TRATTORIA_THEME_ID`
+/// there — keep them equal).
+pub const BUILTIN_STANDARD: i64 = -1;
+pub const BUILTIN_TAFEL: i64 = -2;
+pub const BUILTIN_TRATTORIA: i64 = -3;
+#[cfg(feature = "ssr")]
+const TAFEL_POINTER: &str = "builtin:tafel";
+#[cfg(feature = "ssr")]
+const TRATTORIA_POINTER: &str = "builtin:trattoria";
+
 #[server(
     name = ListPdfThemes,
     prefix = "/api",
@@ -197,21 +211,43 @@ pub async fn list_pdf_themes() -> Result<Vec<ThemeRow>, ServerFnError> {
             .fetch_optional(&db)
             .await
             .map_err(|e| ServerFnError::new(format!("active id: {e}")))?;
-    let active_id: Option<i64> = active.and_then(|s| s.trim().parse().ok());
+    let active = active.unwrap_or_default();
+    let active_id: Option<i64> = active.trim().parse().ok();
     let rows: Vec<(i64, String, String)> =
         sqlx::query_as("SELECT id, name, source FROM pdf_themes ORDER BY updated_at DESC, id DESC")
             .fetch_all(&db)
             .await
             .map_err(|e| ServerFnError::new(format!("list themes: {e}")))?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, name, source)| ThemeRow {
-            id,
-            name,
-            source,
-            is_active: Some(id) == active_id,
-        })
-        .collect())
+    let tafel_active = active.trim() == TAFEL_POINTER;
+    let trattoria_active = active.trim() == TRATTORIA_POINTER;
+    let saved_active = rows.iter().any(|(id, _, _)| Some(*id) == active_id);
+    let mut list = vec![
+        ThemeRow {
+            id: BUILTIN_STANDARD,
+            name: "Standard (eingebaut)".into(),
+            source: include_str!("../../../templates/menu.typ").into(),
+            is_active: !tafel_active && !trattoria_active && !saved_active,
+        },
+        ThemeRow {
+            id: BUILTIN_TAFEL,
+            name: "Tafel (eingebaut)".into(),
+            source: include_str!("../../../templates/tafel.typ").into(),
+            is_active: tafel_active,
+        },
+        ThemeRow {
+            id: BUILTIN_TRATTORIA,
+            name: "Trattoria (eingebaut)".into(),
+            source: include_str!("../../../templates/trattoria.typ").into(),
+            is_active: trattoria_active,
+        },
+    ];
+    list.extend(rows.into_iter().map(|(id, name, source)| ThemeRow {
+        id,
+        name,
+        source,
+        is_active: Some(id) == active_id,
+    }));
+    Ok(list)
 }
 
 /// Insert (id=None) or update (id=Some) a theme row. Returns the row id.
@@ -233,9 +269,14 @@ pub async fn save_pdf_theme(
     crate::pages::admin::require_admin().await?;
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
-    let name = name.trim().to_string();
+    let mut name = name.trim().to_string();
     if name.is_empty() {
         return Err(ServerFnError::new("Name darf nicht leer sein."));
+    }
+    // A built-in can't be changed: saving one makes an editable copy.
+    let id = id.filter(|i| *i > 0);
+    if let Some(base) = name.strip_suffix(" (eingebaut)") {
+        name = format!("Kopie von {base}");
     }
     match id {
         Some(id) => {
@@ -276,19 +317,29 @@ pub async fn activate_pdf_theme(id: i64) -> Result<(), ServerFnError> {
     crate::pages::admin::require_admin().await?;
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
-    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM pdf_themes WHERE id = ?1")
-        .bind(id)
-        .fetch_optional(&db)
-        .await
-        .map_err(|e| ServerFnError::new(format!("lookup: {e}")))?;
-    if exists.is_none() {
-        return Err(ServerFnError::new("Vorlage existiert nicht."));
-    }
+    let pointer = match id {
+        BUILTIN_STANDARD => String::new(),
+        BUILTIN_TAFEL => TAFEL_POINTER.to_string(),
+        BUILTIN_TRATTORIA => TRATTORIA_POINTER.to_string(),
+        _ => {
+            let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM pdf_themes WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&db)
+                .await
+                .map_err(|e| ServerFnError::new(format!("lookup: {e}")))?;
+            if exists.is_none() {
+                return Err(ServerFnError::new("Vorlage existiert nicht."));
+            }
+            id.to_string()
+        }
+    };
     sqlx::query("UPDATE app_settings SET value = ?1 WHERE key = 'pdf_theme_active_id'")
-        .bind(id.to_string())
+        .bind(pointer)
         .execute(&db)
         .await
         .map_err(|e| ServerFnError::new(format!("activate theme: {e}")))?;
+    // The offline copy of the menu (nginx fallback) takes the new look too.
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(())
 }
 
@@ -300,6 +351,11 @@ pub async fn activate_pdf_theme(id: i64) -> Result<(), ServerFnError> {
 pub async fn delete_pdf_theme(id: i64) -> Result<(), ServerFnError> {
     use sqlx::SqlitePool;
     crate::pages::admin::require_admin().await?;
+    if id < 0 {
+        return Err(ServerFnError::new(
+            "Eingebaute Vorlagen lassen sich nicht löschen.",
+        ));
+    }
     let db = use_context::<SqlitePool>()
         .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
     let active: Option<String> =
@@ -419,6 +475,10 @@ pub fn PdfAdminPage() -> impl IntoView {
                     <a class="btn primary small" href="/menu.pdf" target="_blank" rel="noopener">
                         "PDF jetzt öffnen"
                     </a>
+                    <a class="btn ghost small" href="/menu.pdf?condensed=1" target="_blank" rel="noopener">"Kompakt"</a>
+                    <a class="btn ghost small" href="/menu.pdf?format=a5-zickzack" target="_blank" rel="noopener">"A5 Zickzack"</a>
+                    <a class="btn ghost small" href="/menu.pdf?format=a5-zickzack&marks=1" target="_blank" rel="noopener"
+                        title="Mit Schnitt- und Falzmarken außerhalb des Anschnitts">"A5 Zickzack + Schnittmarken"</a>
                 </header>
                 <p class="hint">
                     "Alle Felder hier landen in der Speisekarten-PDF. Änderungen wirken sofort, "
@@ -438,6 +498,8 @@ pub fn PdfAdminPage() -> impl IntoView {
                                     hours=by_key("pdf_hours")
                                     extras_pizza=by_key("pdf_extras_pizza")
                                     extras_pasta=by_key("pdf_extras_pasta")
+                                    cover_title=by_key("pdf_cover_title")
+                                    cover_slogan=by_key("pdf_cover_slogan")
                                     defaults
                                     updater
                                 />
@@ -477,6 +539,8 @@ fn SimpleFieldsCard(
     hours: String,
     extras_pizza: String,
     extras_pasta: String,
+    cover_title: String,
+    cover_slogan: String,
     defaults: Resource<Result<PdfDefaults, ServerFnError>>,
     updater: ServerAction<UpdateSetting>,
 ) -> impl IntoView {
@@ -484,6 +548,8 @@ fn SimpleFieldsCard(
     let hours_sig = RwSignal::new(hours);
     let pizza_sig = RwSignal::new(extras_pizza);
     let pasta_sig = RwSignal::new(extras_pasta);
+    let title_sig = RwSignal::new(cover_title);
+    let slogan_sig = RwSignal::new(cover_slogan);
 
     let save = move |key: &'static str, value: String| {
         updater.dispatch(UpdateSetting {
@@ -495,6 +561,8 @@ fn SimpleFieldsCard(
     let save_hours = move |_| save("pdf_hours", hours_sig.get());
     let save_pizza = move |_| save("pdf_extras_pizza", pizza_sig.get());
     let save_pasta = move |_| save("pdf_extras_pasta", pasta_sig.get());
+    let save_title = move |_| save("pdf_cover_title", title_sig.get());
+    let save_slogan = move |_| save("pdf_cover_slogan", slogan_sig.get());
 
     // Reset puts the factory default into the input AND persists it
     // immediately, so the next /menu.pdf request sees the change
@@ -542,6 +610,28 @@ fn SimpleFieldsCard(
     view! {
         <section class="card">
             <h2>"Text-Inhalte"</h2>
+            <label>
+                <span>"Poster-Titel (eine Zeile pro Titelzeile; leer = Titel des Posters)"</span>
+                <textarea rows="2" placeholder="MUSTER\nPIZZERIA"
+                    on:input=move |ev| title_sig.set(event_target_value(&ev))
+                    prop:value=move || title_sig.get()></textarea>
+                <div class="field-actions">
+                    <button class="btn small primary" on:click=save_title>"Speichern"</button>
+                </div>
+            </label>
+            <label>
+                <span>"Poster-Slogan (unter dem Titel; leer = Slogan des Posters)"</span>
+                <input type="text" placeholder="z. B. Frisch aus dem Ofen"
+                    prop:value=move || slogan_sig.get()
+                    on:input=move |ev| slogan_sig.set(event_target_value(&ev))/>
+                <div class="field-actions">
+                    <button class="btn small primary" on:click=save_slogan>"Speichern"</button>
+                </div>
+            </label>
+            <p class="hint">
+                "Auf dem Poster-Cover kommen auch die Öffnungszeiten (Feld unten), Adresse und "
+                "Telefon (Einstellungen) live aus diesen Daten."
+            </p>
             <label>
                 <span>"Untertitel"</span>
                 <input type="text"
@@ -1112,6 +1202,12 @@ fn ThemeLibraryCard(
 
     let on_delete = move |_| {
         if let Some(id) = selected_id.get() {
+            if id < 0 {
+                status.set(Some(
+                    "Eingebaute Vorlagen lassen sich nicht löschen.".into(),
+                ));
+                return;
+            }
             theme_deleter.dispatch(DeletePdfTheme { id });
             status.set(Some("Gelöscht.".into()));
             selected_id.set(None);

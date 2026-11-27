@@ -1,0 +1,18 @@
+# Example overlay. Copy to `project.local.yml` (gitignored), fill in your
+# Apple Team ID and a bundle id of your own, then run:
+#
+#   USE_LOCAL=true xcodegen
+#
+# project.yml includes this file only when USE_LOCAL=true.
+
+settings:
+  base:
+    # Your Apple Team ID: developer.apple.com → Membership.
+    DEVELOPMENT_TEAM: AAAAAAAAAA
+
+targets:
+  Tab5Terminal:
+    settings:
+      base:
+        # Target level, so it wins over project.yml's project-level placeholder.
+        PRODUCT_BUNDLE_IDENTIFIER: com.yourdomain.tab5terminal

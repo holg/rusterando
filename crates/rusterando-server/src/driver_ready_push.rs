@@ -22,7 +22,7 @@ use crate::apns::ApnsHandle;
 /// Forget the pushed-order set beyond this size; a day's orders fit easily.
 const SEEN_CAP: usize = 1000;
 
-/// Spawn the listener. Watches Davids' global pool, like the printer monitor
+/// Spawn the listener. Watches the global pool, like the printer monitor
 /// and the APNs device table it pushes to; a tenant's order id isn't found
 /// there and is skipped.
 pub fn spawn(db: SqlitePool, live: LiveHub, apns: ApnsHandle) {

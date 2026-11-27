@@ -3,7 +3,7 @@
 //! Two buttons: "An Mitarbeiter senden" (admin/kitchen/driver) and
 //! "An alle senden" (every active token, customer apps included).
 //! Server fans out via APNs/FCM and writes an audit row capturing the
-//! audience choice. The page below shows the recent sends so David can
+//! audience choice. The page below shows the recent sends so the admin can
 //! see "did I already announce that, and to whom?".
 
 use leptos::prelude::*;

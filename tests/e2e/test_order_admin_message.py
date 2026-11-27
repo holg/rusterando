@@ -34,7 +34,7 @@ It's a normal e2e test: **headless by default**, runs in the regular suite.
     # apex shop
     BASE_URL=https://rusterando.de DPE2E_ADMIN_PW=<pw> pytest test_order_admin_message.py
     # a tenant subdomain
-    BASE_URL=https://flizza.rusterando.de DPE2E_ADMIN_PW=<pw> pytest test_order_admin_message.py
+    BASE_URL=https://beispiel.rusterando.de DPE2E_ADMIN_PW=<pw> pytest test_order_admin_message.py
     # local sandbox
     BASE_URL=http://127.0.0.1:3001 DPE2E_ADMIN_PW=<pw> pytest test_order_admin_message.py
 

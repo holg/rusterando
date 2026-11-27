@@ -182,10 +182,12 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
     // live euro preview. Recognised by the key suffix.
     let is_cents = key.ends_with("_cents");
     let is_theme = key == "theme";
+    let is_theme_alt = key == "theme_alt";
     let is_printer_theme = key == "printer_theme";
     let is_stripe_mode = key == "stripe_mode";
     let is_i18n_toggle = key == "i18n_enabled";
     let is_category_overlay = key == "menu_category_overlay";
+    let is_home_show_cover = key == "home_show_cover";
     let is_orders_paused = key == "orders_paused";
     let is_giveaway_enabled = key == "giveaway_enabled";
     let is_giveaway_order_types = key == "giveaway_order_types";
@@ -209,13 +211,28 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
         });
     };
 
-    let editor = if is_theme {
+    let editor = if is_theme_alt {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="">"— kein Umschalter —"</option>
+                <option value="warm">"warm — hell"</option>
+                <option value="dark">"dark — dunkel"</option>
+                <option value="tafel">"tafel — Kreidetafel (wie PDF)"</option>
+                <option value="trattoria">"trattoria — dunkel, Trikolore (wie PDF)"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_theme {
         view! {
             <select class="cell-input"
                 prop:value=move || value.get()
                 on:change=move |ev| value.set(event_target_value(&ev))>
                 <option value="warm">"warm — beige/rot (Standard)"</option>
                 <option value="dark">"dark — dunkel mit roten Akzenten"</option>
+                <option value="tafel">"tafel — Kreidetafel, wie die PDF-Speisekarte „Tafel“"</option>
+                <option value="trattoria">"trattoria — dunkel, Trikolore, wie die PDF „Trattoria“"</option>
             </select>
         }
         .into_any()
@@ -256,6 +273,16 @@ fn SettingRowView(r: SettingRow, updater: ServerAction<UpdateSetting>) -> impl I
                 on:change=move |ev| value.set(event_target_value(&ev))>
                 <option value="0">"Aus — nur Deutsch (Standard)"</option>
                 <option value="1">"An — Sprachauswahl + /en/, /fr/, /it/, … Pfade aktiv"</option>
+            </select>
+        }
+        .into_any()
+    } else if is_home_show_cover {
+        view! {
+            <select class="cell-input"
+                prop:value=move || value.get()
+                on:change=move |ev| value.set(event_target_value(&ev))>
+                <option value="1">"An — Titelblatt neben dem Titel"</option>
+                <option value="0">"Aus"</option>
             </select>
         }
         .into_any()

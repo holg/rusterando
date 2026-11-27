@@ -18,6 +18,19 @@
 //! the old/new pair in `price_activations` + `price_activation_rows`, so
 //! "Rückgängig" can restore the previous list. The static offline menu.pdf
 //! cache is rebuilt after either.
+//!
+//! Working out a price list takes a while, so the staged prices can be kept
+//! as named templates ("Vorlagen", migration 20261111000001) and loaded back
+//! later. Each item also shows the ingredients of its description that are
+//! in the extras catalog, with their extra prices, as a cost hint.
+//!
+//! Every pizza has tomatoes and cheese, so a Margherita with the right extras
+//! is the same pizza. When that comes out cheaper than the listed one,
+//! customers build it themselves — so each pizza shows "Margherita + Extras"
+//! (new prices where set) and is flagged when its price is higher; one button
+//! (`cap_pizza_prices`) lowers all such prices to it. A pizza with something
+//! that isn't an extra (Sardellen on the Portofino) can't be built that way:
+//! it gets a note, never the advice to lower its price.
 
 use leptos::prelude::*;
 use rusterando_shared::models::{format_eur, parse_eur_cents};
@@ -35,6 +48,50 @@ pub struct NextPriceItem {
     pub next_small_cents: Option<i64>,
     pub next_large_cents: Option<i64>,
     pub is_listed: bool,
+    /// Ingredients of the description found in the extras catalog.
+    #[serde(default)]
+    pub ingredients: Vec<ItemIngredient>,
+    /// Pizzas: a Margherita with this pizza's extras, per size (new prices
+    /// where set): its price shouldn't be higher.
+    #[serde(default)]
+    pub build: Option<PizzaBuild>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PizzaBuild {
+    /// The extras on top of the Margherita.
+    pub extras: Vec<String>,
+    pub small_cents: i64,
+    pub large_cents: Option<i64>,
+    /// What the description names that can't be ordered as an extra: then
+    /// nobody can build this pizza, and the comparison is a note only.
+    #[serde(default)]
+    pub not_extras: Vec<String>,
+}
+
+impl PizzaBuild {
+    /// Can this pizza be ordered as Margherita + extras at all?
+    pub fn comparable(&self) -> bool {
+        self.not_extras.is_empty()
+    }
+}
+
+/// An item's ingredient that is also an extra, with the extra's price (the
+/// new one where set): a cost hint while setting the new price.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ItemIngredient {
+    pub label: String,
+    pub price_cents: i64,
+}
+
+/// A saved template: the staged prices under a name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PriceTemplate {
+    pub id: i64,
+    pub name: String,
+    /// Local time, "11.11. 10:40".
+    pub saved_at: String,
+    pub row_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,6 +131,9 @@ pub struct NextPricesView {
     pub pending_extras: i64,
     /// Most recent activation that has not been reverted (revert target).
     pub last_activation: Option<ActivationInfo>,
+    /// Saved templates, newest first.
+    #[serde(default)]
+    pub templates: Vec<PriceTemplate>,
 }
 
 #[server(name = ListNextPrices, prefix = "/api", endpoint = "list_next_prices")]
@@ -100,11 +160,13 @@ pub async fn list_next_prices() -> Result<NextPricesView, ServerFnError> {
         Option<i64>,
         Option<i64>,
         i64,
+        Option<String>,
     );
     let item_rows: Vec<ItemRow> = sqlx::query_as(
         "SELECT id, category_id, menu_number, name,
                 price_small_cents, price_large_cents,
-                next_price_small_cents, next_price_large_cents, is_listed
+                next_price_small_cents, next_price_large_cents, is_listed,
+                description
          FROM menu_items
          ORDER BY sort_order, CAST(COALESCE(menu_number, '') AS INTEGER), menu_number",
     )
@@ -120,11 +182,38 @@ pub async fn list_next_prices() -> Result<NextPricesView, ServerFnError> {
             items: Vec::new(),
         })
         .collect();
+    // The same matcher the "ohne …" removals use (description words vs.
+    // the extras catalog and its aliases), with the extras' new prices.
+    let catalog = ssr::catalog_new_prices(&db).await;
+    let builds = ssr::pizza_builds(
+        item_rows.iter().map(|r| ssr::PriceItem {
+            id: &r.0,
+            name: &r.3,
+            description: r.9.as_deref().unwrap_or(""),
+            small: r.6.unwrap_or(r.4),
+            large: r.7.or(r.5),
+        }),
+        &catalog,
+    );
     let mut pending_items = 0;
     for r in item_rows {
         if r.6.is_some() || r.7.is_some() {
             pending_items += 1;
         }
+        let ingredients = rusterando_shared::models::match_removable_ingredients(
+            r.9.as_deref().unwrap_or(""),
+            &catalog,
+        )
+        .into_iter()
+        .filter_map(|m| {
+            let extra = catalog.iter().find(|e| e.id == m.id)?;
+            Some(ItemIngredient {
+                label: m.bare_label,
+                price_cents: extra.price_cents,
+            })
+        })
+        .collect();
+        let build = builds.get(&r.0).cloned();
         if let Some(cat) = categories.iter_mut().find(|c| c.id == r.1) {
             cat.items.push(NextPriceItem {
                 id: r.0,
@@ -135,6 +224,8 @@ pub async fn list_next_prices() -> Result<NextPricesView, ServerFnError> {
                 next_small_cents: r.6,
                 next_large_cents: r.7,
                 is_listed: r.8 != 0,
+                ingredients,
+                build,
             });
         }
     }
@@ -168,6 +259,16 @@ pub async fn list_next_prices() -> Result<NextPricesView, ServerFnError> {
     .await
     .map_err(|e| ServerFnError::new(format!("load activations: {e}")))?;
 
+    // The server runs in the shop's time zone (TZ), so 'localtime' is shop
+    // time.
+    let templates: Vec<(i64, String, String, i64)> = sqlx::query_as(
+        "SELECT id, name, strftime('%d.%m. %H:%M', created_at, 'localtime'), row_count
+         FROM price_templates ORDER BY id DESC",
+    )
+    .fetch_all(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load templates: {e}")))?;
+
     Ok(NextPricesView {
         categories,
         // Loaded separately by the page (see `price_benchmarks`) so a slow
@@ -181,7 +282,148 @@ pub async fn list_next_prices() -> Result<NextPricesView, ServerFnError> {
             activated_at,
             row_count,
         }),
+        templates: templates
+            .into_iter()
+            .map(|(id, name, saved_at, row_count)| PriceTemplate {
+                id,
+                name,
+                saved_at,
+                row_count,
+            })
+            .collect(),
     })
+}
+
+/// Save the staged prices as a template. Returns how many prices it holds.
+#[server(name = SavePriceTemplate, prefix = "/api", endpoint = "save_price_template")]
+pub async fn save_price_template(name: String) -> Result<i64, ServerFnError> {
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(ServerFnError::new(
+            "Bitte einen Namen für die Vorlage eingeben",
+        ));
+    }
+    let err = |e: sqlx::Error| ServerFnError::new(format!("Vorlage speichern: {e}"));
+    let mut tx = db.begin().await.map_err(err)?;
+    let id = sqlx::query("INSERT INTO price_templates (name) VALUES (?1)")
+        .bind(name)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?
+        .last_insert_rowid();
+    let items = sqlx::query(
+        "INSERT INTO price_template_rows (template_id, target_kind, target_id, small_cents, large_cents)
+         SELECT ?1, 'item', id, next_price_small_cents, next_price_large_cents FROM menu_items
+         WHERE next_price_small_cents IS NOT NULL OR next_price_large_cents IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(err)?
+    .rows_affected();
+    let extras = sqlx::query(
+        "INSERT INTO price_template_rows (template_id, target_kind, target_id, small_cents, large_cents)
+         SELECT ?1, 'extra', id, next_price_cents, NULL FROM pizza_extras
+         WHERE next_price_cents IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(err)?
+    .rows_affected();
+    let count = (items + extras) as i64;
+    if count == 0 {
+        // Dropping the transaction rolls the empty template back.
+        return Err(ServerFnError::new(
+            "Keine vorgemerkten Preise zum Speichern",
+        ));
+    }
+    sqlx::query("UPDATE price_templates SET row_count = ?1 WHERE id = ?2")
+        .bind(count)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    tx.commit().await.map_err(err)?;
+    Ok(count)
+}
+
+/// Put a template's prices back as the staged prices, replacing the current
+/// ones. Items or extras deleted since are skipped. Returns how many
+/// prices were loaded.
+#[server(name = LoadPriceTemplate, prefix = "/api", endpoint = "load_price_template")]
+pub async fn load_price_template(id: i64) -> Result<i64, ServerFnError> {
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    let err = |e: sqlx::Error| ServerFnError::new(format!("Vorlage laden: {e}"));
+    let mut tx = db.begin().await.map_err(err)?;
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM price_templates WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(err)?;
+    if exists.is_none() {
+        return Err(ServerFnError::new("Vorlage nicht gefunden"));
+    }
+    for sql in [
+        "UPDATE menu_items SET next_price_small_cents = NULL, next_price_large_cents = NULL",
+        "UPDATE pizza_extras SET next_price_cents = NULL",
+    ] {
+        sqlx::query(sql).execute(&mut *tx).await.map_err(err)?;
+    }
+    let items = sqlx::query(
+        "UPDATE menu_items SET next_price_small_cents = r.small_cents,
+                               next_price_large_cents = r.large_cents
+         FROM price_template_rows r
+         WHERE r.template_id = ?1 AND r.target_kind = 'item' AND r.target_id = menu_items.id",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(err)?
+    .rows_affected();
+    let extras = sqlx::query(
+        "UPDATE pizza_extras SET next_price_cents = r.small_cents
+         FROM price_template_rows r
+         WHERE r.template_id = ?1 AND r.target_kind = 'extra' AND r.target_id = pizza_extras.id",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .map_err(err)?
+    .rows_affected();
+    tx.commit().await.map_err(err)?;
+    Ok((items + extras) as i64)
+}
+
+/// Delete a template (the staged prices stay as they are).
+#[server(name = DeletePriceTemplate, prefix = "/api", endpoint = "delete_price_template")]
+pub async fn delete_price_template(id: i64) -> Result<(), ServerFnError> {
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    let err = |e: sqlx::Error| ServerFnError::new(format!("Vorlage löschen: {e}"));
+    let mut tx = db.begin().await.map_err(err)?;
+    // Rows first: foreign keys may be off on this connection.
+    sqlx::query("DELETE FROM price_template_rows WHERE template_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    sqlx::query("DELETE FROM price_templates WHERE id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(err)?;
+    tx.commit().await.map_err(err)?;
+    Ok(())
 }
 
 /// Stage (or clear, with both `None`) the new prices of one menu item.
@@ -281,6 +523,198 @@ pub async fn set_next_extra_price(
 /// `(id, price_small, price_large, next_small, next_large)` of a menu item.
 #[cfg(feature = "ssr")]
 type StagedItemRow = (String, i64, Option<i64>, Option<i64>, Option<i64>);
+
+/// Lower every pizza's new price (per size) that is higher than a
+/// Margherita with its extras ([`PizzaBuild`]). Returns how many prices
+/// changed.
+#[server(name = CapPizzaPrices, prefix = "/api", endpoint = "cap_pizza_prices")]
+pub async fn cap_pizza_prices() -> Result<i64, ServerFnError> {
+    use sqlx::SqlitePool;
+    crate::pages::admin::require_admin().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, name, description, price_small_cents, price_large_cents,
+                next_price_small_cents, next_price_large_cents
+         FROM menu_items",
+    )
+    .fetch_all(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load items: {e}")))?;
+    let catalog = ssr::catalog_new_prices(&db).await;
+    let builds = ssr::pizza_builds(
+        rows.iter().map(|r| ssr::PriceItem {
+            id: &r.0,
+            name: &r.1,
+            description: r.2.as_deref().unwrap_or(""),
+            small: r.5.unwrap_or(r.3),
+            large: r.6.or(r.4),
+        }),
+        &catalog,
+    );
+    let mut changed = 0;
+    for (id, _, _, live_small, live_large, next_small, next_large) in rows {
+        let Some(b) = builds.get(&id).filter(|b| b.comparable()) else {
+            continue;
+        };
+        // The new price, lowered to the build where it's above; equal to
+        // the live price = nothing staged.
+        let cap = |live: i64, next: Option<i64>, build: i64| -> (Option<i64>, bool) {
+            let price = next.unwrap_or(live);
+            if price <= build {
+                return (next, false);
+            }
+            ((build != live).then_some(build), true)
+        };
+        let (small, small_changed) = cap(live_small, next_small, b.small_cents);
+        let (large, large_changed) = match (live_large, b.large_cents) {
+            (Some(live), Some(build)) => cap(live, next_large, build),
+            _ => (next_large, false),
+        };
+        if !small_changed && !large_changed {
+            continue;
+        }
+        sqlx::query(
+            "UPDATE menu_items SET next_price_small_cents = ?1, next_price_large_cents = ?2
+             WHERE id = ?3",
+        )
+        .bind(small)
+        .bind(large)
+        .bind(&id)
+        .execute(&db)
+        .await
+        .map_err(|e| ServerFnError::new(format!("update {id}: {e}")))?;
+        changed += i64::from(small_changed) + i64::from(large_changed);
+    }
+    Ok(changed)
+}
+
+#[cfg(feature = "ssr")]
+pub(crate) mod ssr {
+    use std::collections::{HashMap, HashSet};
+
+    use rusterando_shared::models::{match_removable_ingredients, PizzaExtra};
+    use sqlx::SqlitePool;
+
+    use super::PizzaBuild;
+
+    /// The extras catalog (with aliases) carrying each extra's new price
+    /// where one is staged.
+    pub async fn catalog_new_prices(db: &SqlitePool) -> Vec<PizzaExtra> {
+        let mut catalog =
+            crate::pages::admin::extras_admin::ssr::load_catalog_with_aliases(db, "label").await;
+        let staged: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT id, next_price_cents FROM pizza_extras WHERE next_price_cents IS NOT NULL",
+        )
+        .fetch_all(db)
+        .await
+        .unwrap_or_default();
+        for (id, price) in staged {
+            if let Some(e) = catalog.iter_mut().find(|e| e.id == id) {
+                e.price_cents = price;
+            }
+        }
+        catalog
+    }
+
+    /// A menu item with its prices as they'll be (new where staged).
+    pub struct PriceItem<'a> {
+        pub id: &'a str,
+        pub name: &'a str,
+        pub description: &'a str,
+        pub small: i64,
+        pub large: Option<i64>,
+    }
+
+    /// A pizza: "Pizza …" (not "Pizzabrötchen").
+    pub fn is_pizza(name: &str) -> bool {
+        name.trim().to_lowercase().starts_with("pizza ")
+    }
+
+    /// The ingredients a description lists: "mit Schinken, Pilzen und
+    /// Tabasco" → Schinken, Pilzen, Tabasco.
+    pub fn listed_ingredients(description: &str) -> Vec<String> {
+        let d = description.trim();
+        let d = d
+            .strip_prefix("mit ")
+            .or_else(|| d.strip_prefix("Mit "))
+            .unwrap_or(d);
+        d.split([',', '&', '/', ';', '+'])
+            .flat_map(|part| part.split(" und "))
+            .map(|t| {
+                t.trim()
+                    .trim_matches(|c: char| c == '.' || c == '(' || c == ')')
+                    .trim()
+            })
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Per pizza: the Margherita (the first "Pizza … Margherita") plus the
+    /// extras its description names that the Margherita's doesn't — every
+    /// pizza has its tomatoes and cheese. Pizzas without such an extra get
+    /// none (nothing to compare).
+    pub fn pizza_builds<'a>(
+        items: impl Iterator<Item = PriceItem<'a>>,
+        catalog: &[PizzaExtra],
+    ) -> HashMap<String, PizzaBuild> {
+        let items: Vec<PriceItem> = items.collect();
+        let Some(margherita) = items
+            .iter()
+            .find(|i| is_pizza(i.name) && i.name.to_lowercase().contains("margherita"))
+        else {
+            return HashMap::new();
+        };
+        let base: HashSet<String> = match_removable_ingredients(margherita.description, catalog)
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        let mut out = HashMap::new();
+        for item in items
+            .iter()
+            .filter(|i| is_pizza(i.name) && i.id != margherita.id)
+        {
+            let extras: Vec<&PizzaExtra> = match_removable_ingredients(item.description, catalog)
+                .into_iter()
+                .filter(|m| !base.contains(&m.id))
+                .filter_map(|m| catalog.iter().find(|e| e.id == m.id))
+                .collect();
+            if extras.is_empty() {
+                continue;
+            }
+            let not_extras: Vec<String> = listed_ingredients(item.description)
+                .into_iter()
+                .filter(|t| match_removable_ingredients(t, catalog).is_empty())
+                .collect();
+            let sum: i64 = extras.iter().map(|e| e.price_cents).sum();
+            out.insert(
+                item.id.to_string(),
+                PizzaBuild {
+                    extras: extras
+                        .iter()
+                        .map(|e| {
+                            rusterando_shared::models::bare_ingredient_label(&e.label).to_string()
+                        })
+                        .collect(),
+                    small_cents: margherita.small + sum,
+                    large_cents: item.large.and(margherita.large).map(|l| l + sum),
+                    not_extras,
+                },
+            );
+        }
+        out
+    }
+}
 
 /// Round `cents` to a multiple of `step` (0 / 1 = no rounding). `up` = always
 /// round up (the usual choice for a price increase), else nearest.
@@ -653,6 +1087,10 @@ pub fn NextPricesAdminPage() -> impl IntoView {
     let clear = ServerAction::<ClearNextPrices>::new();
     let activate = ServerAction::<ActivateNextPrices>::new();
     let revert = ServerAction::<RevertLastActivation>::new();
+    let tpl_save = ServerAction::<SavePriceTemplate>::new();
+    let tpl_load = ServerAction::<LoadPriceTemplate>::new();
+    let tpl_delete = ServerAction::<DeletePriceTemplate>::new();
+    let cap = ServerAction::<CapPizzaPrices>::new();
 
     // `new_blocking` like the other admin tables: rendered on the server
     // against the per-tenant pool, not re-fetched on hydration. Per-row
@@ -673,6 +1111,10 @@ pub fn NextPricesAdminPage() -> impl IntoView {
                 clear.version().get(),
                 activate.version().get(),
                 revert.version().get(),
+                tpl_save.version().get(),
+                tpl_load.version().get(),
+                tpl_delete.version().get(),
+                cap.version().get(),
             )
         },
         |_| async move { list_next_prices().await },
@@ -717,6 +1159,10 @@ pub fn NextPricesAdminPage() -> impl IntoView {
     let confirm_activate = RwSignal::new(false);
     let confirm_revert = RwSignal::new(false);
     let confirm_clear = RwSignal::new(false);
+    // Templates: the name to save under, and which template's "Laden" /
+    // "Löschen" is armed (id, true = delete) for its second tap.
+    let tpl_name = RwSignal::new(String::new());
+    let tpl_armed = RwSignal::new(None::<(i64, bool)>);
 
     view! {
         <AdminShell>
@@ -737,6 +1183,20 @@ pub fn NextPricesAdminPage() -> impl IntoView {
                         Err(e) => view! { <p class="error">{format!("Fehler: {e}")}</p> }.into_any(),
                         Ok(v) => {
                             let pending = v.pending_items + v.pending_extras;
+                            // Pizzas whose new price is above Margherita + Extras.
+                            let over_pizzas = v
+                                .categories
+                                .iter()
+                                .flat_map(|c| c.items.iter())
+                                .filter(|i| {
+                                    i.build.as_ref().filter(|b| b.comparable()).is_some_and(|b| {
+                                        i.next_small_cents.unwrap_or(i.price_small_cents) > b.small_cents
+                                            || i.price_large_cents.zip(b.large_cents).is_some_and(|(live, build)| {
+                                                i.next_large_cents.unwrap_or(live) > build
+                                            })
+                                    })
+                                })
+                                .count();
                             let last = v.last_activation.clone();
                             view! {
                                 <div class="status-bar">
@@ -749,7 +1209,91 @@ pub fn NextPricesAdminPage() -> impl IntoView {
                                         <a class="btn ghost small" href="/menu.pdf?prices=next" target="_blank" rel="noopener">"Faltblatt"</a>
                                         <a class="btn ghost small" href="/menu.pdf?prices=next&condensed=1" target="_blank" rel="noopener">"Kompakt"</a>
                                         <a class="btn ghost small" href="/menu.pdf?prices=next&format=a5-zickzack" target="_blank" rel="noopener">"A5 Zickzack"</a>
+                                        <a class="btn ghost small" href="/menu.pdf?prices=next&format=a5-zickzack&marks=1" target="_blank" rel="noopener"
+                                            title="Mit Schnitt- und Falzmarken außerhalb des Anschnitts">"A5 Zickzack + Schnittmarken"</a>
                                     </span>
+                                </div>
+
+                                <div class="templates">
+                                    <h3>"Vorlagen"</h3>
+                                    <p class="hint">
+                                        "Speichert die vorgemerkten Preise unter einem Namen. "
+                                        "„Laden“ setzt sie später wieder als vorgemerkte Preise ein."
+                                    </p>
+                                    <div class="save">
+                                        <input type="text" placeholder="Name, z. B. Preise 2027 – Entwurf"
+                                            prop:value=move || tpl_name.get()
+                                            on:input=move |ev| tpl_name.set(event_target_value(&ev))/>
+                                        <button class="btn primary small" disabled=pending == 0
+                                            on:click=move |_| {
+                                                tpl_save.dispatch(SavePriceTemplate { name: tpl_name.get_untracked() });
+                                            }>
+                                            "Als Vorlage speichern"
+                                        </button>
+                                        {move || tpl_save.value().get().map(|r| match r {
+                                            Ok(n) => view! { <span class="ok">{format!("{n} Preise gespeichert")}</span> }.into_any(),
+                                            Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),
+                                        })}
+                                        {move || tpl_load.value().get().map(|r| match r {
+                                            Ok(n) => view! { <span class="ok">{format!("{n} Preise geladen")}</span> }.into_any(),
+                                            Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),
+                                        })}
+                                    </div>
+                                    {if v.templates.is_empty() {
+                                        view! { <p class="hint">"Noch keine Vorlagen."</p> }.into_any()
+                                    } else {
+                                        view! {
+                                            <ul class="template-list">
+                                                {v.templates.clone().into_iter().map(|t| {
+                                                    let id = t.id;
+                                                    let armed = move |delete: bool| tpl_armed.get() == Some((id, delete));
+                                                    view! {
+                                                        <li>
+                                                            <span class="name">{t.name}</span>
+                                                            <span class="meta">{format!("{} · {} Preise", t.saved_at, t.row_count)}</span>
+                                                            {move || if armed(false) {
+                                                                view! {
+                                                                    <span class="confirm">
+                                                                        <span>{format!("Ersetzt die {pending} vorgemerkten Preise?")}</span>
+                                                                        <button class="btn primary small" on:click=move |_| {
+                                                                            tpl_armed.set(None);
+                                                                            tpl_load.dispatch(LoadPriceTemplate { id });
+                                                                        }>"Ja, laden"</button>
+                                                                        <button class="btn ghost small" on:click=move |_| tpl_armed.set(None)>"Abbrechen"</button>
+                                                                    </span>
+                                                                }.into_any()
+                                                            } else if armed(true) {
+                                                                view! {
+                                                                    <span class="confirm">
+                                                                        <span>"Vorlage löschen?"</span>
+                                                                        <button class="btn ghost small" on:click=move |_| {
+                                                                            tpl_armed.set(None);
+                                                                            tpl_delete.dispatch(DeletePriceTemplate { id });
+                                                                        }>"Ja, löschen"</button>
+                                                                        <button class="btn ghost small" on:click=move |_| tpl_armed.set(None)>"Abbrechen"</button>
+                                                                    </span>
+                                                                }.into_any()
+                                                            } else {
+                                                                view! {
+                                                                    <span class="confirm">
+                                                                        // Nothing staged: nothing to lose, load right away.
+                                                                        <button class="btn ghost small" on:click=move |_| {
+                                                                            if pending == 0 {
+                                                                                tpl_load.dispatch(LoadPriceTemplate { id });
+                                                                            } else {
+                                                                                tpl_armed.set(Some((id, false)));
+                                                                            }
+                                                                        }>"Laden"</button>
+                                                                        <button class="btn ghost small" on:click=move |_| tpl_armed.set(Some((id, true)))>"Löschen"</button>
+                                                                    </span>
+                                                                }.into_any()
+                                                            }}
+                                                        </li>
+                                                    }
+                                                }).collect_view()}
+                                            </ul>
+                                        }.into_any()
+                                    }}
                                 </div>
 
                                 <div class="bulk">
@@ -801,6 +1345,17 @@ pub fn NextPricesAdminPage() -> impl IntoView {
                                         {move || (!bulk_error.get().is_empty()).then(|| view! { <span class="error">{bulk_error.get()}</span> })}
                                         {move || bulk.value().get().map(|r| match r {
                                             Ok(n) => view! { <span class="ok">{format!("{n} Preise berechnet")}</span> }.into_any(),
+                                            Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),
+                                        })}
+                                    </div>
+                                    <div class="actions">
+                                        <button class="btn ghost small"
+                                            title="Jede Pizza höchstens so teuer wie eine Margherita mit ihren Extras"
+                                            on:click=move |_| { cap.dispatch(CapPizzaPrices {}); }>
+                                            {format!("Pizzen ≤ Margherita + Extras ({over_pizzas} zu teuer)")}
+                                        </button>
+                                        {move || cap.value().get().map(|r| match r {
+                                            Ok(n) => view! { <span class="ok">{format!("{n} Preise gesenkt")}</span> }.into_any(),
                                             Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),
                                         })}
                                     </div>
@@ -982,7 +1537,7 @@ fn ItemRow(it: NextPriceItem) -> impl IntoView {
         let (s, l) = (*s, *l);
         async move { set_next_item_price(id, s, l).await }
     });
-    let on_change = move |_| {
+    let commit = move || {
         let s = parse_eur_cents(&small.get());
         let l = parse_eur_cents(&large.get());
         match (s, l) {
@@ -1003,6 +1558,52 @@ fn ItemRow(it: NextPriceItem) -> impl IntoView {
             }
         }
     };
+    let on_change = move |_| commit();
+    // Pizzas: higher than a Margherita with its extras?
+    let build = it.build.clone();
+    // Only a pizza one can really order as Margherita + extras gets the
+    // "too expensive" check; the others a note.
+    let comparable = build.as_ref().is_some_and(PizzaBuild::comparable);
+    let (build_small, build_large) = if comparable {
+        (
+            build.as_ref().map(|b| b.small_cents),
+            build.as_ref().and_then(|b| b.large_cents),
+        )
+    } else {
+        (None, None)
+    };
+    let over_small =
+        move || build_small.is_some_and(|b| saved_small.get().unwrap_or(live_small) > b);
+    let over_large = move || {
+        build_large
+            .is_some_and(|b| live_large.is_some_and(|ll| saved_large.get().unwrap_or(ll) > b))
+    };
+    let lower = move || {
+        if over_small() {
+            small.set(eur_input(build_small));
+        }
+        if over_large() {
+            large.set(eur_input(build_large));
+        }
+        commit();
+    };
+    let build_line = build.map(|b| {
+        let mut line = format!(
+            "Margherita + {}: {}{}",
+            b.extras.join(", "),
+            format_eur(b.small_cents),
+            b.large_cents
+                .map(|l| format!(" / {}", format_eur(l)))
+                .unwrap_or_default()
+        );
+        if !b.not_extras.is_empty() {
+            line.push_str(&format!(
+                " · {} gibt es nicht als Extra – kein Vergleich",
+                b.not_extras.join(", ")
+            ));
+        }
+        line
+    });
     Effect::new(move |_| {
         if let Some(r) = save.value().get() {
             match r {
@@ -1024,10 +1625,30 @@ fn ItemRow(it: NextPriceItem) -> impl IntoView {
     } else {
         format!("{} (nicht gelistet)", it.name)
     };
+    // "Schinken 1,00 € · Pilze 0,80 €": what the extras would cost.
+    let ingredients = (!it.ingredients.is_empty()).then(|| {
+        it.ingredients
+            .iter()
+            .map(|i| format!("{} {}", i.label, format_eur(i.price_cents)))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    });
     view! {
         <tr class=row_cls>
             <td class="num">{it.menu_number.clone().unwrap_or_default()}</td>
-            <td>{name}</td>
+            <td>
+                {name}
+                {ingredients.map(|i| view! { <div class="ingredients">{i}</div> })}
+                {build_line.map(|text| view! {
+                    <div class="build" class:note=!comparable class:over=move || over_small() || over_large()>
+                        {text}
+                        {move || (over_small() || over_large()).then(|| view! {
+                            " — teurer! "
+                            <button class="btn ghost small" on:click=move |_| lower()>"Preis senken"</button>
+                        })}
+                    </div>
+                })}
+            </td>
             <td class="num">{format_eur(live_small)}</td>
             <td class="num">
                 <input type="text" inputmode="decimal" placeholder="–"
@@ -1117,5 +1738,104 @@ fn ExtraRow(ex: NextPriceExtra) -> impl IntoView {
                 </span>
             </td>
         </tr>
+    }
+}
+
+#[cfg(all(test, feature = "ssr"))]
+mod pizza_build_tests {
+    use super::ssr::{pizza_builds, PriceItem};
+    use rusterando_shared::models::PizzaExtra;
+
+    fn extra(id: &str, label: &str, price: i64, aliases: &[&str]) -> PizzaExtra {
+        PizzaExtra {
+            id: id.into(),
+            label: label.into(),
+            price_cents: price,
+            sort_order: 0,
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn margherita_plus_extras_per_pizza() {
+        let catalog = vec![
+            extra("kaese", "Extra Käse", 80, &["Goudakäse"]),
+            extra("tomate", "Tomaten", 80, &[]),
+            extra("pilze", "Pilze", 80, &["Pilzen"]),
+            extra("salami", "Salami", 80, &[]),
+        ];
+        let item =
+            |id: &'static str, name: &'static str, desc: &'static str, s: i64, l: Option<i64>| {
+                PriceItem {
+                    id,
+                    name,
+                    description: desc,
+                    small: s,
+                    large: l,
+                }
+            };
+        let items = vec![
+            item(
+                "m",
+                "Pizza Margherita",
+                "mit Tomaten und Goudakäse",
+                530,
+                Some(840),
+            ),
+            item("f", "Pizza Funghi", "mit Pilzen", 630, Some(900)),
+            item(
+                "s",
+                "Pizza Salami",
+                "mit Tomaten, Käse und Salami",
+                610,
+                Some(950),
+            ),
+            item("b", "Pizzabrötchen", "mit Käse und Salami", 400, None),
+            item(
+                "z",
+                "Pizza Mozzarella",
+                "mit Tomaten und Mozzarella",
+                600,
+                Some(850),
+            ),
+            item(
+                "p",
+                "Pizza Portofino",
+                "mit Salami, Sardellen und Kapern",
+                700,
+                Some(990),
+            ),
+        ];
+        let builds = pizza_builds(items.into_iter(), &catalog);
+        let funghi = &builds["f"];
+        assert_eq!((funghi.small_cents, funghi.large_cents), (610, Some(920)));
+        assert_eq!(funghi.extras, vec!["Pilze".to_string()]);
+        let salami = &builds["s"];
+        assert_eq!((salami.small_cents, salami.large_cents), (610, Some(920)));
+        assert_eq!(salami.extras, vec!["Salami".to_string()]);
+        assert!(!builds.contains_key("m"), "the Margherita itself");
+        assert!(!builds.contains_key("b"), "not a pizza");
+        assert!(!builds.contains_key("z"), "no extra beyond the Margherita");
+        assert!(funghi.comparable() && salami.comparable());
+        let portofino = &builds["p"];
+        assert_eq!(
+            portofino.not_extras,
+            vec!["Sardellen".to_string(), "Kapern".to_string()]
+        );
+        assert!(
+            !portofino.comparable(),
+            "Sardellen aren't an extra: no advice"
+        );
+    }
+
+    #[test]
+    fn listed_ingredients_from_descriptions() {
+        use super::ssr::listed_ingredients;
+        assert_eq!(
+            listed_ingredients("mit Schinken, Pilzen, Peperoni, Artischocken und Tabasco"),
+            vec!["Schinken", "Pilzen", "Peperoni", "Artischocken", "Tabasco"]
+        );
+        assert_eq!(listed_ingredients("mit Pilzen"), vec!["Pilzen"]);
+        assert_eq!(listed_ingredients("Spinat & Feta"), vec!["Spinat", "Feta"]);
     }
 }

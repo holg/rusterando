@@ -1,4 +1,4 @@
-// Davids Pizzeria — printable menu (v1)
+// Rusterando — printable menu (v1)
 // Driven by JSON in `sys.inputs.data`. Build the JSON in Rust; tweak this file
 // alone to iterate the visual design.
 
@@ -118,29 +118,6 @@
     #image("/img/ladenfront.jpg", width: 100%)
   ])
 
-  #v(6mm)
-  #align(center, box(
-    fill: col-orange,
-    inset: 6pt,
-    radius: 3pt,
-    width: 78%,
-  )[
-    #set text(fill: col-text, size: 9pt)
-    *Pizzablech 60×40 cm — 28 €* \
-    mit 3 Zutaten nach Wahl, +3 € je weitere
-  ])
-
-  #v(2mm)
-  #align(center, box(
-    fill: col-orange,
-    inset: 6pt,
-    radius: 3pt,
-    width: 78%,
-  )[
-    #set text(fill: col-text, size: 9pt)
-    *Pizza 36 cm Goudakäse — 14 €* \
-    +1 € je weitere Zutat
-  ])
 
   #v(6mm)
   #align(center)[
@@ -407,6 +384,10 @@
 
     #v(3mm)
     #text(size: 14pt, weight: "bold")[#display-url]
+
+    // Why to scan it: what's only online.
+    #v(2.5mm)
+    #text(size: 12pt, weight: "bold", fill: col-red)[Schauen Sie nach Tagesangeboten online!]
 
     #v(2mm)
     #text(size: 8pt, fill: col-muted)[

@@ -1,6 +1,6 @@
 //
 //  AppDelegate.swift
-//  Davids Pizzeria — staff app
+//  Rusterando — staff app
 //
 //  Lifecycle entry point. Handles:
 //   - SceneDelegate registration (UIKit's standard launch flow)

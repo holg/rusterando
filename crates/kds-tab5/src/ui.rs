@@ -1,12 +1,12 @@
 //! The kitchen screen (`kds-ui`, the same Slint file as the STM32 board and
-//! the browser) on the Tab5: a software-rendered window, turned to landscape
-//! on the portrait panel, fed by the touch controller.
+//! the browser) on the panel: a software-rendered window, always landscape,
+//! fed by the touch controller.
 //!
 //! The screen is designed at 480×272 and compiled with a fixed scale factor
-//! (KDS_UI_SCALE = 2.647 → 1271×720); the panel is 720×1280 portrait. Slint
-//! renders rotated by 90° straight into a portrait frame, which the display
-//! copies to the panel; touch points come in portrait coordinates and are
-//! turned back here.
+//! (KDS_UI_SCALE). Tab5: 2.647 → 1271×720 on a 720×1280 *portrait* panel —
+//! Slint renders rotated by 90° straight into the portrait frame, and touch
+//! points come in portrait coordinates and are turned back here. JC1060P470:
+//! 2.133 → 1024×580 on a 1024×600 landscape panel, no rotation.
 
 use std::rc::Rc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -40,9 +40,11 @@ pub enum UiMsg {
     Info(String),
 }
 
+/// The panel is portrait (Tab5): the landscape UI is turned by 90°.
+const PORTRAIT: bool = display::WIDTH < display::HEIGHT;
 /// Physical UI size (landscape).
-const UI_W: u32 = display::HEIGHT as u32;
-const UI_H: u32 = display::WIDTH as u32;
+const UI_W: u32 = (if PORTRAIT { display::HEIGHT } else { display::WIDTH }) as u32;
+const UI_H: u32 = (if PORTRAIT { display::WIDTH } else { display::HEIGHT }) as u32;
 /// Poll interval for touch and timers.
 const TICK: Duration = Duration::from_millis(20);
 /// A touch that stays within this distance (logical px, ≈ 2.8 mm on the
@@ -67,12 +69,12 @@ fn wake(dimmed: &mut bool, last_activity: &mut Instant) {
     }
 }
 
-struct Tab5Platform {
+struct PanelPlatform {
     window: Rc<MinimalSoftwareWindow>,
     start: Instant,
 }
 
-impl Platform for Tab5Platform {
+impl Platform for PanelPlatform {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
         Ok(self.window.clone())
     }
@@ -84,7 +86,7 @@ impl Platform for Tab5Platform {
 
 /// What the screen shows about this device. `status` is written by the
 /// network thread.
-struct Tab5Host {
+struct PanelHost {
     status: Arc<Mutex<String>>,
     /// Why the previous run ended, if it crashed (crashlog).
     crash: Option<String>,
@@ -94,7 +96,7 @@ struct Tab5Host {
     care: Care,
 }
 
-impl kds_ui::Host for Tab5Host {
+impl kds_ui::Host for PanelHost {
     fn decorate(&self, w: &KitchenWindow, core: &kds_ui::Core) {
         let print = self.print.lock().map(|p| p.clone()).unwrap_or_default();
         let (ok, text) = printer_chip(&print, core.demo);
@@ -106,10 +108,13 @@ impl kds_ui::Host for Tab5Host {
         };
         w.set_can_test_print(can);
         w.set_test_print_text(label.into());
-        // No screensaver on the Tab5.
+        // No screensaver on the panel.
         w.set_has_saver(false);
         let mut status = self.status.lock().map(|s| s.clone()).unwrap_or_default();
-        let battery = self.battery.lock().ok().and_then(|b| *b).and_then(|b| b.describe());
+        let pack = self.battery.lock().ok().and_then(|b| *b);
+        w.set_battery_text(pack.and_then(|b| b.short()).unwrap_or_default().into());
+        w.set_battery_low(pack.is_some_and(|b| b.low()));
+        let battery = pack.and_then(|b| b.describe());
         // The battery care switch, only with a pack in.
         let care = match (&battery, self.care.enabled()) {
             (None, _) => "",
@@ -157,7 +162,8 @@ fn distance(a: LogicalPosition, b: LogicalPosition) -> f32 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt()
 }
 
-/// The touch controller (GT911 or ST712x, chosen by the board package).
+/// The touch controller (Tab5: GT911 or ST712x, chosen by the board package;
+/// JC1060P470: GT911).
 struct Touch(bsp::esp_lcd_touch_handle_t);
 
 impl Touch {
@@ -168,7 +174,7 @@ impl Touch {
         Ok(Self(handle))
     }
 
-    /// The first touch point in panel (portrait) coordinates, if touched.
+    /// The first touch point in panel coordinates, if touched.
     fn read(&self) -> Option<(u16, u16)> {
         // SAFETY: live handle; the point buffer holds max_point_cnt entries.
         unsafe {
@@ -185,24 +191,27 @@ impl Touch {
     }
 }
 
-/// Panel (portrait) pixels → UI logical coordinates, matching the rendering
-/// rotation (90°, or 270° when the Tab5 stands upside down) and the window's
-/// scale factor.
+/// Panel pixels → UI logical coordinates, matching the rendering rotation
+/// (portrait panel: 90°, or 270° when the device stands upside down;
+/// landscape panel: none, or 180°) and the window's scale factor.
 fn to_ui(px: u16, py: u16, scale: f32, flipped: bool) -> LogicalPosition {
     let (px, py) = (px as f32, py as f32);
-    let (x, y) = if flipped {
-        ((display::HEIGHT as f32 - 1.0) - py, px)
-    } else {
-        (py, (display::WIDTH as f32 - 1.0) - px)
+    let (w, h) = (display::WIDTH as f32 - 1.0, display::HEIGHT as f32 - 1.0);
+    let (x, y) = match (PORTRAIT, flipped) {
+        (true, false) => (py, w - px),
+        (true, true) => (h - py, px),
+        (false, false) => (px, py),
+        (false, true) => (w - px, h - py),
     };
     LogicalPosition::new(x / scale, y / scale)
 }
 
 fn rotation(flipped: bool) -> RenderingRotation {
-    if flipped {
-        RenderingRotation::Rotate270
-    } else {
-        RenderingRotation::Rotate90
+    match (PORTRAIT, flipped) {
+        (true, false) => RenderingRotation::Rotate90,
+        (true, true) => RenderingRotation::Rotate270,
+        (false, false) => RenderingRotation::NoRotation,
+        (false, true) => RenderingRotation::Rotate180,
     }
 }
 
@@ -223,10 +232,12 @@ pub fn run(
     crash: Option<String>,
     gong: Gong,
     orientation: Orientation,
+    // The Terminal page's parts (Tab5), arriving once started (lab.rs).
+    #[cfg(not(feature = "jc1060p470"))] lab_start: Option<Receiver<crate::lab::Lab>>,
 ) -> Result<()> {
     let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
     window.set_size(PhysicalSize::new(UI_W, UI_H));
-    slint::platform::set_platform(Box::new(Tab5Platform {
+    slint::platform::set_platform(Box::new(PanelPlatform {
         window: window.clone(),
         start: Instant::now(),
     }))
@@ -235,7 +246,7 @@ pub fn run(
     let kitchen = KitchenWindow::new().map_err(|e| anyhow!("slint: {e:?}"))?;
     // Taller tabs: taps landed below the 20px row (see kitchen.slint).
     kitchen.set_header_height(32.0);
-    let host = Tab5Host {
+    let host = PanelHost {
         status: status.clone(),
         crash,
         print: print.clone(),
@@ -260,7 +271,8 @@ pub fn run(
                 .stack_size(16 * 1024)
                 .spawn(move || {
                     let msg = match printing::test_print(&printer) {
-                        Ok(()) => UiMsg::Info("Testdruck gesendet".into()),
+                        Ok(true) => UiMsg::Info("Testdruck gesendet".into()),
+                        Ok(false) => UiMsg::Info("Testdruck gesendet — ohne Logo (Server nicht erreichbar)".into()),
                         Err(e) => UiMsg::Notice(format!("Testdruck fehlgeschlagen: {e:#}")),
                     };
                     let _ = notices.send(msg);
@@ -287,6 +299,18 @@ pub fn run(
         }
         _ => {}
     });
+    // The Terminal page: its buttons run commands once the lab is up.
+    #[cfg(not(feature = "jc1060p470"))]
+    let lab: Rc<std::cell::RefCell<Option<crate::lab::Lab>>> = Rc::new(std::cell::RefCell::new(None));
+    #[cfg(not(feature = "jc1060p470"))]
+    {
+        let lab = lab.clone();
+        kitchen.on_term_command(move |cmd| {
+            if let Some(l) = lab.borrow_mut().as_mut() {
+                l.command(&cmd);
+            }
+        });
+    }
     if demo {
         kds_ui::start_demo();
     }
@@ -315,6 +339,8 @@ pub fn run(
     let mut dimmed = false;
     // A touch that woke the screen, until it's lifted.
     let mut waking_touch = false;
+    // How deep the UI's stack went, logged now and then (it has 64 KB).
+    let mut stack_logged = Instant::now();
 
     loop {
         slint::platform::update_timers_and_animations();
@@ -366,8 +392,44 @@ pub fn run(
             }
         }
 
-        // The Tab5 was turned over: render the other way round.
-        if orientation.flipped() != flipped {
+        // Which way up: the accelerometer, or (Tab5) towards an attached
+        // keyboard; `flip` in the terminal turns it round.
+        #[allow(unused_mut)]
+        let mut want_flipped = orientation.flipped();
+
+        #[cfg(not(feature = "jc1060p470"))]
+        {
+            // The Terminal page's parts are up: show the tab.
+            if lab.borrow().is_none() {
+                if let Some(l) = lab_start.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                    *lab.borrow_mut() = Some(l);
+                    kds_ui::with(|c| c.terminal = true);
+                    kds_ui::render(&kitchen);
+                    log::info!("ui: Terminal page ready");
+                }
+            }
+            if let Some(l) = lab.borrow_mut().as_mut() {
+                if l.tick().typed {
+                    // Typing wakes the screen and shows the terminal.
+                    wake(&mut dimmed, &mut last_activity);
+                    let switched = kds_ui::with(|c| {
+                        c.touched();
+                        std::mem::replace(&mut c.page, 3) != 3
+                    });
+                    if switched {
+                        kds_ui::render(&kitchen);
+                    }
+                }
+                l.show(&kitchen);
+                if l.keyboard_on() {
+                    want_flipped = crate::lab::KEYBOARD_SIDE;
+                }
+                want_flipped ^= l.turned();
+            }
+        }
+
+        // The device was turned over: render the other way round.
+        if want_flipped != flipped {
             flipped = !flipped;
             turned = true;
             if let Some(c) = contact.take() {
@@ -436,6 +498,13 @@ pub fn run(
                     }
                 }
             }
+        }
+
+        if stack_logged.elapsed() >= Duration::from_secs(300) {
+            stack_logged = Instant::now();
+            // SAFETY: plain query about this task.
+            let free = unsafe { sys::uxTaskGetStackHighWaterMark(core::ptr::null_mut()) } as usize;
+            log::info!("ui: stack peak {} of {} bytes", crate::UI_STACK.saturating_sub(free), crate::UI_STACK);
         }
 
         if !dimmed && last_activity.elapsed() >= DIM_AFTER {

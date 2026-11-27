@@ -7,7 +7,11 @@
 //!
 //! The network that worked last (name + channel) is kept in NVS and tried
 //! first, without a scan — that saves the scan's ~2.5 s at every start.
+//!
+//! `wifi off` in the terminal stops it (until `wifi on` or a restart), e.g.
+//! to check the kitchen screen gets by on the LAN module alone.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -18,7 +22,62 @@ use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 
+/// Set once Wi-Fi has brought up the link to the C6 (or given up). Its
+/// set-up (esp_hosted's `transport_drv_reconfigure`) must not run twice at
+/// once — it resets the C6 if the link isn't up yet, so two callers reset
+/// each other's handshake and the link never comes up. Bluetooth (lab.rs)
+/// uses the same link and waits for this.
+#[allow(dead_code)]
+pub static C6_SETTLED: AtomicBool = AtomicBool::new(false);
+
 pub type Wifi = BlockingWifi<EspWifi<'static>>;
+
+/// Wi-Fi wanted (`wifi on`/`off`, net.rs follows). Not kept across a
+/// restart: a kitchen screen always comes back with Wi-Fi.
+/// `WIFI_START_OFF` at build time: starts with Wi-Fi off (a LoRa test
+/// device; `wifi on` still switches it on).
+static WANTED: AtomicBool = AtomicBool::new(option_env!("WIFI_START_OFF").is_none());
+/// What the status line says about Wi-Fi (net.rs keeps it current).
+#[cfg_attr(feature = "jc1060p470", allow(dead_code))]
+static LINK: Mutex<String> = Mutex::new(String::new());
+
+pub fn wanted() -> bool {
+    WANTED.load(Ordering::Relaxed)
+}
+
+#[cfg_attr(feature = "jc1060p470", allow(dead_code))]
+pub fn set_link(text: &str) {
+    if let Ok(mut link) = LINK.lock() {
+        *link = text.to_string();
+    }
+}
+
+/// The terminal's `wifi` commands (lab.rs). `false`: not a Wi-Fi command.
+#[cfg(not(feature = "jc1060p470"))]
+pub fn command(words: &[&str], term: &mut crate::terminal::Terminal) -> bool {
+    use crate::terminal::Tone;
+    let link = LINK.lock().map(|l| l.clone()).unwrap_or_default();
+    match words {
+        ["wifi"] => term.push(
+            Tone::Normal,
+            &if wanted() {
+                format!("{link} (wifi off switches it off)")
+            } else {
+                "Wi-Fi: off (wifi on switches it on again)".to_string()
+            },
+        ),
+        ["wifi", "off"] => {
+            WANTED.store(false, Ordering::Relaxed);
+            term.push(Tone::Warn, "Wi-Fi: switching off, until restart or wifi on");
+        }
+        ["wifi", "on"] => {
+            WANTED.store(true, Ordering::Relaxed);
+            term.push(Tone::Ok, "Wi-Fi: switching on, joining …");
+        }
+        _ => return false,
+    }
+    true
+}
 
 /// Where the last good network is kept.
 static MEMORY: OnceLock<Mutex<EspNvs<NvsDefault>>> = OnceLock::new();
@@ -50,13 +109,17 @@ fn known_networks() -> Vec<Network> {
 }
 
 /// Start Wi-Fi and join a known network, retrying with backoff until one
-/// works. Only fails when no network is compiled in at all.
+/// works. Only fails when no network is compiled in at all. `join: false`
+/// (the LAN carries the kitchen, net.rs): the driver and the C6 link come
+/// up — Bluetooth needs that link — but Wi-Fi stays off, on standby.
 pub fn connect(
     modem: Modem<'static>,
     sysloop: EspSystemEventLoop,
     nvs: EspDefaultNvsPartition,
+    join: bool,
 ) -> Result<Wifi> {
     if known_networks().is_empty() {
+        C6_SETTLED.store(true, Ordering::Relaxed);
         bail!("no Wi-Fi network compiled in (tmp/tab5-wifi.env)");
     }
     match EspNvs::new(nvs.clone(), NVS_NAMESPACE, true) {
@@ -65,10 +128,17 @@ pub fn connect(
         }
         Err(e) => log::warn!("Wi-Fi: no NVS for the last network: {e}"),
     }
-    let mut wifi = BlockingWifi::wrap(EspWifi::new(modem, sysloop.clone(), Some(nvs))?, sysloop)?;
+    let wifi = EspWifi::new(modem, sysloop.clone(), Some(nvs));
+    // The link to the C6 is up (or failed for good): others may use it now.
+    C6_SETTLED.store(true, Ordering::Relaxed);
+    let mut wifi = BlockingWifi::wrap(wifi?, sysloop)?;
     wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))?;
     wifi.start().context("start (is the C6 coprocessor answering?)")?;
-    rejoin(&mut wifi);
+    if join {
+        rejoin(&mut wifi);
+    } else if let Err(e) = wifi.stop() {
+        log::warn!("Wi-Fi: stop: {e}");
+    }
     Ok(wifi)
 }
 
@@ -76,6 +146,9 @@ pub fn connect(
 pub fn rejoin(wifi: &mut Wifi) {
     let mut attempt: u32 = 0;
     loop {
+        if !wanted() {
+            return;
+        }
         match join(wifi) {
             Ok(()) => return,
             Err(e) => {

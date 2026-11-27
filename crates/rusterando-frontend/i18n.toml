@@ -1,5 +1,5 @@
 # leptos_i18n configuration. Only consulted when the crate is built
-# with `--features i18n`. The default Davids build sees a plain
+# with `--features i18n`. The default (German-only) build sees a plain
 # include_str!("locales/de.json") via the de_only shim.
 #
 # Routing model (when feature is on):

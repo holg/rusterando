@@ -69,7 +69,7 @@ enum Channel {
 /// real mid-size order: two categories, an extra with a price, a voucher,
 /// a delivery fee, a scheduled time.
 /// `shop_name` is the CURRENT shop's name, not a constant: this preview used
-/// to hardcode the reference shop ("Davids Pizzeria"), so every tenant's Bon
+/// to hardcode the reference shop's name, so every tenant's Bon
 /// editor advertised someone else's restaurant. Empty falls back to a neutral
 /// placeholder rather than another shop's name.
 fn sample_order(channel: Channel, prepaid: bool, theme: &str, shop_name: &str) -> OrderForKitchen {
@@ -416,12 +416,24 @@ pub fn BonEditor(#[prop(default = true)] editable: bool) -> impl IntoView {
         }
     };
 
-    let do_print = move |_| {
+    // On a device with its own printer (the app on a Sunmi) the sample
+    // prints right there; "An Küchendrucker" still sends it to the kitchen.
+    let on_device = crate::components::device_print::use_device_printer();
+    let to_kitchen = move || {
         printer.dispatch(PrintSampleReceipt {
             delivery: channel.get() == Channel::Delivery,
             prepaid: prepaid.get(),
             theme: theme(),
         });
+    };
+    let do_print = move |_| {
+        use crate::components::device_print::{print_on_device, test_bon_id};
+        let here = on_device.get_untracked()
+            && test_bon_id(channel.get() == Channel::Delivery, prepaid.get(), &theme())
+                .is_some_and(|id| print_on_device(&id));
+        if !here {
+            to_kitchen();
+        }
     };
 
     view! {
@@ -480,7 +492,7 @@ pub fn BonEditor(#[prop(default = true)] editable: bool) -> impl IntoView {
                 </div>
                 <label class="bon-field">
                     <span>"Feste QR-URL (nur bei „feste URL“)"</span>
-                    <input type="text" placeholder="https://davidspizzeria.de"
+                    <input type="text" placeholder="https://musterpizzeria.example"
                         prop:value=move || get("receipt_qr_static_url")
                         on:input=move |ev| set("receipt_qr_static_url", event_target_value(&ev))/>
                 </label>
@@ -514,6 +526,10 @@ pub fn BonEditor(#[prop(default = true)] editable: bool) -> impl IntoView {
                 <div class="bon-actions">
                     <button class="btn primary" on:click=save_all>"Speichern"</button>
                     <button class="btn" on:click=do_print>"Diesen Bon drucken"</button>
+                    <button class="btn" on:click=move |_| to_kitchen()
+                        style:display=move || if on_device.get() { "" } else { "none" }>
+                        "🍳 An Küchendrucker"
+                    </button>
                     {move || printer.value().get().map(|res| match res {
                         Ok(()) => view! { <span class="ok">"✓ an Drucker gesendet"</span> }.into_any(),
                         Err(e) => view! { <span class="error">{format!("Fehler: {e}")}</span> }.into_any(),

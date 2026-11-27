@@ -178,7 +178,11 @@ pub async fn create_zone(form: CreateZoneForm) -> Result<String, ServerFnError> 
     .await;
 
     match res {
-        Ok(_) => Ok(id),
+        Ok(_) => {
+            // Zones print on the menu PDF (and a poster cover): refresh.
+            crate::pages::push::rebuild_menu_pdf_cache().await;
+            Ok(id)
+        }
         Err(sqlx::Error::Database(e)) if e.message().contains("UNIQUE") => Err(ServerFnError::new(
             format!("PLZ '{postcode}' existiert bereits."),
         )),
@@ -259,7 +263,10 @@ pub async fn update_zone(form: UpdateZoneForm) -> Result<(), ServerFnError> {
     .await;
 
     match res {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            crate::pages::push::rebuild_menu_pdf_cache().await;
+            Ok(())
+        }
         Err(sqlx::Error::Database(e)) if e.message().contains("UNIQUE") => Err(ServerFnError::new(
             format!("PLZ '{postcode}' wird bereits genutzt."),
         )),
@@ -300,6 +307,7 @@ pub async fn delete_zone(id: String) -> Result<(), ServerFnError> {
         .execute(&db)
         .await
         .map_err(|e| ServerFnError::new(format!("delete zone: {e}")))?;
+    crate::pages::push::rebuild_menu_pdf_cache().await;
     Ok(())
 }
 
@@ -536,10 +544,10 @@ fn ServedMunicipalitiesSection(
         <p class="hint">
             "Name(n), die Nominatim für den Ort zurückgibt. Für jede:n bekannte:n \
              Stadtteil eine Zone festlegen. Der Eintrag mit \"*\" greift für \
-             alle anderen Stadtteile (z. B. Bauerschaften). Zusätze in Klammern \
-             werden ignoriert: „Lüdinghausen“ trifft auch Nominatims \
-             „Lüdinghausen (Stadt)“ für die Innenstadt; Bauerschaften kommen \
-             als eigener Name (z. B. „Berenbrock“) und können gezielt geroutet werden."
+             alle anderen Stadtteile (z. B. die Feldmark). Zusätze in Klammern \
+             werden ignoriert: „Musterstadt“ trifft auch Nominatims \
+             „Musterstadt (Stadt)“ für die Innenstadt; Ortsteile kommen \
+             als eigener Name (z. B. „Nebendorf“) und können gezielt geroutet werden."
         </p>
         {move || areas.get().served_municipalities.iter().enumerate().map(|(idx, _m)| {
             view! { <MunicipalityRow idx areas zones=zones/> }
@@ -1539,12 +1547,12 @@ fn ShopLocationCard(
         <div class="geo-status shop-location">
             <div class="geo-preview">
                 <label>"Straße + Nr."
-                    <input type="text" class="cell-input" placeholder="z. B. Wolfsberger Str. 18"
+                    <input type="text" class="cell-input" placeholder="z. B. Musterstraße 1"
                         prop:value=move || street.get()
                         on:input=move |ev| street.set(event_target_value(&ev))/>
                 </label>
                 <label>"PLZ Ort"
-                    <input type="text" class="cell-input" placeholder="z. B. 59348 Lüdinghausen"
+                    <input type="text" class="cell-input" placeholder="z. B. 99999 Musterstadt"
                         prop:value=move || plz_city.get()
                         on:input=move |ev| plz_city.set(event_target_value(&ev))/>
                 </label>
@@ -1770,7 +1778,7 @@ fn MunicipalitiesCard(
                 </tbody>
             </table>
             <div class="geo-preview">
-                <input type="text" class="cell-input" placeholder="Gemeinde suchen (z. B. Dülmen)"
+                <input type="text" class="cell-input" placeholder="Gemeinde suchen (z. B. Beispieldorf)"
                     prop:value=move || query.get()
                     on:input=move |ev| {
                         let q = event_target_value(&ev);

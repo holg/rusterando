@@ -169,6 +169,18 @@ pub mod ssr {
                 paid_subtotal += line_total;
             }
             item_count += quantity;
+            // A Tagesangebot: its own name, the item in brackets.
+            let is_offer = opts.offer_rev.is_some();
+            let name = match opts
+                .offer_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+            {
+                Some(offer) if offer != name => format!("{offer} ({name})"),
+                Some(offer) => offer.to_string(),
+                None => name,
+            };
             lines.push(CartLine {
                 id,
                 menu_item_id,
@@ -184,6 +196,7 @@ pub mod ssr {
                 removals,
                 line_total_cents: line_total,
                 is_giveaway,
+                is_offer,
             });
         }
 
@@ -225,6 +238,12 @@ pub mod ssr {
         #[serde(default)]
         pub size: SizeChoice,
         pub size_label: Option<String>,
+        /// A Tagesangebot line (daily_offer.rs): its name, shown instead of
+        /// the item's, and the offer version it was put in at.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub offer_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub offer_rev: Option<String>,
     }
 }
 
@@ -328,7 +347,11 @@ pub async fn add_to_cart(
         SizeChoice::Small | SizeChoice::Single => (small, small_label.clone()),
     };
 
-    let opts = ssr::Options { size, size_label };
+    let opts = ssr::Options {
+        size,
+        size_label,
+        ..Default::default()
+    };
     let opts_json = serde_json::to_string(&opts)
         .map_err(|e| ServerFnError::new(format!("serialise options: {e}")))?;
 
@@ -729,6 +752,7 @@ pub async fn claim_giveaway(sauce_option_id: String) -> Result<CartView, ServerF
     let opts_json = serde_json::to_string(&ssr::Options {
         size: SizeChoice::Single,
         size_label: None,
+        ..Default::default()
     })
     .map_err(|e| ServerFnError::new(format!("serialise opts: {e}")))?;
 
@@ -789,6 +813,74 @@ pub async fn update_cart_line(line_id: String, quantity: i64) -> Result<CartView
             .map_err(|e| ServerFnError::new(format!("update line: {e}")))?;
     }
 
+    ssr::load_cart(&db, &cart_id).await
+}
+
+/// Change a basket line's size, extras, options or "ohne …" in place (the
+/// basket's ✎). The new choice goes in through `add_to_cart` — same prices
+/// and checks — and only then the old line goes, so a refused choice leaves
+/// the basket as it was. The same choice as before merges into the line
+/// itself: then it simply keeps its quantity.
+#[server(
+    name = ReplaceCartLine,
+    prefix = "/api",
+    endpoint = "replace_cart_line"
+)]
+pub async fn replace_cart_line(
+    line_id: String,
+    menu_item_id: String,
+    size: String,
+    #[server(default)] extras_ids: Vec<String>,
+    #[server(default)] selected_option_ids: Vec<String>,
+    #[server(default)] removal_ids: Vec<String>,
+) -> Result<CartView, ServerFnError> {
+    use sqlx::SqlitePool;
+    let cart_id = ssr::current_cart_id().await?;
+    let db = use_context::<SqlitePool>()
+        .ok_or_else(|| ServerFnError::new("database pool missing from context"))?;
+    let quantity_of = |db: SqlitePool, line_id: String, cart_id: String| async move {
+        sqlx::query_scalar::<_, i64>("SELECT quantity FROM cart_items WHERE id = ?1 AND cart_id = ?2")
+            .bind(line_id)
+            .bind(cart_id)
+            .fetch_optional(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("load line: {e}")))
+    };
+    let giveaway: Option<i64> = sqlx::query_scalar(
+        "SELECT COALESCE(is_giveaway, 0) FROM cart_items WHERE id = ?1 AND cart_id = ?2",
+    )
+    .bind(&line_id)
+    .bind(&cart_id)
+    .fetch_optional(&db)
+    .await
+    .map_err(|e| ServerFnError::new(format!("load line: {e}")))?;
+    match giveaway {
+        None => return Err(ServerFnError::new("Diese Position ist nicht mehr im Warenkorb")),
+        Some(g) if g != 0 => return Err(ServerFnError::new("Das Gratis-Angebot lässt sich nicht ändern")),
+        Some(_) => {}
+    }
+    let quantity = quantity_of(db.clone(), line_id.clone(), cart_id.clone())
+        .await?
+        .unwrap_or(1);
+    add_to_cart(menu_item_id, size, quantity, extras_ids, selected_option_ids, removal_ids).await?;
+    let after = quantity_of(db.clone(), line_id.clone(), cart_id.clone()).await?;
+    if after.is_some_and(|q| q != quantity) {
+        // Unchanged choice: it was added onto this very line.
+        sqlx::query("UPDATE cart_items SET quantity = ?1 WHERE id = ?2 AND cart_id = ?3")
+            .bind(quantity)
+            .bind(&line_id)
+            .bind(&cart_id)
+            .execute(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("update line: {e}")))?;
+    } else {
+        sqlx::query("DELETE FROM cart_items WHERE id = ?1 AND cart_id = ?2")
+            .bind(&line_id)
+            .bind(&cart_id)
+            .execute(&db)
+            .await
+            .map_err(|e| ServerFnError::new(format!("delete line: {e}")))?;
+    }
     ssr::load_cart(&db, &cart_id).await
 }
 

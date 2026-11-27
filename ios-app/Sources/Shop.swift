@@ -1,6 +1,6 @@
 //
 //  Shop.swift
-//  Davids Pizzeria / Rusterando
+//  Rusterando
 //
 //  One configured shop on this device. Mirrors the cross-platform
 //  `shops_v1.json` schema and the Kotlin `Shop` data class one-for-one
@@ -58,7 +58,7 @@ enum Role: String, CaseIterable, Codable {
 struct Shop: Codable, Equatable {
     var id: String
     var name: String
-    /// Without trailing slash. e.g. `https://davidspizzeria.de`.
+    /// Without trailing slash. e.g. `https://shop.example.com`.
     var baseUrl: String
     var activeRole: Role
 

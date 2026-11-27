@@ -10,7 +10,7 @@
 # cargo leptos build/watch WIPES pkg/ on each rebuild, so a one-off symlink
 # doesn't survive. Run this ALONGSIDE watch — it re-creates the symlink for
 # WHATEVER <name>.wasm appears (works for any LEPTOS_OUTPUT_NAME: rusterando,
-# davidspizzeria, …), polling once a second.
+# myshop, …), polling once a second.
 #
 # Usage (two terminals):
 #   ENV_FILE=.env.rusterando cargo leptos watch

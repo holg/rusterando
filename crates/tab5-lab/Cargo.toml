@@ -1,0 +1,78 @@
+[package]
+name = "tab5-lab"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+authors = ["Holger Trahe <trahe@mac.com>"]
+repository = "https://github.com/holg/rusterando"
+description = "Sample firmware for the M5Stack Tab5 add-ons: Tab5 Keyboard terminal, LAN (W5500) client, LoRa P2P client/server and AT terminal on the LoRaWAN module (RAK3172)"
+publish = false
+
+# Its own workspace: builds the same from a checkout nested in another
+# (a git worktree under .claude/worktrees/).
+[workspace]
+
+# Not a workspace member (see the root Cargo.toml): it builds for
+# riscv32imafc-esp-espidf like crates/kds-tab5, whose board setup it shares.
+# Build, flash and watch with scripts/build_tab5_lab.sh.
+
+[[bin]]
+name = "tab5-lab"
+harness = false
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+esp-idf-svc = "0.53"
+embedded-svc = "0.29"
+# The terminal's font: ProFont, rasterised once into glyph masks.
+embedded-graphics = "0.8"
+profont = "0.7"
+# The phone terminal's login: HMAC-SHA256 over a random challenge.
+hmac = "0.12"
+sha2 = "0.10"
+# LoRa events to the shop server's admin page (src/report.rs).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+embuild = "0.33"
+
+[package.metadata.esp-idf-sys]
+# Same ESP-IDF as the kitchen firmware (chip revision v1.x, see there).
+esp_idf_version = "tag:v5.4.4"
+esp_idf_tools_install_dir = "global"
+esp_idf_sdkconfig_defaults = ["sdkconfig.defaults"]
+
+# Espressif's Tab5 board package without LVGL: display, I/O expanders,
+# IMU. Rust bindings in esp_idf_svc::sys::bsp.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/m5stack_tab5_noglib", version = "==1.3.2" }
+bindings_header = "src/bsp.h"
+bindings_module = "bsp"
+
+# Bluetooth LE (the phone terminal): the P4 has no radio. esp_hosted reaches
+# the ESP32-C6's controller over SDIO (VHCI); NimBLE's host runs here. Same
+# versions as the kitchen firmware, matching the C6's factory firmware
+# (never flashed by us). esp_wifi_remote: esp_hosted's transport needs it.
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_wifi_remote", version = "==0.8.5" }
+
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "espressif/esp_hosted", version = "==1.4.0" }
+
+# The Nordic UART Service on NimBLE (C), Rust bindings in
+# esp_idf_svc::sys::lab_ble.
+[[package.metadata.esp-idf-sys.extra_components]]
+component_dirs = ["components/lab_ble"]
+bindings_header = "components/lab_ble/include/lab_ble.h"
+bindings_module = "lab_ble"

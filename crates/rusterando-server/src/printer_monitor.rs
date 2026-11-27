@@ -40,7 +40,7 @@ enum ConnState {
 }
 
 /// Spawn the monitor. Watches every printer in `db`'s `kitchen_clients`
-/// (Davids' global pool). `apns` is `None` on a build without APNs configured
+/// (the global pool). `apns` is `None` on a build without APNs configured
 /// — then we still email + log. `branding` supplies the shop name for the
 /// alert text.
 pub fn spawn(db: SqlitePool, apns: Option<ApnsHandle>, branding: BrandingHandle) {

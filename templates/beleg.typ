@@ -195,12 +195,17 @@
       #v(1.5mm)
       #sum-row("davon storniert (nicht im Umsatz)", str(s.cancelled_count))
     ]
+    #if s.at("voucher_count", default: 0) > 0 [
+      #v(1.5mm)
+      #sum-row("Gutscheine gewährt (" + str(s.voucher_count) + " Bestellungen)", eur(s.voucher_cents))
+    ]
   ]
 
   v(5mm)
   text(size: 8.5pt, fill: rgb("#888"))[
     #if s.include_test [ Enthält Sandbox-/Test-Bestellungen — nicht für den Steuerberater. \ ]
     #if s.include_cancelled [ Stornierte Bestellungen sind mit aufgeführt, zählen aber nicht zum Umsatz. \ ]
+    #if s.at("voucher_count", default: 0) > 0 [ Gutscheine: der Rabatt, den der Shop gewährt hat (Werbungskosten) — der Umsatz ist schon nach Rabatt. \ ]
     Die folgenden Seiten enthalten je einen Beleg pro Bestellung.
   ]
 
